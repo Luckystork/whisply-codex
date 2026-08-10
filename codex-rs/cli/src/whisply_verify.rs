@@ -25,7 +25,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tempfile::TempDir;
 
-pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 14;
+pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 15;
 pub(crate) const RELEASE_TEST_MANIFEST_VERSION: u16 = 2;
 
 const ROOT_SENTINELS: &[&str] = &[
@@ -33,6 +33,7 @@ const ROOT_SENTINELS: &[&str] = &[
     "WhisplyCore/Package.swift",
     "WhisplyCore/Package.resolved",
     "Runtime/whisply-codex/codex-rs/Cargo.toml",
+    "scripts/verify_divergence_registry.py",
     "scripts/verify_protected_product_surfaces.py",
     "workers/proxy/package.json",
 ];
@@ -575,6 +576,24 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         },
         remediation: "Reconcile every WCD requirement with current implementation, verification, release, and owner evidence; do not treat planning checkboxes as release proof.",
         failure_summary: "WCD evidence-ledger verification did not complete.",
+    },
+    VerificationCheck {
+        id: "static-divergence-registry-audit",
+        suite: VerifySuite::Static,
+        availability: CheckAvailability::Runnable,
+        action: CheckAction::Run {
+            program: "python3",
+            args: &["scripts/verify_divergence_registry.py", "--json"],
+            working_directory: ".",
+            required_paths: &[
+                "scripts/verify_divergence_registry.py",
+                "Runtime/divergence-registry.md",
+                "Runtime/divergence-registry.audit.json",
+                "Runtime/upstream-base.json",
+            ],
+        },
+        remediation: "Map every committed fork change to a reviewed TDR source scope; do not add a silent runtime or adapter escape hatch.",
+        failure_summary: "Divergence-registry release audit did not complete.",
     },
     VerificationCheck {
         id: "static-runtime-cloud-config-authority",
@@ -2354,7 +2373,7 @@ mod tests {
 
     #[test]
     fn manifest_is_versioned_fixed_and_never_selects_integration_for_all() {
-        assert_eq!(VERIFY_MANIFEST_VERSION, 14);
+        assert_eq!(VERIFY_MANIFEST_VERSION, 15);
         let unique_ids: std::collections::HashSet<_> =
             VERIFY_MANIFEST.iter().map(|check| check.id).collect();
         assert_eq!(VERIFY_MANIFEST.len(), unique_ids.len());
