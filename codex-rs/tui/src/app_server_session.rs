@@ -54,6 +54,8 @@ use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::SkillsExtraRootsSetParams;
+use codex_app_server_protocol::SkillsExtraRootsSetResponse;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
@@ -1414,6 +1416,20 @@ impl AppServerSession {
             .request_typed(ClientRequest::SkillsList { request_id, params })
             .await
             .wrap_err("skills/list failed in TUI")
+    }
+
+    /// Replaces the app-server's runtime-only skill roots with the explicit
+    /// Whisply precedence list. The paths are supplied only by the managed
+    /// launcher/config composition, never by an unvalidated remote caller.
+    pub(crate) async fn skills_extra_roots_set(
+        &mut self,
+        params: SkillsExtraRootsSetParams,
+    ) -> Result<SkillsExtraRootsSetResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::SkillsExtraRootsSet { request_id, params })
+            .await
+            .wrap_err("skills/extraRoots/set failed in TUI")
     }
 
     pub(crate) async fn reload_user_config(&mut self) -> Result<()> {

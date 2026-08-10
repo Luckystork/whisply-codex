@@ -132,6 +132,38 @@ fn parse_listen_url_accepts_websocket_url() {
 }
 
 #[test]
+fn parse_listen_url_accepts_ipv6_loopback_websocket_url() {
+    let transport =
+        parse_listen_url("ws://[::1]:1234").expect("IPv6 loopback listen URL should parse");
+    assert_eq!(
+        transport,
+        ExecServerListenTransport::WebSocket(
+            "[::1]:1234"
+                .parse::<SocketAddr>()
+                .expect("valid loopback socket address")
+        )
+    );
+}
+
+#[test]
+fn parse_listen_url_rejects_non_loopback_websocket_addresses() {
+    for listen_url in [
+        "ws://0.0.0.0:1234",
+        "ws://[::]:1234",
+        "ws://192.0.2.1:1234",
+    ] {
+        let err = parse_listen_url(listen_url)
+            .expect_err("non-loopback websocket listen URL should be rejected");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "websocket --listen URL `{listen_url}` must use a literal loopback IPv4 or IPv6 address"
+            )
+        );
+    }
+}
+
+#[test]
 fn parse_listen_url_rejects_invalid_websocket_url() {
     let err = parse_listen_url("ws://localhost:1234")
         .expect_err("hostname bind address should be rejected");

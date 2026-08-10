@@ -8,7 +8,6 @@ use crate::outgoing_message::OutgoingMessageSender;
 use crate::transport::AppServerTransport;
 use anyhow::Result;
 use app_test_support::create_mock_responses_server_repeating_assistant;
-use app_test_support::write_mock_responses_config_toml;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
@@ -43,7 +42,6 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::trace::SpanData;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -209,17 +207,7 @@ impl TracingHarness {
     }
 }
 
-async fn build_test_config(codex_home: &Path, server_uri: &str) -> Result<Config> {
-    write_mock_responses_config_toml(
-        codex_home,
-        server_uri,
-        &BTreeMap::new(),
-        /*auto_compact_limit*/ 8_192,
-        Some(false),
-        "mock_provider",
-        "compact",
-    )?;
-
+async fn build_test_config(codex_home: &Path, _server_uri: &str) -> Result<Config> {
     Ok(ConfigBuilder::default()
         .codex_home(codex_home.to_path_buf())
         .build()
@@ -257,6 +245,7 @@ async fn build_test_processor(
         config,
         config_manager,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client: None,
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: None,

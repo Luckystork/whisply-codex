@@ -30,6 +30,30 @@ pub(crate) fn subagent_header(source: &Option<SessionSource>) -> Option<String> 
     }
 }
 
+/// Whisply's direct gateway accepts only stable classifications, never an
+/// arbitrary `SubAgentSource::Other` label. These headers are informational
+/// and non-authoritative; policy derives from the authenticated runtime state.
+pub(crate) fn whisply_subagent_header(source: &Option<SessionSource>) -> Option<&'static str> {
+    match source.as_ref()? {
+        SessionSource::SubAgent(subagent) => Some(match subagent {
+            codex_protocol::protocol::SubAgentSource::Review => "review",
+            codex_protocol::protocol::SubAgentSource::Compact => "compact",
+            codex_protocol::protocol::SubAgentSource::MemoryConsolidation => "memory_consolidation",
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn { .. } => "collab_spawn",
+            codex_protocol::protocol::SubAgentSource::Other(_) => "other",
+        }),
+        SessionSource::Internal(
+            codex_protocol::protocol::InternalSessionSource::MemoryConsolidation,
+        ) => Some("memory_consolidation"),
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Unknown => None,
+    }
+}
+
 pub(crate) fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
     if let (Ok(header_name), Ok(header_value)) = (
         name.parse::<http::HeaderName>(),

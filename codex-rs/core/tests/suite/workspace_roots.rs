@@ -1,5 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::RemoveOptions;
 use codex_features::Feature;
@@ -299,7 +300,7 @@ async fn workspace_roots_allow_apply_patch_in_secondary_root() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_roots_allow_patches_but_protect_metadata_directories() -> Result<()> {
     const PATCH_CONTENTS: &str = "workspace root patch access";
-    const PROTECTED_METADATA_DIRECTORIES: [&str; 3] = [".git", ".agents", ".codex"];
+    const PROTECTED_METADATA_DIRECTORIES: [&str; 3] = [".git", ".agents", PROJECT_CONFIG_DIRECTORY];
 
     skip_if_wine_exec!(
         Ok(()),

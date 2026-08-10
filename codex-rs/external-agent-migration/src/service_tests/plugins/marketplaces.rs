@@ -110,6 +110,10 @@ async fn import_plugins_supports_external_agent_plugin_marketplace_layout() {
                 "my-plugins": {
                     "source": "local",
                     "path": marketplace_root
+                },
+                "remote-plugins": {
+                    "source": "github",
+                    "repo": "acme-corp/external-agent-plugins"
                 }
             }
         }))
@@ -141,9 +145,123 @@ async fn import_plugins_supports_external_agent_plugin_marketplace_layout() {
         .import_plugins(
             /*cwd*/ None,
             Some(MigrationDetails {
+                plugins: vec![
+                    PluginsMigration {
+                        marketplace_name: "my-plugins".to_string(),
+                        plugin_names: vec!["cloudflare".to_string()],
+                    },
+                    PluginsMigration {
+                        marketplace_name: "remote-plugins".to_string(),
+                        plugin_names: vec!["formatter".to_string()],
+                    },
+                ],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("import plugins");
+
+    assert_eq!(
+        outcome.succeeded_marketplaces,
+        vec!["my-plugins".to_string()]
+    );
+    assert_eq!(
+        outcome.succeeded_plugin_ids,
+        vec!["cloudflare@my-plugins".to_string()]
+    );
+    assert_eq!(
+        outcome.failed_marketplaces,
+        vec!["remote-plugins".to_string()]
+    );
+    assert_eq!(
+        outcome.failed_plugin_ids,
+        vec!["formatter@remote-plugins".to_string()]
+    );
+    assert_single_plugin_raw_error(
+        &outcome.raw_errors,
+        "plugin_import",
+        "formatter@remote-plugins",
+        /*error_type*/ None,
+    );
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    assert!(config.contains(r#"[plugins."cloudflare@my-plugins"]"#));
+    assert!(config.contains("enabled = true"));
+}
+
+#[tokio::test]
+async fn import_plugins_rejects_credential_bearing_local_package_contents() {
+    let (_root, external_agent_home, codex_home) = fixture_paths();
+    let marketplace_root = external_agent_home.join("local-marketplace");
+    fs::create_dir_all(marketplace_root.join(EXTERNAL_AGENT_PLUGIN_MANIFEST_DIR))
+        .expect("create marketplace manifest directory");
+    fs::create_dir_all(&codex_home).expect("create codex home");
+    for plugin_name in ["safe-plugin", "env-plugin", "pem-plugin", "token-plugin"] {
+        let plugin_root = marketplace_root.join("plugins").join(plugin_name);
+        fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create plugin manifest dir");
+        fs::write(
+            plugin_root.join(".codex-plugin/plugin.json"),
+            format!(r#"{{"name":"{plugin_name}"}}"#),
+        )
+        .expect("write plugin manifest");
+    }
+    fs::write(
+        external_agent_home.join("settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "extraKnownMarketplaces": {
+                "local-tools": {"source": "local", "path": marketplace_root}
+            }
+        }))
+        .expect("serialize settings"),
+    )
+    .expect("write settings");
+    fs::write(
+        marketplace_root
+            .join(EXTERNAL_AGENT_PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json"),
+        r#"{
+          "name": "local-tools",
+          "plugins": [
+            {"name":"safe-plugin","source":"./plugins/safe-plugin"},
+            {"name":"env-plugin","source":"./plugins/env-plugin"},
+            {"name":"pem-plugin","source":"./plugins/pem-plugin"},
+            {"name":"token-plugin","source":"./plugins/token-plugin"}
+          ]
+        }"#,
+    )
+    .expect("write marketplace manifest");
+    fs::write(
+        marketplace_root.join("plugins/safe-plugin/src.js"),
+        "console.log('safe plugin');",
+    )
+    .expect("write safe plugin");
+    fs::write(
+        marketplace_root.join("plugins/env-plugin/.env"),
+        "OPENAI_API_KEY=private",
+    )
+    .expect("write env credential");
+    fs::write(
+        marketplace_root.join("plugins/pem-plugin/readme.txt"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate material",
+    )
+    .expect("write private key");
+    fs::write(
+        marketplace_root.join("plugins/token-plugin/config.txt"),
+        "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz",
+    )
+    .expect("write token");
+
+    let outcome = service_for_paths(external_agent_home, codex_home.clone())
+        .import_plugins(
+            /*cwd*/ None,
+            Some(MigrationDetails {
                 plugins: vec![PluginsMigration {
-                    marketplace_name: "my-plugins".to_string(),
-                    plugin_names: vec!["cloudflare".to_string()],
+                    marketplace_name: "local-tools".to_string(),
+                    plugin_names: vec![
+                        "safe-plugin".to_string(),
+                        "env-plugin".to_string(),
+                        "pem-plugin".to_string(),
+                        "token-plugin".to_string(),
+                    ],
                 }],
                 ..Default::default()
             }),
@@ -152,18 +270,124 @@ async fn import_plugins_supports_external_agent_plugin_marketplace_layout() {
         .expect("import plugins");
 
     assert_eq!(
-        outcome,
-        PluginImportOutcome {
-            succeeded_marketplaces: vec!["my-plugins".to_string()],
-            succeeded_plugin_ids: vec!["cloudflare@my-plugins".to_string()],
-            failed_marketplaces: Vec::new(),
-            failed_plugin_ids: Vec::new(),
-            raw_errors: Vec::new(),
-        }
+        outcome.succeeded_plugin_ids,
+        vec!["safe-plugin@local-tools"]
     );
+    assert_eq!(
+        outcome.failed_plugin_ids,
+        vec![
+            "env-plugin@local-tools",
+            "pem-plugin@local-tools",
+            "token-plugin@local-tools",
+        ]
+    );
+    assert_eq!(outcome.raw_errors.len(), 3);
+    assert!(outcome.raw_errors.iter().all(|error| {
+        error
+            .message
+            .contains("reject credential-bearing package contents")
+    }));
+    assert!(
+        codex_home
+            .join("plugins/cache/local-tools/safe-plugin/local/src.js")
+            .is_file(),
+        "safe local plugin code is still imported"
+    );
+    for plugin_name in ["env-plugin", "pem-plugin", "token-plugin"] {
+        assert!(
+            !codex_home
+                .join("plugins/cache/local-tools")
+                .join(plugin_name)
+                .exists(),
+            "credential-bearing plugin {plugin_name} must not enter the managed cache"
+        );
+    }
+}
+
+#[tokio::test]
+async fn import_plugins_keeps_local_and_git_entries() {
+    let (_root, external_agent_home, codex_home) = fixture_paths();
+    let marketplace_root = external_agent_home.join("mixed-marketplace");
+    let local_plugin_root = marketplace_root.join("plugins/local-plugin");
+    let git_plugin_repository = marketplace_root.join("git-plugin-source");
+    fs::create_dir_all(marketplace_root.join(EXTERNAL_AGENT_PLUGIN_MANIFEST_DIR))
+        .expect("create marketplace manifest directory");
+    fs::create_dir_all(local_plugin_root.join(".codex-plugin"))
+        .expect("create local plugin manifest directory");
+    fs::create_dir_all(git_plugin_repository.join("plugin/.codex-plugin"))
+        .expect("create Git plugin manifest directory");
+    fs::create_dir_all(&codex_home).expect("create codex home");
+    fs::write(
+        external_agent_home.join("settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "extraKnownMarketplaces": {
+                "mixed": {"source": "local", "path": marketplace_root}
+            }
+        }))
+        .expect("serialize settings"),
+    )
+    .expect("write settings");
+    fs::write(
+        marketplace_root
+            .join(EXTERNAL_AGENT_PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json"),
+        r#"{
+          "name": "mixed",
+          "plugins": [
+            {"name": "local-plugin", "source": "./plugins/local-plugin"},
+            {"name": "git-plugin", "source": {"source": "git-subdir", "url": "./git-plugin-source", "path": "plugin"}}
+          ]
+        }"#,
+    )
+    .expect("write marketplace manifest");
+    fs::write(
+        local_plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"local-plugin","version":"0.1.0"}"#,
+    )
+    .expect("write plugin manifest");
+    fs::write(
+        git_plugin_repository.join("plugin/.codex-plugin/plugin.json"),
+        r#"{"name":"git-plugin","version":"0.1.0"}"#,
+    )
+    .expect("write Git plugin manifest");
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "codex-test@example.com"].as_slice(),
+        ["config", "user.name", "Codex Test"].as_slice(),
+        ["add", "."].as_slice(),
+        ["commit", "-m", "initial"].as_slice(),
+    ] {
+        let status = std::process::Command::new("git")
+            .current_dir(&git_plugin_repository)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+
+    let outcome = service_for_paths(external_agent_home, codex_home.clone())
+        .import_plugins(
+            /*cwd*/ None,
+            Some(MigrationDetails {
+                plugins: vec![PluginsMigration {
+                    marketplace_name: "mixed".to_string(),
+                    plugin_names: vec!["local-plugin".to_string(), "git-plugin".to_string()],
+                }],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("import plugins");
+
+    assert_eq!(
+        outcome.succeeded_plugin_ids,
+        vec!["local-plugin@mixed", "git-plugin@mixed"]
+    );
+    assert!(outcome.failed_plugin_ids.is_empty());
+    assert!(outcome.raw_errors.is_empty());
     let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
-    assert!(config.contains(r#"[plugins."cloudflare@my-plugins"]"#));
-    assert!(config.contains("enabled = true"));
+    assert!(config.contains(r#"[plugins."local-plugin@mixed"]"#));
+    assert!(config.contains(r#"[plugins."git-plugin@mixed"]"#));
 }
 
 #[tokio::test]
@@ -476,56 +700,6 @@ async fn import_plugins_supports_relative_external_agent_plugin_marketplace_path
     let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
     assert!(config.contains(r#"[plugins."cloudflare@my-plugins"]"#));
     assert!(config.contains("enabled = true"));
-}
-
-#[tokio::test]
-async fn import_plugins_infers_external_official_marketplace_when_missing_from_settings() {
-    let (_root, external_agent_home, codex_home) = fixture_paths();
-    fs::create_dir_all(&external_agent_home).expect("create external agent home");
-    fs::create_dir_all(&codex_home).expect("create codex home");
-
-    fs::write(
-        external_agent_home.join("settings.json"),
-        format!(
-            r#"{{
-          "enabledPlugins": {{
-            "sample@{EXTERNAL_OFFICIAL_MARKETPLACE_NAME}": true
-          }}
-        }}"#
-        ),
-    )
-    .expect("write settings");
-
-    let outcome = service_for_paths(external_agent_home, codex_home)
-        .import_plugins(
-            /*cwd*/ None,
-            Some(MigrationDetails {
-                plugins: vec![PluginsMigration {
-                    marketplace_name: EXTERNAL_OFFICIAL_MARKETPLACE_NAME.to_string(),
-                    plugin_names: vec!["sample".to_string()],
-                }],
-                ..Default::default()
-            }),
-        )
-        .await
-        .expect("import plugins");
-
-    assert_eq!(
-        outcome.succeeded_marketplaces,
-        vec![EXTERNAL_OFFICIAL_MARKETPLACE_NAME.to_string()]
-    );
-    assert_eq!(outcome.succeeded_plugin_ids, Vec::<String>::new());
-    assert_eq!(outcome.failed_marketplaces, Vec::<String>::new());
-    assert_eq!(
-        outcome.failed_plugin_ids,
-        vec![format!("sample@{EXTERNAL_OFFICIAL_MARKETPLACE_NAME}")]
-    );
-    assert_single_plugin_raw_error(
-        &outcome.raw_errors,
-        "plugin_import",
-        &format!("sample@{EXTERNAL_OFFICIAL_MARKETPLACE_NAME}"),
-        Some("plugin_not_found"),
-    );
 }
 
 #[tokio::test]

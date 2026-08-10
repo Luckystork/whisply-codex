@@ -14744,6 +14744,48 @@
           "type": "object"
         },
         {
+          "description": "Progress for an owner-validated first-party Whisply tool. This is a normal event projection and carries no trusted execution envelope.",
+          "properties": {
+            "method": {
+              "enum": [
+                "whisply/tool/progress"
+              ],
+              "title": "Whisply/tool/progressNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/WhisplyToolProgress"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Whisply/tool/progressNotification",
+          "type": "object"
+        },
+        {
+          "description": "Terminal result for an owner-validated first-party Whisply tool. This is distinct from generic dynamic tools so setup/confirmation suspension cannot be projected as an automatic success.",
+          "properties": {
+            "method": {
+              "enum": [
+                "whisply/tool/result"
+              ],
+              "title": "Whisply/tool/resultNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/WhisplyToolResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Whisply/tool/resultNotification",
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "enum": [
@@ -20246,6 +20288,80 @@
         }
       },
       "type": "object"
+    },
+    "WhisplyToolProgress": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Progress delivered through the normal typed item/event path.",
+      "properties": {
+        "executionID": {
+          "type": "string"
+        },
+        "fraction": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "executionID",
+        "label"
+      ],
+      "title": "WhisplyToolProgress",
+      "type": "object"
+    },
+    "WhisplyToolResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Terminal result delivered through the normal typed item/event path.",
+      "properties": {
+        "content": true,
+        "executionID": {
+          "type": "string"
+        },
+        "receiptID": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "safeSummary": {
+          "type": "string"
+        },
+        "setupRoute": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/WhisplyToolTerminalStatus"
+        }
+      },
+      "required": [
+        "executionID",
+        "safeSummary",
+        "status"
+      ],
+      "title": "WhisplyToolResult",
+      "type": "object"
+    },
+    "WhisplyToolTerminalStatus": {
+      "description": "Terminal execution states. Setup and confirmation are suspension points, not successful authority escalation.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "setup_required",
+        "confirmation_required",
+        "unavailable"
+      ],
+      "type": "string"
     },
     "WindowsSandboxReadiness": {
       "enum": [

@@ -1,20 +1,23 @@
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_apply_patch_sse_response;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
 use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_fake_rollout_with_token_usage;
+#[cfg(target_os = "macos")]
 use app_test_support::create_final_assistant_message_sse_response;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_repeating_assistant;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence_unchecked;
+#[cfg(target_os = "macos")]
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::rollout_path;
 use app_test_support::test_absolute_path;
 use app_test_support::to_response;
-use app_test_support::write_chatgpt_auth;
 use chrono::Utc;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
@@ -65,10 +68,8 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_features::Feature;
-use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -103,6 +104,7 @@ use codex_state::StateRuntime;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathExt;
 use codex_utils_path_uri::LegacyAppPathString;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_remote;
@@ -121,36 +123,24 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use uuid::Uuid;
-use wiremock::Mock;
-use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
-
-use super::analytics::assert_basic_thread_initialized_event;
-use super::analytics::mount_analytics_capture;
-use super::analytics::thread_initialized_event;
-use super::analytics::wait_for_analytics_payload;
-use super::analytics::wait_for_goal_event;
-use super::analytics::wait_for_matching_analytics_event;
 
 #[cfg(windows)]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT: &str = "You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.";
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_paginated_model_context_preserves_original_metadata() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
@@ -167,7 +157,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     )
     .await?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -202,7 +192,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     .await??;
     timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
 
-    let mut secondary = TestAppServer::builder()
+    let mut secondary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -236,7 +226,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     let metadata = state_db
@@ -258,30 +248,33 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_rejects_legacy_writer_owned_by_another_process() -> Result<()> {
     assert_thread_resume_rejects_writer_owned_by_another_process(ThreadHistoryMode::Legacy).await
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_rejects_paginated_writer_owned_by_another_process() -> Result<()> {
     assert_thread_resume_rejects_writer_owned_by_another_process(ThreadHistoryMode::Paginated).await
 }
 
+#[cfg(target_os = "macos")]
 async fn assert_thread_resume_rejects_writer_owned_by_another_process(
     history_mode: ThreadHistoryMode,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
     let ThreadStartResponse { thread, .. } = primary
         .start_thread(ThreadStartParams {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             history_mode: Some(history_mode),
             ..Default::default()
         })
@@ -301,7 +294,7 @@ async fn assert_thread_resume_rejects_writer_owned_by_another_process(
 
     let secondary_sqlite_home = TempDir::new()?;
     let secondary_sqlite_home_path = secondary_sqlite_home.path().to_string_lossy();
-    let mut secondary = TestAppServer::builder()
+    let mut secondary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[(
             "CODEX_SQLITE_HOME",
@@ -391,9 +384,8 @@ async fn wait_for_responses_request_count(
 
 #[tokio::test]
 async fn thread_resume_rejects_unmaterialized_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -403,7 +395,7 @@ async fn thread_resume_rejects_unmaterialized_thread() -> Result<()> {
     // Start a thread.
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..Default::default()
         })
         .await?;
@@ -434,20 +426,21 @@ async fn thread_resume_rejects_unmaterialized_thread() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_with_empty_path_uses_running_thread_id() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..Default::default()
         })
         .await?;
@@ -492,6 +485,7 @@ async fn thread_resume_with_empty_path_uses_running_thread_id() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_running_thread_uses_cached_instruction_sources() -> Result<()> {
     skip_if_remote!(
@@ -501,12 +495,12 @@ async fn thread_resume_running_thread_uses_cached_instruction_sources() -> Resul
 
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let workspace = TempDir::new()?;
     let project_agents = workspace.path().join("AGENTS.md");
     std::fs::write(&project_agents, "project instructions")?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         // TODO(anp): Move the cached instruction-source fixture into the auto environment cwd.
         .without_auto_env()
@@ -568,17 +562,18 @@ async fn thread_resume_running_thread_uses_cached_instruction_sources() -> Resul
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn turn_start_updates_runtime_workspace_roots_for_loaded_thread() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
     let extra_root_tmp = TempDir::new()?;
     let extra_root = extra_root_tmp.path().join("extra-root");
     std::fs::create_dir_all(&extra_root)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -638,14 +633,15 @@ async fn turn_start_updates_runtime_workspace_roots_for_loaded_thread() -> Resul
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_preserves_persisted_approvals_reviewer() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
     let thread_id = {
-        let mut mcp = TestAppServer::builder()
+        let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
             .with_codex_home(codex_home.path())
             .without_auto_env()
             .build_initialized()
@@ -696,7 +692,7 @@ async fn thread_resume_preserves_persisted_approvals_reviewer() -> Result<()> {
         ),
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -718,9 +714,8 @@ async fn thread_resume_preserves_persisted_approvals_reviewer() -> Result<()> {
 
 #[tokio::test]
 async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -828,12 +823,13 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewer_update()
 -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config_toml = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -845,7 +841,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     )?;
 
     let thread_id = {
-        let mut mcp = TestAppServer::builder()
+        let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
             .with_codex_home(codex_home.path())
             .build_initialized()
             .await?;
@@ -901,7 +897,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
         thread.id
     };
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -945,7 +941,7 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
     .await??;
     drop(mcp);
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -966,9 +962,8 @@ async fn thread_resume_preserves_acknowledged_model_effort_and_approvals_reviewe
 
 #[tokio::test]
 async fn thread_goal_get_rejects_unmaterialized_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -1019,9 +1014,8 @@ async fn thread_goal_get_rejects_unmaterialized_thread() -> Result<()> {
 
 #[tokio::test]
 async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
+    managed_resume_config()
         .enable_feature(Feature::Goals)
         .write(codex_home.path())?;
     let thread_id = create_fake_rollout(
@@ -1029,7 +1023,7 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Rollout preview",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1040,7 +1034,7 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
         .await?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     let thread_id = ThreadId::from_string(&thread_id)?;
@@ -1105,9 +1099,8 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
 
 #[tokio::test]
 async fn thread_goal_set_repairs_missing_sqlite_metadata() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
+    managed_resume_config()
         .enable_feature(Feature::Goals)
         .write(codex_home.path())?;
     let thread_id = create_fake_rollout(
@@ -1115,7 +1108,7 @@ async fn thread_goal_set_repairs_missing_sqlite_metadata() -> Result<()> {
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Rollout preview",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1126,7 +1119,7 @@ async fn thread_goal_set_repairs_missing_sqlite_metadata() -> Result<()> {
         .await?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     let thread_id = ThreadId::from_string(&thread_id)?;
@@ -1151,10 +1144,9 @@ async fn thread_goal_set_repairs_missing_sqlite_metadata() -> Result<()> {
 
 #[tokio::test]
 async fn goal_first_live_thread_appears_in_state_db_thread_list() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let codex_home_path = normalized_existing_path(codex_home.path())?;
-    mock_responses_config(&server.uri()).write(&codex_home_path)?;
+    managed_resume_config().write(&codex_home_path)?;
     let config_path = codex_home_path.join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -1205,7 +1197,7 @@ async fn goal_first_live_thread_appears_in_state_db_thread_list() -> Result<()> 
             "thread/list",
             Some(json!({
                 "limit": 10,
-                "modelProviders": ["mock_provider"],
+                "modelProviders": ["whisply"],
                 "sourceKinds": ["vscode"],
                 "archived": false,
                 "cwd": cwd.as_path().to_string_lossy().to_string(),
@@ -1227,21 +1219,16 @@ async fn goal_first_live_thread_appears_in_state_db_thread_list() -> Result<()> 
 }
 
 #[tokio::test]
-async fn thread_resume_tracks_thread_initialized_analytics() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
+async fn thread_resume_uses_managed_metadata_config() -> Result<()> {
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
+    managed_resume_config().write(codex_home.path())?;
 
     let conversation_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     set_session_meta_on_fake_rollout(
@@ -1254,7 +1241,6 @@ async fn thread_resume_tracks_thread_initialized_analytics() -> Result<()> {
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -1272,34 +1258,19 @@ async fn thread_resume_tracks_thread_initialized_analytics() -> Result<()> {
     );
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
 
-    let payload = wait_for_analytics_payload(&server, DEFAULT_READ_TIMEOUT).await?;
-    let event = thread_initialized_event(&payload)?;
-    assert_basic_thread_initialized_event(
-        event,
-        &thread.id,
-        &thread.session_id,
-        "codex_work_desktop",
-        "gpt-5.4",
-        "resumed",
-        "user",
-    );
-    assert_eq!(event["event_params"]["thread_source"], "user");
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
-async fn thread_resume_running_thread_tracks_thread_originator_in_analytics() -> Result<()> {
+async fn thread_resume_running_thread_preserves_thread_source() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -1347,21 +1318,7 @@ async fn thread_resume_running_thread_tracks_thread_originator_in_analytics() ->
         thread: resumed, ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
 
-    let event = wait_for_matching_analytics_event(&server, DEFAULT_READ_TIMEOUT, |event| {
-        event["event_type"] == "codex_thread_initialized"
-            && event["event_params"]["thread_id"] == resumed.id
-            && event["event_params"]["initialization_mode"] == "resumed"
-    })
-    .await?;
-    assert_basic_thread_initialized_event(
-        &event,
-        &resumed.id,
-        &resumed.session_id,
-        "codex_work_desktop",
-        "mock-model",
-        "resumed",
-        "user",
-    );
+    assert_eq!(resumed.thread_source, Some(ThreadSource::User));
     Ok(())
 }
 
@@ -1388,9 +1345,8 @@ fn set_session_meta_on_fake_rollout(
 
 #[tokio::test]
 async fn thread_resume_returns_rollout_history() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let preview = "Saved user message";
     let text_elements = vec![TextElement::new(
@@ -1406,7 +1362,7 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
             .iter()
             .map(|elem| serde_json::to_value(elem).expect("serialize text element"))
             .collect(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1426,7 +1382,7 @@ async fn thread_resume_returns_rollout_history() -> Result<()> {
 
     assert_eq!(thread.id, conversation_id);
     assert_eq!(thread.preview, preview);
-    assert_eq!(thread.model_provider, "mock_provider");
+    assert_eq!(thread.model_provider, "whisply");
     assert!(thread.path.as_ref().expect("thread path").is_absolute());
     assert_eq!(thread.cwd, test_absolute_path("/"));
     assert_eq!(thread.cli_version, "0.0.0");
@@ -1584,9 +1540,8 @@ async fn thread_resume_redacts_payloads_for_chatgpt_remote_clients() -> Result<(
 }
 
 async fn resume_redaction_fixture(client_name: Option<&str>) -> Result<ThreadResumeResponse> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let meta_rfc3339 = "2025-01-05T12:00:00Z";
@@ -1595,7 +1550,7 @@ async fn resume_redaction_fixture(client_name: Option<&str>) -> Result<ThreadRes
         filename_ts,
         meta_rfc3339,
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     append_resume_redaction_history(
@@ -1705,9 +1660,8 @@ fn append_resume_redaction_history(
 
 #[tokio::test]
 async fn thread_resume_can_skip_turns_for_metadata_only_resume() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_text_elements(
         codex_home.path(),
@@ -1715,7 +1669,7 @@ async fn thread_resume_can_skip_turns_for_metadata_only_resume() -> Result<()> {
         "2025-01-05T12:00:00Z",
         "Saved user message",
         Vec::new(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1742,9 +1696,8 @@ async fn thread_resume_can_skip_turns_for_metadata_only_resume() -> Result<()> {
 
 #[tokio::test]
 async fn thread_resume_rejects_archived_session_by_id() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_rollout_with_text_elements(
@@ -1753,7 +1706,7 @@ async fn thread_resume_rejects_archived_session_by_id() -> Result<()> {
         "2025-01-05T12:00:00Z",
         "Archived saved user message",
         Vec::new(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let active_rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -1793,11 +1746,12 @@ async fn thread_resume_rejects_archived_session_by_id() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_keeps_paused_goal_paused() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -1805,9 +1759,8 @@ async fn thread_resume_keeps_paused_goal_paused() -> Result<()> {
         config.replace("personality = true\n", "personality = true\ngoals = true\n"),
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -1889,11 +1842,12 @@ async fn thread_resume_keeps_paused_goal_paused() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -1901,9 +1855,8 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
         config.replace("personality = true\n", "personality = true\ngoals = true\n"),
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -1979,11 +1932,12 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_goal_set_persists_resumable_stopped_statuses() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -1991,9 +1945,8 @@ async fn thread_goal_set_persists_resumable_stopped_statuses() -> Result<()> {
         config.replace("personality = true\n", "personality = true\ngoals = true\n"),
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -2063,9 +2016,8 @@ async fn thread_goal_set_persists_resumable_stopped_statuses() -> Result<()> {
 
 #[tokio::test]
 async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -2077,7 +2029,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2108,7 +2060,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     let thread_id = ThreadId::from_string(&thread_id)?;
@@ -2168,8 +2120,9 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
-async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Result<()> {
+async fn thread_goal_lifecycle_clear_deletes_goal() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(vec![
         responses::sse(vec![
             responses::ev_response_created("materialize-thread"),
@@ -2182,20 +2135,16 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
     ])
     .await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
         config.replace("personality = true\n", "personality = true\ngoals = true\n"),
     )?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT.saturating_mul(2))
         .await?;
 
@@ -2248,55 +2197,6 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
     )
     .await??;
 
-    let created = wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "created", "active").await?;
-    let persisted_goal_id = created["event_params"]["goal_id"]
-        .as_str()
-        .expect("created goal id");
-    assert_eq!(created["event_params"]["thread_id"], thread.id);
-    assert_eq!(created["event_params"]["turn_id"], serde_json::Value::Null);
-    assert_eq!(created["event_params"]["has_token_budget"], true);
-    assert!(created["event_params"]["session_id"].is_string());
-    assert!(created["event_params"]["app_server_client"].is_object());
-    assert!(created["event_params"]["runtime"].is_object());
-    assert!(created["event_params"].get("objective").is_none());
-    assert!(created["event_params"].get("token_budget").is_none());
-
-    let usage = wait_for_goal_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "usage_accounted",
-        "budget_limited",
-    )
-    .await?;
-    let causal_turn_id = usage["event_params"]["turn_id"]
-        .as_str()
-        .expect("accounted usage turn id");
-    assert_eq!(usage["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(usage["event_params"]["cumulative_tokens_accounted"], 200);
-    assert!(
-        usage["event_params"]["cumulative_time_accounted_seconds"]
-            .as_i64()
-            .is_some()
-    );
-
-    let status = wait_for_goal_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "status_changed",
-        "budget_limited",
-    )
-    .await?;
-    assert_eq!(status["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(status["event_params"]["turn_id"], causal_turn_id);
-    assert_eq!(
-        status["event_params"]["cumulative_tokens_accounted"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        status["event_params"]["cumulative_time_accounted_seconds"],
-        serde_json::Value::Null
-    );
-
     let clear_id = mcp
         .send_raw_request(
             "thread/goal/clear",
@@ -2314,11 +2214,6 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
         mcp.read_stream_until_notification_message("thread/goal/cleared"),
     )
     .await??;
-
-    let cleared =
-        wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "cleared", "budget_limited").await?;
-    assert_eq!(cleared["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(cleared["event_params"]["turn_id"], serde_json::Value::Null);
 
     let get_id = mcp
         .send_raw_request(
@@ -2349,16 +2244,15 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
 
 #[tokio::test]
 async fn thread_resume_emits_restored_token_usage_before_next_turn() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_token_usage(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -2400,15 +2294,14 @@ async fn thread_resume_emits_restored_token_usage_before_next_turn() -> Result<(
 
 #[tokio::test]
 async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
@@ -2492,16 +2385,15 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
 
 #[tokio::test]
 async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         filename_ts,
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -2577,16 +2469,15 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
 
 #[tokio::test]
 async fn thread_resume_skips_restored_token_usage_when_turns_are_excluded() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_token_usage(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -2648,9 +2539,8 @@ async fn thread_resume_skips_restored_token_usage_when_turns_are_excluded() -> R
 
 #[tokio::test]
 async fn thread_resume_token_usage_replay_ignores_stale_interrupted_tail_turn() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let meta_rfc3339 = "2025-01-05T12:00:00Z";
@@ -2659,7 +2549,7 @@ async fn thread_resume_token_usage_replay_ignores_stale_interrupted_tail_turn() 
         filename_ts,
         meta_rfc3339,
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
     )?;
     let rollout_file_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
     let persisted_rollout = std::fs::read_to_string(&rollout_file_path)?;
@@ -2734,9 +2624,8 @@ async fn thread_resume_token_usage_replay_ignores_stale_interrupted_tail_turn() 
 
 #[tokio::test]
 async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let meta_rfc3339 = "2025-01-05T12:00:00Z";
@@ -2745,7 +2634,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
         filename_ts,
         meta_rfc3339,
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
     )?;
     let rollout_file_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
     let persisted_rollout = std::fs::read_to_string(&rollout_file_path)?;
@@ -2860,9 +2749,8 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
 
 #[tokio::test]
 async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
+    managed_resume_config()
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
 
@@ -2940,7 +2828,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
-        model_provider: Some("mock_provider".to_string()),
+        model_provider: Some("whisply".to_string()),
         base_instructions: None,
         dynamic_tools: None,
         selected_capability_roots: Vec::new(),
@@ -2989,7 +2877,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
     )?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -3039,9 +2927,8 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
 #[tokio::test]
 async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is_idle() -> Result<()>
 {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let meta_rfc3339 = "2025-01-05T12:00:00Z";
@@ -3051,7 +2938,7 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
         meta_rfc3339,
         "Saved user message",
         Vec::new(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let rollout_file_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -3142,14 +3029,16 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_defers_updated_at_until_turn_start() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    let rollout = setup_rollout_fixture(codex_home.path(), &server.uri()).await?;
+    let rollout = setup_rollout_fixture(codex_home.path()).await?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
     let thread_id = rollout.conversation_id.clone();
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3249,13 +3138,14 @@ async fn thread_resume_defers_updated_at_until_turn_start() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3334,6 +3224,7 @@ async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_rejects_history_when_thread_is_running() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -3351,9 +3242,9 @@ async fn thread_resume_rejects_history_when_thread_is_running() -> Result<()> {
     let _first_response_mock = responses::mount_sse_once(&server, first_body).await;
     let _second_response_mock = responses::mount_response_once(&server, second_response).await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3451,6 +3342,7 @@ async fn thread_resume_rejects_history_when_thread_is_running() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -3468,9 +3360,9 @@ async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result
     let _first_response_mock = responses::mount_sse_once(&server, first_body).await;
     let _second_response_mock = responses::mount_response_once(&server, second_response).await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3618,6 +3510,7 @@ async fn thread_resume_rejects_mismatched_path_for_running_thread_id() -> Result
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> Result<()> {
     let (release_running_turn, running_turn_gate) = oneshot::channel();
@@ -3641,9 +3534,9 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
     ])
     .await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3805,6 +3698,7 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_can_skip_turns_when_thread_is_running() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -3818,9 +3712,9 @@ async fn thread_resume_can_skip_turns_when_thread_is_running() -> Result<()> {
     )
     .await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3874,6 +3768,7 @@ async fn thread_resume_can_skip_turns_when_thread_is_running() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_replays_pending_command_execution_request_approval() -> Result<()> {
     // TODO(anp): Remove after shell approval replay can route target-native cwd across host OSes.
@@ -3898,9 +3793,9 @@ async fn thread_resume_replays_pending_command_execution_request_approval() -> R
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -4011,6 +3906,7 @@ async fn thread_resume_replays_pending_command_execution_request_approval() -> R
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_replays_pending_file_change_request_approval() -> Result<()> {
     // TODO(anp): Remove after apply-patch approval fixtures use a target-native workspace.
@@ -4036,11 +3932,11 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
-    mock_responses_config(&server.uri())
+    managed_response_resume_config(&server.uri())
         .disable_feature(Feature::ShellSnapshot)
         .write(&codex_home)?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -4201,18 +4097,20 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_with_overrides_defers_updated_at_until_turn_start() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
     let RestartedThreadFixture {
         mut mcp,
         thread_id,
         rollout_file_path,
         updated_at,
-    } = start_materialized_thread_and_restart(codex_home.path(), "materialize").await?;
+    } = start_materialized_thread_and_restart(codex_home.path(), "materialize", &server.uri())
+        .await?;
     let expected_updated_at_rfc3339 = "2025-01-07T00:00:00Z";
     set_rollout_mtime(rollout_file_path.as_path(), expected_updated_at_rfc3339)?;
     let before_modified = std::fs::metadata(&rollout_file_path)?.modified()?;
@@ -4265,11 +4163,10 @@ async fn thread_resume_with_overrides_defers_updated_at_until_turn_start() -> Re
 
 #[tokio::test]
 async fn thread_resume_fails_when_required_mcp_server_fails_to_initialize() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    let rollout = setup_rollout_fixture(codex_home.path(), &server.uri()).await?;
-    mock_responses_config(&server.uri())
-        .with_extra_config(
+    let rollout = setup_rollout_fixture(codex_home.path()).await?;
+    managed_resume_config()
+        .with_additional_config(
             r#"[mcp_servers.required_broken]
 command = "codex-definitely-not-a-real-binary"
 required = true"#,
@@ -4309,107 +4206,20 @@ required = true"#,
     Ok(())
 }
 
-#[tokio::test]
-async fn thread_resume_surfaces_cloud_config_bundle_load_errors() -> Result<()> {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/wham/config/bundle"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .insert_header("content-type", "text/html")
-                .set_body_string("<html>nope</html>"),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/oauth/token"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "error": { "code": "refresh_token_invalidated" }
-        })))
-        .mount(&server)
-        .await;
-
-    let codex_home = TempDir::new()?;
-    let model_server = create_mock_responses_server_repeating_assistant("Done").await;
-    let chatgpt_base_url = format!("{}/backend-api", server.uri());
-    mock_responses_config(&model_server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{chatgpt_base_url}""#))
-        .write(codex_home.path())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .refresh_token("stale-refresh-token")
-            .plan_type("business")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123")
-            .account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    let conversation_id = create_fake_rollout_with_text_elements(
-        codex_home.path(),
-        "2025-01-05T12-00-00",
-        "2025-01-05T12:00:00Z",
-        "Saved user message",
-        Vec::new(),
-        Some("mock_provider"),
-        /*git_info*/ None,
-    )?;
-    let refresh_token_url = format!("{}/oauth/token", server.uri());
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[
-            ("OPENAI_API_KEY", None),
-            (
-                REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
-                Some(refresh_token_url.as_str()),
-            ),
-        ])
-        .build_initialized()
-        .await?;
-
-    let resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: conversation_id,
-            ..Default::default()
-        })
-        .await?;
-    let err: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(resume_id)),
-    )
-    .await??;
-
-    assert!(
-        err.error.message.contains("failed to load configuration"),
-        "unexpected error message: {}",
-        err.error.message
-    );
-    assert_eq!(
-        err.error.data,
-        Some(json!({
-            "reason": "cloudConfigBundle",
-            "errorCode": "Auth",
-            "action": "relogin",
-            "statusCode": 401,
-            "detail": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
-        }))
-    );
-
-    Ok(())
-}
-
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_uses_path_over_non_running_thread_id() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
     let RestartedThreadFixture {
         mut mcp,
         thread_id,
         rollout_file_path,
         ..
-    } = start_materialized_thread_and_restart(codex_home.path(), "materialize").await?;
+    } = start_materialized_thread_and_restart(codex_home.path(), "materialize", &server.uri())
+        .await?;
 
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
@@ -4429,16 +4239,15 @@ async fn thread_resume_uses_path_over_non_running_thread_id() -> Result<()> {
 
 #[tokio::test]
 async fn thread_resume_can_load_source_by_external_path() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let external_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_resume_config().write(codex_home.path())?;
     let thread_id = create_fake_rollout(
         external_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "external path history",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let thread_path = rollout_path(external_home.path(), "2025-01-05T12-00-00", &thread_id);
@@ -4470,15 +4279,17 @@ async fn thread_resume_can_load_source_by_external_path() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_supports_history_and_overrides() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
     let RestartedThreadFixture {
         mut mcp, thread_id, ..
-    } = start_materialized_thread_and_restart(codex_home.path(), "seed history").await?;
+    } = start_materialized_thread_and_restart(codex_home.path(), "seed history", &server.uri())
+        .await?;
 
     let history_text = "Hello from history";
     let history = vec![ResponseItem::Message {
@@ -4497,7 +4308,7 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
             thread_id,
             history: Some(history),
             model: Some("mock-model".to_string()),
-            model_provider: Some("mock_provider".to_string()),
+            model_provider: Some("whisply".to_string()),
             ..Default::default()
         })
         .await?;
@@ -4507,7 +4318,7 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert!(!resumed.id.is_empty());
-    assert_eq!(model_provider, "mock_provider");
+    assert_eq!(model_provider, "whisply");
     assert_eq!(resumed.preview, history_text);
     assert_eq!(resumed.status, ThreadStatus::Idle);
 
@@ -4521,11 +4332,13 @@ struct RestartedThreadFixture {
     updated_at: i64,
 }
 
+#[cfg(target_os = "macos")]
 async fn start_materialized_thread_and_restart(
     codex_home: &Path,
     seed_text: &str,
+    gateway_base_url: &str,
 ) -> Result<RestartedThreadFixture> {
-    let mut first_mcp = TestAppServer::builder()
+    let mut first_mcp = app_test_support::managed_whisply_app_server_builder!(gateway_base_url)
         .with_codex_home(codex_home)
         .build_initialized()
         .await?;
@@ -4578,7 +4391,7 @@ async fn start_materialized_thread_and_restart(
 
     drop(first_mcp);
 
-    let second_mcp = TestAppServer::builder()
+    let second_mcp = app_test_support::managed_whisply_app_server_builder!(gateway_base_url)
         .with_codex_home(codex_home)
         .build_initialized()
         .await?;
@@ -4591,6 +4404,7 @@ async fn start_materialized_thread_and_restart(
     })
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_resume_accepts_personality_override() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -4609,16 +4423,16 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
     let response_mock = responses::mount_sse_sequence(&server, vec![first_body, second_body]).await;
 
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_resume_config(&server.uri()).write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
     let start_id = primary
         .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..Default::default()
         })
         .await?;
@@ -4648,7 +4462,7 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
     .await??;
 
     timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
-    let mut secondary = TestAppServer::builder()
+    let mut secondary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -4656,7 +4470,7 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
     let resume_id = secondary
         .send_thread_resume_request(ThreadResumeParams {
             thread_id: thread.id,
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             personality: Some(Personality::Friendly),
             ..Default::default()
         })
@@ -4696,22 +4510,58 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
     assert!(
         developer_texts
             .iter()
-            .any(|text| text.contains("<personality_spec>")),
-        "expected a personality update message in developer input, got {developer_texts:?}"
+            .all(|text| !text.contains("<personality_spec>")),
+        "the signed managed catalog does not advertise a personality template: {developer_texts:?}"
     );
-    let instructions_text = request.instructions_text();
-    assert!(
-        instructions_text.contains(CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT),
-        "expected default base instructions from history, got {instructions_text:?}"
-    );
-
     Ok(())
 }
 
-fn mock_responses_config(server_uri: &str) -> MockResponsesConfig {
-    MockResponsesConfig::new(server_uri)
-        .with_model("gpt-5.4")
-        .enable_feature(Feature::Personality)
+struct ManagedResumeConfig {
+    config: ManagedWhisplyConfig,
+    extra_config: Vec<String>,
+}
+
+impl ManagedResumeConfig {
+    fn enable_feature(mut self, feature: Feature) -> Self {
+        self.config = self.config.enable_feature(feature);
+        self
+    }
+
+    fn disable_feature(mut self, feature: Feature) -> Self {
+        self.config = self.config.disable_feature(feature);
+        self
+    }
+
+    fn with_additional_config(mut self, config: &str) -> Self {
+        self.extra_config.push(config.to_string());
+        self
+    }
+
+    fn write(self, codex_home: &Path) -> std::io::Result<()> {
+        let Self {
+            config,
+            extra_config,
+        } = self;
+        extra_config
+            .iter()
+            .fold(config, |config, extra| config.with_additional_config(extra))
+            .write(codex_home)
+    }
+}
+
+fn managed_resume_config() -> ManagedResumeConfig {
+    ManagedResumeConfig {
+        config: ManagedWhisplyConfig::new()
+            .with_model("gpt-5.6-terra")
+            .enable_feature(Feature::Personality),
+        extra_config: Vec::new(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn managed_response_resume_config(_server_uri: &str) -> ManagedResumeConfig {
+    let mut config = managed_resume_config();
+    config
 }
 
 #[allow(dead_code)]
@@ -4731,8 +4581,8 @@ struct RolloutFixture {
     before_modified: std::time::SystemTime,
 }
 
-async fn setup_rollout_fixture(codex_home: &Path, server_uri: &str) -> Result<RolloutFixture> {
-    mock_responses_config(server_uri).write(codex_home)?;
+async fn setup_rollout_fixture(codex_home: &Path) -> Result<RolloutFixture> {
+    managed_resume_config().write(codex_home)?;
 
     let preview = "Saved user message";
     let filename_ts = "2025-01-05T12-00-00";
@@ -4744,7 +4594,7 @@ async fn setup_rollout_fixture(codex_home: &Path, server_uri: &str) -> Result<Ro
         meta_rfc3339,
         preview,
         Vec::new(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let rollout_file_path = rollout_path(codex_home, filename_ts, &conversation_id);

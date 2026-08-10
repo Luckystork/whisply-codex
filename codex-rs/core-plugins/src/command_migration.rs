@@ -1,6 +1,7 @@
 mod plugin;
 mod render;
 
+use crate::skill_package::validate_skill_document_contents;
 use render::rewrite_terms;
 use render::slugify_name;
 use render::yaml_string;
@@ -166,6 +167,9 @@ fn import_command_sources(
         if let CommandSkillSizeLimit::MaxBytes(max_bytes) = size_limit
             && rendered.len() > max_bytes
         {
+            continue;
+        }
+        if validate_skill_document_contents(rendered.as_bytes()).is_err() {
             continue;
         }
         fs::create_dir_all(&target_dir)?;

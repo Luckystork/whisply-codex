@@ -8,8 +8,14 @@ use serde_json::json;
 use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
-    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home);
+    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("whisply")?);
+    // Whisply resolves its home from WHISPLY_HOME. Explicitly clear the
+    // legacy spelling so the strict-config test cannot read host state.
+    cmd.env("WHISPLY_HOME", codex_home)
+        .env_remove("CODEX_HOME")
+        // The app-server's debug-only override must not replace this test's
+        // temporary home config with inherited runner state.
+        .env_remove("CODEX_APP_SERVER_TEST_USER_CONFIG_FILE");
     Ok(cmd)
 }
 
@@ -35,7 +41,7 @@ foo = "bar"
 #[test]
 fn app_server_emits_json_info_events() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let event = app_server_json_shutdown_event("codex", &["app-server"], codex_home.path())?;
+    let event = app_server_json_shutdown_event("whisply", &["app-server"], codex_home.path())?;
 
     assert_eq!(
         event,

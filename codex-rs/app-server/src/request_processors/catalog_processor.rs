@@ -6,11 +6,9 @@ use futures::StreamExt;
 pub(crate) struct CatalogRequestProcessor {
     pub(super) outgoing: Arc<OutgoingMessageSender>,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
-    pub(super) auth_manager: Arc<AuthManager>,
     pub(super) thread_manager: Arc<ThreadManager>,
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
-    pub(super) workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -103,20 +101,16 @@ impl CatalogRequestProcessor {
     pub(crate) fn new(
         outgoing: Arc<OutgoingMessageSender>,
         skills_watcher: Arc<SkillsWatcher>,
-        auth_manager: Arc<AuthManager>,
         thread_manager: Arc<ThreadManager>,
         config: Arc<Config>,
         config_manager: ConfigManager,
-        workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
     ) -> Self {
         Self {
             outgoing,
             skills_watcher,
-            auth_manager,
             thread_manager,
             config,
             config_manager,
-            workspace_settings_cache,
         }
     }
 
@@ -230,28 +224,6 @@ impl CatalogRequestProcessor {
             .map_err(|err| internal_error(format!("failed to reload config: {err}")))
     }
 
-    async fn workspace_codex_plugins_enabled(
-        &self,
-        config: &Config,
-        auth: Option<&CodexAuth>,
-    ) -> bool {
-        match workspace_settings::codex_plugins_enabled_for_workspace(
-            config,
-            auth,
-            Some(&self.workspace_settings_cache),
-        )
-        .await
-        {
-            Ok(enabled) => enabled,
-            Err(err) => {
-                warn!(
-                    "failed to fetch workspace Codex plugins setting; allowing Codex plugins: {err:#}"
-                );
-                true
-            }
-        }
-    }
-
     async fn list_models(
         thread_manager: Arc<ThreadManager>,
         http_client_factory: codex_http_client::HttpClientFactory,
@@ -345,11 +317,6 @@ impl CatalogRequestProcessor {
             }
             None => self.load_latest_config(/*fallback_cwd*/ None).await?,
         };
-        let auth = self.auth_manager.auth().await;
-        let workspace_codex_plugins_enabled = self
-            .workspace_codex_plugins_enabled(&config, auth.as_ref())
-            .await;
-
         let data = FEATURES
             .iter()
             .map(|spec| {
@@ -383,9 +350,9 @@ impl CatalogRequestProcessor {
                     display_name,
                     description,
                     announcement,
-                    enabled: config.features.enabled(spec.id)
-                        && (workspace_codex_plugins_enabled
-                            || !matches!(spec.id, Feature::Apps | Feature::Plugins)),
+                    // BrokerOnly projects experimental feature state from the
+                    // loaded local configuration without querying workspace settings.
+                    enabled: config.features.enabled(spec.id),
                     default_enabled: spec.default_enabled,
                 }
             })
@@ -500,16 +467,12 @@ impl CatalogRequestProcessor {
         };
 
         let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
-        let auth = self.auth_manager.auth().await;
-        let workspace_codex_plugins_enabled = self
-            .workspace_codex_plugins_enabled(&config, auth.as_ref())
-            .await;
         let skills_service = self.thread_manager.skills_service();
         let plugins_manager = self.thread_manager.plugins_manager();
-        if force_reload
-            && workspace_codex_plugins_enabled
-            && config.features.enabled(Feature::Plugins)
-        {
+        // BrokerOnly local skills must not inherit persisted ChatGPT auth.
+        plugins_manager.set_auth_mode(None);
+        let local_plugins_enabled = config.features.enabled(Feature::Plugins);
+        if force_reload && local_plugins_enabled {
             plugins_manager.clear_cache();
             skills_service.clear_cache();
         }
@@ -542,31 +505,28 @@ impl CatalogRequestProcessor {
                             );
                         }
                     };
-                    let (effective_skill_roots, plugin_skill_snapshots) =
-                        if workspace_codex_plugins_enabled {
-                            let plugins_input = config.plugins_config_input();
-                            if config_layer_stack == plugins_input.config_layer_stack {
-                                let plugins =
-                                    plugins_manager.plugins_for_config(&plugins_input).await;
-                                (
-                                    plugins.effective_plugin_skill_roots(),
-                                    plugins_manager
-                                        .plugin_skill_snapshots_for_config(&plugins_input),
-                                )
-                            } else {
-                                (
-                                    plugins_manager
-                                        .effective_skill_roots_for_layer_stack(
-                                            &config_layer_stack,
-                                            &plugins_input,
-                                        )
-                                        .await,
-                                    None,
-                                )
-                            }
+                    let (effective_skill_roots, plugin_skill_snapshots) = if local_plugins_enabled {
+                        let plugins_input = config.plugins_config_input();
+                        if config_layer_stack == plugins_input.config_layer_stack {
+                            let plugins = plugins_manager.plugins_for_config(&plugins_input).await;
+                            (
+                                plugins.effective_plugin_skill_roots(),
+                                plugins_manager.plugin_skill_snapshots_for_config(&plugins_input),
+                            )
                         } else {
-                            (Vec::new(), None)
-                        };
+                            (
+                                plugins_manager
+                                    .effective_skill_roots_for_layer_stack(
+                                        &config_layer_stack,
+                                        &plugins_input,
+                                    )
+                                    .await,
+                                None,
+                            )
+                        }
+                    } else {
+                        (Vec::new(), None)
+                    };
                     let skills_input = codex_core::skills::HostSkillsLoadInput::new(
                         cwd_abs.clone(),
                         effective_skill_roots,
@@ -603,11 +563,12 @@ impl CatalogRequestProcessor {
         params: SkillsExtraRootsSetParams,
     ) -> Result<SkillsExtraRootsSetResponse, JSONRPCErrorError> {
         let SkillsExtraRootsSetParams { extra_roots } = params;
+        let extra_roots = self
+            .thread_manager
+            .skills_service()
+            .set_account_extra_roots(extra_roots);
         self.skills_watcher
             .register_runtime_extra_roots(&extra_roots);
-        self.thread_manager
-            .skills_service()
-            .set_extra_roots(extra_roots);
         self.outgoing
             .send_server_notification(ServerNotification::SkillsChanged(
                 codex_app_server_protocol::SkillsChangedNotification {},
@@ -628,8 +589,10 @@ impl CatalogRequestProcessor {
             cwds
         };
 
-        let auth = self.auth_manager.auth().await;
         let plugins_manager = self.thread_manager.plugins_manager();
+        // Hook discovery can run during startup; keep it local and never
+        // hydrate persisted ChatGPT auth for plugin sources.
+        plugins_manager.set_auth_mode(None);
         let mut data = Vec::new();
         for cwd in cwds {
             let config = match self
@@ -656,11 +619,7 @@ impl CatalogRequestProcessor {
                     continue;
                 }
             };
-            let workspace_codex_plugins_enabled = self
-                .workspace_codex_plugins_enabled(&config, auth.as_ref())
-                .await;
-            let plugins_enabled =
-                config.features.enabled(Feature::Plugins) && workspace_codex_plugins_enabled;
+            let plugins_enabled = config.features.enabled(Feature::Plugins);
             let plugin_hooks = if plugins_enabled {
                 let plugins_input = config.plugins_config_input();
                 let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;

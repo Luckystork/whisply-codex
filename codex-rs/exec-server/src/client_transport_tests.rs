@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -16,6 +17,49 @@ use crate::NoiseChannelIdentity;
 use crate::NoiseChannelPublicKey;
 use crate::NoiseRendezvousConnectBundle;
 use crate::NoiseRendezvousConnectProvider;
+use crate::client_api::StdioExecServerCommand;
+
+#[test]
+fn stdio_executor_does_not_inherit_managed_runtime_descriptor_contract() {
+    let command = super::stdio_command_process(&StdioExecServerCommand {
+        program: "custom-executor".to_string(),
+        args: Vec::new(),
+        env: [
+            (
+                codex_whisply::GATEWAY_AUTH_FD_ENV.to_string(),
+                "40".to_string(),
+            ),
+            (
+                codex_whisply::GATEWAY_ENDPOINT_FD_ENV.to_string(),
+                "41".to_string(),
+            ),
+            (
+                codex_whisply::NATIVE_BROKER_CAPABILITY_FD_ENV.to_string(),
+                "42".to_string(),
+            ),
+            ("MCP_EXECUTOR_MARKER".to_string(), "kept".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        cwd: None,
+    });
+
+    for name in [
+        codex_whisply::GATEWAY_AUTH_FD_ENV,
+        codex_whisply::GATEWAY_ENDPOINT_FD_ENV,
+        codex_whisply::NATIVE_BROKER_CAPABILITY_FD_ENV,
+    ] {
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(configured, value)| configured == OsStr::new(name) && value.is_none())
+        );
+    }
+    assert!(command.as_std().get_envs().any(|(configured, value)| {
+        configured == OsStr::new("MCP_EXECUTOR_MARKER") && value == Some(OsStr::new("kept"))
+    }));
+}
 
 struct SequenceNoiseConnectProvider {
     bundles: Mutex<VecDeque<NoiseRendezvousConnectBundle>>,

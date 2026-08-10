@@ -7,7 +7,6 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::ConfigTomlLoadResult;
-use crate::legacy_core::config::bootstrap_auth_config;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
 #[cfg(test)]
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
@@ -39,7 +38,7 @@ use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey as AppServerThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
-use codex_cloud_config::cloud_config_bundle_loader_for_storage;
+use codex_app_server_protocol::SkillsExtraRootsSetParams;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
 use codex_config::LoaderOverrides;
@@ -65,12 +64,18 @@ use codex_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use codex_utils_home_dir::find_codex_home;
 use codex_utils_oss::ensure_oss_provider_ready;
 use codex_utils_oss::get_default_model_for_oss_provider;
+use codex_whisply::ManagedGatewayClient;
 use color_eyre::eyre::WrapErr;
 use cwd_prompt::CwdPromptAction;
 pub use session_archive_commands::DeleteConfirmation;
 pub use session_archive_commands::SessionArchiveAction;
 pub use session_archive_commands::SessionArchiveCommandOptions;
 pub use session_archive_commands::run_session_archive_command;
+pub use session_list_export_commands::SessionCollectionScope;
+pub use session_list_export_commands::SessionExport;
+pub use session_list_export_commands::SessionListEntry;
+pub use session_list_export_commands::run_session_export_command;
+pub use session_list_export_commands::run_session_list_command;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
@@ -126,6 +131,7 @@ mod get_git_diff;
 mod git_action_directives;
 mod goal_display;
 mod goal_files;
+mod host_controls_command;
 mod history_cell;
 mod hooks_rpc;
 mod ide_context;
@@ -151,8 +157,6 @@ mod motion;
 mod multi_agents;
 mod named_session_lookup;
 mod notifications;
-#[cfg(any(not(debug_assertions), test))]
-mod npm_registry;
 pub(crate) mod onboarding;
 mod oss_selection;
 mod pager_overlay;
@@ -164,6 +168,7 @@ mod resume_picker;
 mod selection_list;
 mod service_tier_resolution;
 mod session_archive_commands;
+mod session_list_export_commands;
 mod session_log;
 mod session_resume;
 mod session_state;
@@ -194,8 +199,6 @@ pub use update_action::UpdateAction;
 #[cfg(not(debug_assertions))]
 pub use update_action::get_update_action;
 mod update_prompt;
-#[cfg(any(not(debug_assertions), test))]
-mod update_versions;
 mod updates;
 #[cfg(any(not(debug_assertions), test))]
 mod updates_cache;
@@ -258,6 +261,7 @@ async fn start_embedded_app_server(
         log_db,
         state_db,
         environment_manager,
+        /*managed_gateway_client*/ None,
         InProcessAppServerClient::start,
     )
     .await
@@ -322,9 +326,6 @@ fn remove_legacy_tui_log_file(codex_home: &Path) {
 }
 
 fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
     if parsed.port().is_some() {
         return true;
     }
@@ -338,24 +339,21 @@ fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
         .rsplit_once('@')
         .map_or(authority, |(_, host_and_port)| host_and_port);
     let explicit_default_port = match parsed.scheme() {
-        "ws" => 80,
-        "wss" => 443,
+        "ws" => "80",
+        "wss" => "443",
         _ => return false,
     };
-    let expected_host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    host_and_port == format!("{expected_host}:{explicit_default_port}")
+    // `Url::port()` normalizes an explicit default port away. Check the raw
+    // authority instead, which also avoids double-bracketing IPv6 hosts.
+    host_and_port
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port == explicit_default_port)
 }
 
-fn websocket_url_supports_auth_token(parsed: &Url) -> bool {
+fn websocket_url_has_literal_loopback_host(parsed: &Url) -> bool {
     match (parsed.scheme(), parsed.host()) {
-        ("wss", Some(_)) => true,
-        ("ws", Some(url::Host::Domain(domain))) => domain.eq_ignore_ascii_case("localhost"),
-        ("ws", Some(url::Host::Ipv4(addr))) => addr.is_loopback(),
-        ("ws", Some(url::Host::Ipv6(addr))) => addr.is_loopback(),
+        ("ws" | "wss", Some(url::Host::Ipv4(addr))) => addr.is_loopback(),
+        ("ws" | "wss", Some(url::Host::Ipv6(addr))) => addr.is_loopback(),
         _ => false,
     }
 }
@@ -377,12 +375,14 @@ pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndp
         Ok(parsed) => parsed,
         Err(_) => {
             color_eyre::eyre::bail!(
-                "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+                "invalid remote address `{addr}`; expected `ws://LOOPBACK_IP:PORT`, `wss://LOOPBACK_IP:PORT`, `unix://`, or `unix://PATH`"
             );
         }
     };
     if matches!(parsed.scheme(), "ws" | "wss")
-        && parsed.host_str().is_some()
+        && websocket_url_has_literal_loopback_host(&parsed)
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
         && remote_addr_has_explicit_port(addr, &parsed)
         && parsed.path() == "/"
         && parsed.query().is_none()
@@ -395,15 +395,14 @@ pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndp
     }
 
     color_eyre::eyre::bail!(
-        "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+        "invalid remote address `{addr}`; expected `ws://LOOPBACK_IP:PORT`, `wss://LOOPBACK_IP:PORT`, `unix://`, or `unix://PATH`"
     );
 }
 
 pub fn remote_addr_supports_auth_token(endpoint: &RemoteAppServerEndpoint) -> bool {
     match endpoint {
-        RemoteAppServerEndpoint::WebSocket { websocket_url, .. } => {
-            Url::parse(websocket_url).is_ok_and(|parsed| websocket_url_supports_auth_token(&parsed))
-        }
+        RemoteAppServerEndpoint::WebSocket { websocket_url, .. } => Url::parse(websocket_url)
+            .is_ok_and(|parsed| websocket_url_has_literal_loopback_host(&parsed)),
         RemoteAppServerEndpoint::UnixSocket { .. } => false,
     }
 }
@@ -530,6 +529,35 @@ pub(crate) async fn start_embedded_app_server_for_picker(
     .await
 }
 
+/// Starts an embedded server with a test-owned managed gateway. The typed
+/// client never consults process environment or the process-global broker.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) async fn start_embedded_app_server_for_picker_with_managed_gateway(
+    config: &Config,
+    managed_gateway_client: Arc<ManagedGatewayClient>,
+) -> color_eyre::Result<AppServerSession> {
+    let state_db = init_state_db_for_app_server_target(config, &AppServerTarget::Embedded).await?;
+    let client = start_embedded_app_server_with(
+        Arg0DispatchPaths::default(),
+        config.clone(),
+        Vec::new(),
+        LoaderOverrides::without_managed_config_for_tests(),
+        /*strict_config*/ false,
+        CloudConfigBundleLoader::default(),
+        codex_feedback::CodexFeedback::new(),
+        /*log_db*/ None,
+        state_db,
+        Arc::new(EnvironmentManager::default_for_tests()),
+        Some(managed_gateway_client),
+        InProcessAppServerClient::start,
+    )
+    .await?;
+    Ok(AppServerSession::new(
+        AppServerClient::InProcess(client),
+        ThreadParamsMode::Embedded,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server_with<F, Fut>(
     arg0_paths: Arg0DispatchPaths,
@@ -542,6 +570,7 @@ async fn start_embedded_app_server_with<F, Fut>(
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
+    managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     start_client: F,
 ) -> color_eyre::Result<InProcessAppServerClient>
 where
@@ -569,6 +598,7 @@ where
         log_db,
         state_db,
         environment_manager,
+        managed_gateway_client,
         config_warnings,
         session_source: serde_json::from_value(serde_json::json!("cli"))
             .unwrap_or_else(|err| panic!("cli session source should deserialize: {err}")),
@@ -995,12 +1025,10 @@ pub async fn run_main(
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        app_server_target
-            .auth_config_for_cloud_loader(bootstrap_auth_config(&codex_home, &bootstrap_config)?),
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await;
+    // Whisply deliberately keeps all runtime configuration local. The default
+    // loader resolves to no cloud bundle while retaining static local, MDM,
+    // and project configuration layers.
+    let cloud_config_bundle = CloudConfigBundleLoader::default();
 
     let cwd_override = if app_server_target.uses_remote_workspace() {
         None
@@ -1010,26 +1038,7 @@ pub async fn run_main(
 
     let mut manually_selected_oss_provider = None;
     let model_provider_override = if cli.oss {
-        let bootstrap_config_with_cloud_config;
-        let config_toml_for_oss = if cli.oss_provider.is_none() {
-            // The first load intentionally skips cloud config so we can read
-            // auth/base-url settings needed to fetch the bundle. If OSS mode
-            // needs a default provider from config, reload with the bundle.
-            bootstrap_config_with_cloud_config = load_bootstrap_config_or_exit(
-                &codex_home,
-                config_cwd.as_ref(),
-                cli_kv_overrides.clone(),
-                loader_overrides.clone(),
-                strict_config,
-                cloud_config_bundle.clone(),
-            )
-            .await;
-            &bootstrap_config_with_cloud_config.config_toml
-        } else {
-            bootstrap_config_toml
-        };
-
-        let resolved = resolve_oss_provider(cli.oss_provider.as_deref(), config_toml_for_oss);
+        let resolved = resolve_oss_provider(cli.oss_provider.as_deref(), bootstrap_config_toml);
 
         if let Some(provider) = resolved {
             Some(provider)
@@ -1091,11 +1100,6 @@ pub async fn run_main(
     )
     .await;
 
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        app_server_target.auth_config_for_cloud_loader(config.auth_config()),
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await;
     let environment_manager = Arc::new(
         prepared_environment_manager
             .build(Some(local_runtime_paths), config.http_client_factory())
@@ -1283,7 +1287,7 @@ async fn run_ratatui_app(
     manually_selected_oss_provider: Option<String>,
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
-    mut cloud_config_bundle: CloudConfigBundleLoader,
+    cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
@@ -1291,8 +1295,6 @@ async fn run_ratatui_app(
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
     color_eyre::install()?;
-
-    tooltips::announcement::prewarm(initial_config.http_client_factory());
 
     // Forward panic reports through tracing so they appear in the UI status
     // line, but do not swallow the default/color-eyre panic handler.
@@ -1376,6 +1378,10 @@ async fn run_ratatui_app(
     }
     let mut app_server = Some(app_server_session);
 
+    if let Some(app_server) = app_server.as_mut() {
+        register_managed_skill_roots(app_server, &initial_config).await?;
+    }
+
     let should_show_trust_screen_flag =
         !uses_remote_workspace && should_show_trust_screen(&initial_config);
     #[cfg(target_os = "windows")]
@@ -1428,19 +1434,8 @@ async fn run_ratatui_app(
         {
             trust_decision_was_made = onboarding_result.directory_trust_persisted;
         }
-        // If this onboarding run included the login step, always refresh the cloud config bundle
-        // and rebuild config. This avoids missing newly available cloud-managed policy due to login
-        // status detection edge cases.
-        if show_login_screen && !uses_remote_workspace {
-            cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-                initial_config.auth_config(),
-                /*enable_codex_api_key_env*/ false,
-            )
-            .await;
-        }
-
-        // If the user made an explicit trust decision, or we showed the login flow, reload config
-        // so current process state reflects persisted trust/auth changes.
+        // If the user made an explicit trust decision, or we showed the login flow, reload
+        // local configuration so current process state reflects persisted trust/auth changes.
         if onboarding_result.directory_trust_persisted
             || (show_login_screen && !uses_remote_workspace)
         {
@@ -1789,6 +1784,46 @@ async fn run_ratatui_app(
     app_result
 }
 
+/// Registers the only mutable Whisply skill roots through the stable
+/// app-server RPC. The launcher-injected home is compared with the effective
+/// runtime config so a direct invocation can never silently fall back to an
+/// upstream home or register caller-provided arbitrary roots.
+async fn register_managed_skill_roots(
+    app_server: &mut AppServerSession,
+    config: &Config,
+) -> color_eyre::Result<()> {
+    let Some(home) = std::env::var_os("WHISPLY_HOME").filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if app_server.uses_remote_workspace() {
+        // Never disclose local skill paths to a remote app-server endpoint.
+        return Ok(());
+    }
+    let home = PathBuf::from(home);
+    if !home.is_absolute() || config.codex_home.as_path() != home.as_path() {
+        color_eyre::eyre::bail!("managed Whisply skill roots do not match the launcher runtime home");
+    }
+    let home_metadata = std::fs::symlink_metadata(&home)?;
+    if home_metadata.file_type().is_symlink() || !home_metadata.is_dir() {
+        color_eyre::eyre::bail!("managed Whisply skill root is not a real directory");
+    }
+    // Extra roots are process-global. Project roots must instead be resolved per
+    // thread CWD by the skills service, where their project trust and Repo scope
+    // can be evaluated. Only the account-managed user root is safe to register
+    // globally.
+    let roots = managed_skill_extra_roots(&home)?;
+    let _: codex_app_server_protocol::SkillsExtraRootsSetResponse = app_server
+        .skills_extra_roots_set(SkillsExtraRootsSetParams { extra_roots: roots })
+        .await?;
+    Ok(())
+}
+
+fn managed_skill_extra_roots(home: &Path) -> color_eyre::Result<Vec<AbsolutePathBuf>> {
+    Ok(vec![AbsolutePathBuf::from_absolute_path(
+        home.join("skills"),
+    )?])
+}
+
 #[expect(
     clippy::print_stderr,
     reason = "TUI should no longer be displayed, so we can write to stderr."
@@ -2007,6 +2042,25 @@ mod tests {
             .codex_home(temp_dir.path().to_path_buf())
             .build()
             .await
+    }
+
+    #[test]
+    fn managed_skill_extra_roots_are_account_only() -> color_eyre::Result<()> {
+        let temporary = TempDir::new()?;
+        let account_home = temporary.path().join("account");
+        let roots = managed_skill_extra_roots(&account_home)?;
+
+        assert_eq!(
+            roots,
+            vec![AbsolutePathBuf::from_absolute_path(
+                account_home.join("skills")
+            )?]
+        );
+        assert!(roots.iter().all(|root| {
+            !root.as_path().ends_with(".whisply/skills")
+                && !root.as_path().ends_with(".agents/skills")
+        }));
+        Ok(())
     }
 
     fn write_session_rollout(
@@ -2425,11 +2479,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_remote_addr_accepts_secure_websocket_url() {
+    fn resolve_remote_addr_accepts_secure_loopback_websocket_url() {
         assert_eq!(
-            resolve_remote_addr("wss://example.com:443").expect("wss URL should normalize"),
+            resolve_remote_addr("wss://[::1]:443").expect("wss URL should normalize"),
             RemoteAppServerEndpoint::WebSocket {
-                websocket_url: "wss://example.com/".to_string(),
+                websocket_url: "wss://[::1]/".to_string(),
                 auth_token: None,
             }
         );
@@ -2476,12 +2530,16 @@ mod tests {
         for addr in [
             "ws://127.0.0.1",
             "wss://example.com",
+            "ws://localhost:4500",
+            "wss://192.0.2.1:4500",
+            "ws://username@127.0.0.1:4500",
+            "wss://username:password@[::1]:4500",
             "127.0.0.1:4500",
             "https://127.0.0.1:4500",
         ] {
             let err = resolve_remote_addr(addr).expect_err("invalid remote addresses should fail");
             assert!(err.to_string().contains(
-                "expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
+                "expected `ws://LOOPBACK_IP:PORT`, `wss://LOOPBACK_IP:PORT`, `unix://`, or `unix://PATH`"
             ));
         }
     }
@@ -3198,6 +3256,7 @@ mod tests {
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(EnvironmentManager::default_for_tests()),
+            /*managed_gateway_client*/ None,
             |_args| async { Err(std::io::Error::other("boom")) },
         )
         .await;

@@ -32,6 +32,7 @@ use codex_http_client::RouteAwareClientPool;
 use codex_login::AuthManager;
 use codex_mcp::McpRuntime;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_whisply::ManagedGatewayClient;
 use codex_otel::SessionTelemetry;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -58,6 +59,8 @@ pub(crate) struct SessionServices {
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
     pub(crate) auth_manager: Arc<AuthManager>,
+    /// Typed embedded-runtime gateway; ordinary sessions leave this unset.
+    pub(crate) managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,

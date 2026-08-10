@@ -18,22 +18,22 @@ use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_global_mcp_servers;
 use codex_core_plugins::PluginsManager;
-use codex_exec_server::EnvironmentManager;
 use codex_exec_server::HttpClient;
 use codex_exec_server::RouteAwareHttpClient;
-use codex_login::AuthManager;
 use codex_mcp::McpOAuthLoginSupport;
-use codex_mcp::McpRuntimeContext;
 use codex_mcp::ResolvedMcpOAuthScopes;
-use codex_mcp::compute_auth_statuses;
 use codex_mcp::discover_supported_scopes;
+use codex_mcp::is_whisply_rejected_mcp_server;
+use codex_mcp::is_whisply_rejected_mcp_server_name;
 use codex_mcp::oauth_login_support;
 use codex_mcp::resolve_oauth_scopes;
 use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::McpAuthState;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::delete_oauth_tokens;
+use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
 use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::format_env_display;
@@ -296,6 +296,13 @@ async fn validate_profile_v2_migration(
 }
 
 async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Result<()> {
+    let AddArgs {
+        name,
+        transport_args,
+    } = add_args;
+    validate_server_name(&name)?;
+    reject_whisply_mcp_server_name(&name)?;
+
     // Validate any provided overrides even though they are not currently applied.
     let overrides = config_overrides
         .parse_overrides()
@@ -303,13 +310,6 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;
-
-    let AddArgs {
-        name,
-        transport_args,
-    } = add_args;
-
-    validate_server_name(&name)?;
 
     let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
     let mut servers = load_global_mcp_servers(&codex_home)
@@ -483,6 +483,15 @@ async fn load_mcp_manager(config: &Config) -> McpManager {
     McpManager::new(plugins_manager)
 }
 
+/// Construct the configuration-only manager used by `mcp list` and `mcp get`.
+/// It deliberately does not materialize legacy Codex auth just to annotate a
+/// local MCP declaration.
+fn load_offline_mcp_manager(config: &Config) -> McpManager {
+    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    plugins_manager.set_auth_mode(None);
+    McpManager::new(plugins_manager)
+}
+
 async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
     let mcp_manager = load_mcp_manager(config).await;
     let mcp_servers = mcp_manager.configured_servers(config).await;
@@ -492,6 +501,12 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
     let Some(server) = mcp_servers.get(&name) else {
         bail!("No MCP server named '{name}' found.");
     };
+
+    if is_whisply_rejected_mcp_server(&name, server) {
+        bail!(
+            "Whisply does not permit OAuth login for host-owned or ChatGPT-authenticated MCP servers."
+        );
+    }
 
     let (url, http_headers, env_http_headers) = match &server.transport {
         McpServerTransportConfig::StreamableHttp {
@@ -573,31 +588,32 @@ async fn run_logout(config: &Config, logout_args: LogoutArgs) -> Result<()> {
 }
 
 async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
-    let mcp_manager = load_mcp_manager(config).await;
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
-    let auth = auth_manager.auth().await;
-    let mcp_servers = mcp_manager.configured_servers(config).await;
-    let effective_mcp_servers = mcp_manager.effective_servers(config, auth.as_ref()).await;
+    let mcp_manager = load_offline_mcp_manager(config);
+    let mcp_servers = mcp_manager
+        .configured_servers(config)
+        .await
+        .into_iter()
+        .filter(|(name, server)| !is_whisply_rejected_mcp_server(name, server))
+        .collect::<HashMap<_, _>>();
 
     let mut entries: Vec<_> = mcp_servers.iter().collect();
     entries.sort_by_key(|(name, _)| *name);
-    // Standalone `mcp list` only discovers auth through local HTTP; it has
-    // never initialized or routed through remote execution environments.
-    let runtime_context = McpRuntimeContext::new(
-        Arc::new(EnvironmentManager::without_environments(
-            config.http_client_factory(),
-        )),
-        config.cwd.to_path_buf(),
-    );
-    let auth_statuses = compute_auth_statuses(
-        effective_mcp_servers.iter(),
-        config.mcp_oauth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        auth.as_ref(),
-        &runtime_context,
-    )
-    .await;
+    // Auth status is derived from local configuration and stored credentials
+    // only. OAuth metadata discovery would be an ambient HTTP request.
+    let auth_statuses = mcp_servers
+        .iter()
+        .map(|(name, server)| {
+            (
+                name.clone(),
+                offline_mcp_auth_status(
+                    name,
+                    server,
+                    config.mcp_oauth_credentials_store_mode,
+                    config.auth_keyring_backend_kind(),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
 
     if list_args.json {
         let json_entries: Vec<_> = entries
@@ -605,7 +621,7 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
             .map(|(name, cfg)| {
                 let auth_status = auth_statuses
                     .get(name.as_str())
-                    .map(|entry| McpAuthStatus::from(entry.auth_state))
+                    .copied()
                     .unwrap_or(McpAuthStatus::Unsupported);
                 let transport = match &cfg.transport {
                     McpServerTransportConfig::Stdio {
@@ -689,7 +705,7 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
                 let status = format_mcp_status(cfg);
                 let auth_status = auth_statuses
                     .get(name.as_str())
-                    .map(|entry| McpAuthStatus::from(entry.auth_state))
+                    .copied()
                     .unwrap_or(McpAuthStatus::Unsupported)
                     .to_string();
                 stdio_rows.push([
@@ -710,7 +726,7 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
                 let status = format_mcp_status(cfg);
                 let auth_status = auth_statuses
                     .get(name.as_str())
-                    .map(|entry| McpAuthStatus::from(entry.auth_state))
+                    .copied()
                     .unwrap_or(McpAuthStatus::Unsupported)
                     .to_string();
                 let bearer_token_display =
@@ -834,10 +850,13 @@ async fn run_list(config: &Config, list_args: ListArgs) -> Result<()> {
 }
 
 async fn run_get(config: &Config, get_args: GetArgs) -> Result<()> {
-    let mcp_manager = load_mcp_manager(config).await;
+    let mcp_manager = load_offline_mcp_manager(config);
     let mcp_servers = mcp_manager.configured_servers(config).await;
 
     let Some(server) = mcp_servers.get(&get_args.name) else {
+        bail!("No MCP server named '{name}' found.", name = get_args.name);
+    };
+    if is_whisply_rejected_mcp_server(&get_args.name, server) {
         bail!("No MCP server named '{name}' found.", name = get_args.name);
     };
 
@@ -1025,6 +1044,15 @@ fn validate_server_name(name: &str) -> Result<()> {
     }
 }
 
+/// Reject the runtime-reserved name before `mcp add` reads configuration,
+/// persists a server, or probes OAuth metadata.
+fn reject_whisply_mcp_server_name(name: &str) -> Result<()> {
+    if is_whisply_rejected_mcp_server_name(name) {
+        bail!("Whisply does not permit host-owned or ChatGPT-authenticated MCP servers.");
+    }
+    Ok(())
+}
+
 fn format_mcp_status(config: &McpServerConfig) -> String {
     if config.enabled {
         "enabled".to_string()
@@ -1032,5 +1060,84 @@ fn format_mcp_status(config: &McpServerConfig) -> String {
         format!("disabled: {reason}")
     } else {
         "disabled".to_string()
+    }
+}
+
+/// Return the strongest authentication fact that can be established without
+/// contacting an MCP endpoint. An unknown result intentionally stays unknown
+/// instead of turning `mcp list` into OAuth metadata discovery.
+fn offline_mcp_auth_status(
+    name: &str,
+    server: &McpServerConfig,
+    store_mode: codex_config::types::OAuthCredentialsStoreMode,
+    keyring_backend_kind: codex_config::types::AuthKeyringBackendKind,
+) -> McpAuthStatus {
+    if !server.enabled {
+        return McpAuthStatus::Unsupported;
+    }
+
+    let McpServerTransportConfig::StreamableHttp {
+        url,
+        bearer_token_env_var,
+        http_headers,
+        env_http_headers,
+    } = &server.transport
+    else {
+        return McpAuthStatus::Unsupported;
+    };
+
+    let credential_name = server.oauth_credential_name(name);
+    let auth_state = determine_streamable_http_auth_status_from_credentials(
+        credential_name.as_ref(),
+        url,
+        bearer_token_env_var.as_deref(),
+        http_headers.clone(),
+        env_http_headers.clone(),
+        store_mode,
+        keyring_backend_kind,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(McpAuthState::Unknown);
+    auth_state.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mcp_add_rejects_reserved_codex_apps_before_config_or_oauth_side_effects() {
+        let cli = McpCli {
+            // This malformed override is a sentinel: reaching config parsing
+            // would produce an override error before the reserved-name error.
+            config_overrides: CliConfigOverrides {
+                raw_overrides: vec!["sentinel-without-equals".to_string()],
+            },
+            subcommand: McpSubcommand::Add(AddArgs {
+                name: "codex_apps".to_string(),
+                transport_args: AddMcpTransportArgs {
+                    stdio: None,
+                    streamable_http: Some(AddMcpStreamableHttpArgs {
+                        // No listener is started: this endpoint must never be
+                        // reached for a runtime-reserved MCP name.
+                        url: "http://127.0.0.1:9/sentinel".to_string(),
+                        bearer_token_env_var: None,
+                        oauth_client_id: None,
+                        oauth_resource: None,
+                    }),
+                },
+            }),
+        };
+
+        let err = cli
+            .run(LoaderOverrides::default())
+            .await
+            .expect_err("reserved MCP names must be rejected before side effects");
+        assert!(
+            err.to_string().contains(
+                "Whisply does not permit host-owned or ChatGPT-authenticated MCP servers"
+            )
+        );
     }
 }

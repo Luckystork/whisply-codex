@@ -2,7 +2,7 @@ use super::connection_handling_websocket::DEFAULT_READ_TIMEOUT;
 use super::connection_handling_websocket::WsClient;
 use super::connection_handling_websocket::assert_no_message;
 use super::connection_handling_websocket::connect_websocket;
-use super::connection_handling_websocket::create_config_toml;
+use super::connection_handling_websocket::create_managed_config_toml;
 use super::connection_handling_websocket::read_notification_for_method;
 use super::connection_handling_websocket::read_response_and_notification_for_method;
 use super::connection_handling_websocket::read_response_for_id;
@@ -12,7 +12,6 @@ use super::connection_handling_websocket::spawn_websocket_server;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::create_fake_rollout_with_text_elements;
-use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -31,9 +30,8 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn thread_name_updated_broadcasts_for_loaded_threads() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    create_managed_config_toml(codex_home.path(), "never")?;
     let conversation_id = create_rollout(codex_home.path(), "2025-01-05T12-00-00")?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
@@ -97,9 +95,8 @@ async fn thread_name_updated_broadcasts_for_loaded_threads() -> Result<()> {
 
 #[tokio::test]
 async fn thread_name_updated_broadcasts_for_not_loaded_threads() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    create_managed_config_toml(codex_home.path(), "never")?;
     let conversation_id = create_rollout(codex_home.path(), "2025-01-05T12-05-00")?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
@@ -163,7 +160,7 @@ fn create_rollout(codex_home: &std::path::Path, filename_ts: &str) -> Result<Str
         "2025-01-05T12:00:00Z",
         "Saved user message",
         Vec::new(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )
 }

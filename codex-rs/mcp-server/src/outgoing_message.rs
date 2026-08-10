@@ -68,13 +68,13 @@ impl OutgoingMessageSender {
         };
 
         match entry {
-            Some((id, sender)) => {
-                if let Err(err) = sender.send(result) {
-                    warn!("could not notify callback for {id:?} due to: {err:?}");
+            Some((_id, sender)) => {
+                if sender.send(result).is_err() {
+                    warn!("could not notify callback");
                 }
             }
             None => {
-                warn!("could not find callback for {id:?}");
+                warn!("could not find callback");
             }
         }
     }

@@ -1,4 +1,4 @@
-//! Default Codex HTTP client: shared `User-Agent`, `originator`, optional residency header, and
+//! Default Whisply HTTP client: shared `User-Agent`, `originator`, optional residency header, and
 //! `HttpClient` construction.
 //!
 //! Use [`crate::default_client`] or [`codex_login::default_client`] from other crates in this
@@ -12,6 +12,8 @@ use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 pub use codex_http_client::RequestBuilder as CodexRequestBuilder;
 use codex_terminal_detection::user_agent;
+use codex_whisply::WHISPLY_RUNTIME_VERSION;
+use codex_whisply::user_agent as whisply_user_agent;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::header::USER_AGENT;
@@ -37,9 +39,14 @@ use crate::outbound_proxy::AuthRouteConfig;
 /// The full user agent string is returned from the mcp initialize response.
 /// Parenthesis will be added by Codex. This should only specify what goes inside of the parenthesis.
 pub static USER_AGENT_SUFFIX: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
-pub const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
-pub const CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
-pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
+pub const DEFAULT_ORIGINATOR: &str = "whisply_cli";
+pub const WHISPLY_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR: &str =
+    "WHISPLY_INTERNAL_ORIGINATOR_OVERRIDE";
+/// Compatibility symbol for internal upstream callers. It intentionally names
+/// the Whisply-only environment variable and does not restore `CODEX_*` input.
+pub const CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR: &str =
+    WHISPLY_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
+pub const RESIDENCY_HEADER_NAME: &str = "x-whisply-residency";
 
 pub use codex_config::ResidencyRequirement;
 
@@ -61,7 +68,7 @@ pub enum SetOriginatorError {
 }
 
 fn get_originator_value(provided: Option<String>) -> Originator {
-    let value = std::env::var(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR)
+    let value = std::env::var(WHISPLY_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR)
         .ok()
         .or(provided)
         .unwrap_or(DEFAULT_ORIGINATOR.to_string());
@@ -111,7 +118,7 @@ pub fn originator() -> Originator {
         return originator.clone();
     }
 
-    if std::env::var(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR).is_ok() {
+    if std::env::var(WHISPLY_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR).is_ok() {
         let originator = get_originator_value(/*provided*/ None);
         if let Ok(mut guard) = ORIGINATOR.write() {
             match guard.as_ref() {
@@ -147,26 +154,24 @@ pub fn add_originator_header(headers: &mut HeaderMap, originator_value: &str) {
 
 pub fn is_first_party_originator(originator_value: &str) -> bool {
     originator_value == DEFAULT_ORIGINATOR
-        || originator_value == "codex-tui"
-        || originator_value == "codex_vscode"
-        || originator_value.starts_with("Codex ")
+        || originator_value == "whisply_tui"
+        || originator_value == "whisply_mac"
+        || originator_value.starts_with("Whisply ")
 }
 
 pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
-    originator_value == "codex_atlas" || originator_value == "codex_chatgpt_desktop"
+    originator_value == "whisply_mac"
 }
 
 pub fn get_codex_user_agent() -> String {
-    let build_version = env!("CARGO_PKG_VERSION");
     let os_info = os_info::get();
-    let originator = originator();
     let prefix = format!(
-        "{}/{build_version} ({} {}; {}) {}",
-        originator.value.as_str(),
+        "{} ({} {}; {}) {}",
+        whisply_user_agent(WHISPLY_RUNTIME_VERSION),
         os_info.os_type(),
         os_info.version(),
         os_info.architecture().unwrap_or("unknown"),
-        user_agent()
+        user_agent(),
     );
     let suffix = USER_AGENT_SUFFIX
         .lock()
@@ -198,17 +203,17 @@ fn sanitize_user_agent(candidate: String, fallback: &str) -> String {
         .collect();
     if !sanitized.is_empty() && HeaderValue::from_str(sanitized.as_str()).is_ok() {
         tracing::warn!(
-            "Sanitized Codex user agent because provided suffix contained invalid header characters"
+            "Sanitized Whisply user agent because provided suffix contained invalid header characters"
         );
         sanitized
     } else if HeaderValue::from_str(fallback).is_ok() {
         tracing::warn!(
-            "Falling back to base Codex user agent because provided suffix could not be sanitized"
+            "Falling back to base Whisply user agent because provided suffix could not be sanitized"
         );
         fallback.to_string()
     } else {
         tracing::warn!(
-            "Falling back to default Codex originator because base user agent string is invalid"
+            "Falling back to default Whisply originator because base user agent string is invalid"
         );
         originator().value
     }

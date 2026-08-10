@@ -5,14 +5,10 @@ expression: sanitized
 /status
 
 ╭────────────────────────────────────────────╮
-│  >_ OpenAI Codex (v0.0.0)                  │
-│                                            │
-│ Visit                                      │
-│ https://chatgpt.com/codex/settings/usage   │
-│ for up-to-date                             │
-│ information on rate limits and credits     │
+│  >_ Whisply (v0.147.0-wsply.1)             │
 │                                            │
 │  Model:                  gpt-5.1-codex-max │
+│  Model provider:         Whisply           │
 │  Directory: [[workspace]]                  │
 │  Permissions:            Custom (workspace │
 │  Agents.md:              <none>            │

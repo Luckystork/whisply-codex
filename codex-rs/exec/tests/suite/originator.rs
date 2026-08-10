@@ -18,7 +18,7 @@ async fn send_codex_exec_originator() -> anyhow::Result<()> {
         responses::ev_assistant_message("response_1", "Hello, world!"),
         responses::ev_completed("response_1"),
     ]);
-    responses::mount_sse_once_match(&server, header("Originator", "codex_exec"), body).await;
+    responses::mount_sse_once_match(&server, header("Originator", "whisply_exec"), body).await;
 
     test.cmd_with_server(&server)
         .env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR)
@@ -40,11 +40,14 @@ async fn supports_originator_override() -> anyhow::Result<()> {
         responses::ev_assistant_message("response_1", "Hello, world!"),
         responses::ev_completed("response_1"),
     ]);
-    responses::mount_sse_once_match(&server, header("Originator", "codex_exec_override"), body)
+    responses::mount_sse_once_match(&server, header("Originator", "whisply_exec_override"), body)
         .await;
 
     test.cmd_with_server(&server)
-        .env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex_exec_override")
+        .env(
+            CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR,
+            "whisply_exec_override",
+        )
         .arg("--skip-git-repo-check")
         .arg("tell me something")
         .assert()

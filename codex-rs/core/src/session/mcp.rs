@@ -225,60 +225,12 @@ impl Session {
         }
     }
 
-    /// Reconnects the runtime so refreshed Apps tools belong to their new exact client.
+    /// Host-owned Apps tool refresh is retired in the Whisply runtime.
     pub(crate) async fn hard_refresh_latest_codex_apps_tools(
         self: &Arc<Self>,
     ) -> anyhow::Result<Vec<codex_mcp::ToolInfo>> {
-        self.refresh_mcp_if_dirty().await;
-        let _refresh = self
-            .mcp_refresh
-            .acquire()
-            .await
-            .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
-        let auth = self.services.auth_manager.auth().await;
-        self.services
-            .plugins_manager
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
-        let desired = self.latest_mcp_desired_state(auth).await;
-        let selected_capability_roots = self
-            .resolve_selected_capability_roots_for_step(&desired.environments)
-            .await;
-        let ready_selected_capability_roots =
-            Self::ready_selected_capability_roots(&selected_capability_roots);
-        let executor_capability_discovery = self
-            .executor_capability_discovery_for_step(
-                &desired.config,
-                &ready_selected_capability_roots,
-                &desired.environments,
-                desired.windows_sandbox_level,
-            )
-            .await;
-        let mcp_projection = self
-            .services
-            .mcp_manager
-            .runtime_config_for_step(
-                &desired.config,
-                &self.services.mcp_thread_init,
-                &self.services.thread_extension_data,
-                McpThreadIdentity {
-                    session_source: &desired.session_source,
-                    originator: &desired.originator,
-                },
-                &ready_selected_capability_roots,
-                executor_capability_discovery.as_deref(),
-            )
-            .await;
-        let input = self.build_mcp_runtime_input(
-            &desired,
-            mcp_projection,
-            &ready_selected_capability_roots,
-            Some(self.mcp_elicitation_reviewer()),
-        );
-        anyhow::ensure!(
-            input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
-            "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
-        );
-        self.services.mcp_runtime.replace_fresh(input).await
+        let _ = self;
+        anyhow::bail!("Whisply does not host the legacy Codex Apps MCP");
     }
 
     pub(super) fn mark_mcp_runtime_dirty(&self) {

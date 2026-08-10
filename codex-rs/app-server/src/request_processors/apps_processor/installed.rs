@@ -36,6 +36,8 @@ impl AppsRequestProcessor {
         &self,
         params: AppsInstalledParams,
     ) -> Result<AppsInstalledResponse, JSONRPCErrorError> {
+        reject_direct_apps_authority()?;
+
         let started_at = Instant::now();
         let force_refresh = params.force_refresh;
         let mut retained_previous_snapshot = false;

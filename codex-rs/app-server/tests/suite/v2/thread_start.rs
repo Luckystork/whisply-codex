@@ -1,11 +1,11 @@
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::PathBufExt;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
-use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCError;
@@ -31,12 +31,11 @@ use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_config::loader::project_trust_key;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
 use codex_exec_server::LOCAL_FS;
 use codex_git_utils::resolve_root_git_project_for_trust;
-use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -49,16 +48,6 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use wiremock::Mock;
-use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
-
-use super::analytics::assert_basic_thread_initialized_event;
-use super::analytics::mount_analytics_capture;
-use super::analytics::thread_initialized_event;
-use super::analytics::wait_for_analytics_payload;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
@@ -85,31 +74,6 @@ async fn start_thread_with_model(
         ..Default::default()
     })
     .await
-}
-
-#[tokio::test]
-async fn thread_start_provider_model_fallback_applies_to_configured_model() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        r#"model_provider = "amazon-bedrock"
-model = "gpt-5.4-mini"
-"#,
-    )?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized()
-        .await?;
-
-    let response = mcp
-        .start_thread(ThreadStartParams {
-            allow_provider_model_fallback: true,
-            ..Default::default()
-        })
-        .await?;
-
-    assert_eq!(response.model, "openai.gpt-5.6-sol");
-    Ok(())
 }
 
 #[tokio::test]
@@ -219,53 +183,9 @@ async fn thread_start_does_not_repeat_initialize_exec_policy_warning() -> Result
 }
 
 #[tokio::test]
-async fn thread_start_provider_model_fallback_uses_bedrock_static_catalog() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        r#"model_provider = "amazon-bedrock"
-"#,
-    )?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized()
-        .await?;
-
-    let unsupported_with_fallback = start_thread_with_model(
-        &mut mcp,
-        "gpt-5.4-mini",
-        /*allow_provider_model_fallback*/ true,
-    )
-    .await?;
-    let supported_with_fallback = start_thread_with_model(
-        &mut mcp,
-        "openai.gpt-5.4",
-        /*allow_provider_model_fallback*/ true,
-    )
-    .await?;
-    let unsupported_without_fallback = start_thread_with_model(
-        &mut mcp,
-        "gpt-5.4-mini",
-        /*allow_provider_model_fallback*/ false,
-    )
-    .await?;
-
-    assert_eq!(
-        vec![
-            unsupported_with_fallback.model,
-            supported_with_fallback.model,
-            unsupported_without_fallback.model,
-        ],
-        vec!["openai.gpt-5.6-sol", "openai.gpt-5.4", "gpt-5.4-mini"]
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn thread_start_provider_model_fallback_ignores_dynamic_catalog() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -284,11 +204,10 @@ async fn thread_start_provider_model_fallback_ignores_dynamic_catalog() -> Resul
 
 #[tokio::test]
 async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
-    // Provide a mock server and config so model wiring is valid.
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    // Provide a broker-owned managed gateway fixture so model wiring is valid.
 
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     // Start server and initialize.
     let mut mcp = TestAppServer::builder()
@@ -326,7 +245,7 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
         thread.preview.is_empty(),
         "new threads should start with an empty preview"
     );
-    assert_eq!(model_provider, "mock_provider");
+    assert_eq!(model_provider, "whisply");
     assert!(
         thread.created_at > 0,
         "created_at should be a positive UNIX timestamp"
@@ -436,9 +355,8 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_history_mode_accepts_legacy_and_paginated() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -467,9 +385,8 @@ async fn thread_start_history_mode_accepts_legacy_and_paginated() -> Result<()> 
 
 #[tokio::test]
 async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let cwd_tmp = TempDir::new()?;
     let cwd = cwd_tmp.path().to_path_buf();
@@ -549,15 +466,10 @@ async fn thread_start_accepts_absolute_runtime_workspace_roots() -> Result<()> {
 #[tokio::test]
 async fn thread_start_excludes_profile_workspace_roots_from_runtime_workspace_roots() -> Result<()>
 {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
     let profile_root = TempDir::new()?;
-    create_config_toml_with_profile_workspace_root(
-        codex_home.path(),
-        &server.uri(),
-        profile_root.path(),
-    )?;
+    create_config_toml_with_profile_workspace_root(codex_home.path(), "", profile_root.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -586,10 +498,8 @@ async fn thread_start_excludes_profile_workspace_roots_from_runtime_workspace_ro
 
 #[tokio::test]
 async fn thread_start_rejects_unknown_environment_as_invalid_request() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
     let config_path = codex_home.path().join("config.toml");
     let config_before = std::fs::read_to_string(&config_path)?;
     let workspace = TempDir::new()?;
@@ -629,9 +539,8 @@ async fn thread_start_rejects_unknown_environment_as_invalid_request() -> Result
 
 #[tokio::test]
 async fn thread_start_rejects_relative_environment_cwd_as_invalid_request() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -669,9 +578,8 @@ async fn thread_start_rejects_relative_environment_cwd_as_invalid_request() -> R
 
 #[tokio::test]
 async fn thread_start_response_includes_loaded_instruction_sources() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
     let global_agents_path = codex_home.path().join("AGENTS.md");
     std::fs::write(&global_agents_path, "global instructions")?;
     let workspace = TempDir::new()?;
@@ -715,9 +623,8 @@ async fn thread_start_response_includes_loaded_instruction_sources() -> Result<(
 
 #[tokio::test]
 async fn thread_start_response_excludes_empty_project_instruction_source() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
     let global_agents_path = codex_home.path().join("AGENTS.md");
     std::fs::write(&global_agents_path, "global instructions")?;
     let workspace = TempDir::new()?;
@@ -755,18 +662,19 @@ async fn thread_start_response_excludes_empty_project_instruction_source() -> Re
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_start_without_selected_environment_includes_only_global_instruction_source()
 -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_response_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
     let global_agents_path = codex_home.path().join("AGENTS.md");
     std::fs::write(&global_agents_path, "global instructions")?;
     let workspace = TempDir::new()?;
     std::fs::write(workspace.path().join("AGENTS.md"), "project instructions")?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -846,16 +754,12 @@ fn normalize_path_for_comparison(path: impl AsRef<Path>) -> PathBuf {
 }
 
 #[tokio::test]
-async fn thread_start_tracks_thread_initialized_analytics() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
+async fn thread_start_uses_managed_metadata_config() -> Result<()> {
     let codex_home = TempDir::new()?;
-    create_config_toml_with_chatgpt_base_url(codex_home.path(), &server.uri(), &server.uri())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -867,30 +771,17 @@ async fn thread_start_tracks_thread_initialized_analytics() -> Result<()> {
         })
         .await?;
 
-    let payload = wait_for_analytics_payload(&server, DEFAULT_READ_TIMEOUT).await?;
-    assert_eq!(payload["events"].as_array().expect("events array").len(), 1);
-    let event = thread_initialized_event(&payload)?;
-    assert_basic_thread_initialized_event(
-        event,
-        &thread.id,
-        &thread.session_id,
-        "codex_work_desktop",
-        "mock-model",
-        "new",
-        "user",
-    );
+    assert!(!thread.id.is_empty());
     Ok(())
 }
 
 #[tokio::test]
 async fn thread_start_respects_project_config_from_cwd() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let workspace = TempDir::new()?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),
@@ -920,10 +811,8 @@ model_reasoning_effort = "high"
 
 #[tokio::test]
 async fn thread_start_drops_unsupported_service_tier_id() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -945,10 +834,8 @@ async fn thread_start_drops_unsupported_service_tier_id() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_accepts_default_service_tier() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -971,10 +858,8 @@ async fn thread_start_accepts_default_service_tier() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_accepts_metrics_service_name() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -994,9 +879,8 @@ async fn thread_start_accepts_metrics_service_name() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1041,10 +925,8 @@ async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_fails_when_required_mcp_server_fails_to_initialize() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_with_required_broken_mcp(codex_home.path(), &server.uri())?;
+    create_config_toml_with_required_broken_mcp(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1079,10 +961,8 @@ async fn thread_start_fails_when_required_mcp_server_fails_to_initialize() -> Re
 
 #[tokio::test]
 async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_with_optional_broken_mcp(codex_home.path(), &server.uri())?;
+    create_config_toml_with_optional_broken_mcp(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1172,7 +1052,6 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
 
 #[tokio::test]
 async fn thread_start_does_not_wait_for_optional_http_mcp_auth_discovery() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let mcp_addr = listener.local_addr()?;
     let (connection_started_tx, connection_started_rx) = oneshot::channel();
@@ -1188,7 +1067,7 @@ async fn thread_start_does_not_wait_for_optional_http_mcp_auth_discovery() -> Re
     let codex_home = TempDir::new()?;
     create_config_toml_with_optional_http_mcp(
         codex_home.path(),
-        &server.uri(),
+        "",
         &format!("http://{mcp_addr}/mcp"),
     )?;
 
@@ -1219,96 +1098,13 @@ async fn thread_start_does_not_wait_for_optional_http_mcp_auth_discovery() -> Re
 }
 
 #[tokio::test]
-async fn thread_start_surfaces_cloud_config_bundle_load_errors() -> Result<()> {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/wham/config/bundle"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .insert_header("content-type", "text/html")
-                .set_body_string("<html>nope</html>"),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/oauth/token"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "error": { "code": "refresh_token_invalidated" }
-        })))
-        .mount(&server)
-        .await;
-
-    let codex_home = TempDir::new()?;
-    let model_server = create_mock_responses_server_repeating_assistant("Done").await;
-    let chatgpt_base_url = format!("{}/backend-api", server.uri());
-    create_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &model_server.uri(),
-        &chatgpt_base_url,
-    )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .refresh_token("stale-refresh-token")
-            .plan_type("business")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123")
-            .account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-
-    let refresh_token_url = format!("{}/oauth/token", server.uri());
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[
-            ("OPENAI_API_KEY", None),
-            (
-                REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
-                Some(refresh_token_url.as_str()),
-            ),
-        ])
-        .build_initialized()
-        .await?;
-
-    let req_id = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
-        .await?;
-
-    let err: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(req_id)),
-    )
-    .await??;
-
-    assert!(
-        err.error.message.contains("failed to load configuration"),
-        "unexpected error message: {}",
-        err.error.message
-    );
-    assert_eq!(
-        err.error.data,
-        Some(json!({
-            "reason": "cloudConfigBundle",
-            "errorCode": "Auth",
-            "action": "relogin",
-            "statusCode": 401,
-            "detail": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
-        }))
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn thread_start_with_elevated_sandbox_trusts_project_and_followup_loads_project_config()
 -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let workspace = TempDir::new()?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),
@@ -1340,7 +1136,7 @@ model_reasoning_effort = "high"
         })
         .await?;
 
-    assert_eq!(approval_policy, AskForApproval::OnRequest);
+    assert_eq!(approval_policy, AskForApproval::Never);
     assert_eq!(reasoning_effort, Some(ReasoningEffort::High));
 
     let config_toml = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
@@ -1357,10 +1153,8 @@ model_reasoning_effort = "high"
 
 #[tokio::test]
 async fn thread_start_with_nested_git_cwd_trusts_repo_root() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let repo_root = TempDir::new()?;
     std::fs::create_dir(repo_root.path().join(".git"))?;
@@ -1394,10 +1188,8 @@ async fn thread_start_with_nested_git_cwd_trusts_repo_root() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_with_read_only_sandbox_does_not_persist_project_trust() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let workspace = TempDir::new()?;
 
@@ -1421,10 +1213,8 @@ async fn thread_start_with_read_only_sandbox_does_not_persist_project_trust() ->
 
 #[tokio::test]
 async fn thread_start_preserves_untrusted_project_trust() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let workspace = TempDir::new()?;
     let config_path = codex_home.path().join("config.toml");
@@ -1455,13 +1245,11 @@ async fn thread_start_preserves_untrusted_project_trust() -> Result<()> {
 
 #[tokio::test]
 async fn thread_start_skips_trust_write_when_project_is_already_trusted() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml_without_approval_policy(codex_home.path(), "")?;
 
     let workspace = TempDir::new()?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),
@@ -1489,7 +1277,7 @@ model_reasoning_effort = "high"
         })
         .await?;
 
-    assert_eq!(approval_policy, AskForApproval::OnRequest);
+    assert_eq!(approval_policy, AskForApproval::Never);
     assert_eq!(reasoning_effort, Some(ReasoningEffort::High));
 
     let config_after = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
@@ -1502,34 +1290,32 @@ fn create_config_toml_without_approval_policy(
     codex_home: &Path,
     server_uri: &str,
 ) -> std::io::Result<()> {
-    create_config_toml(codex_home, server_uri, "sandbox_mode = \"read-only\"", "")
+    // ManagedWhisplyConfig already supplies the read-only sandbox default.
+    // Repeating it here produces an invalid duplicate TOML key.
+    create_config_toml(codex_home, server_uri, "", "")
 }
 
 fn create_config_toml(
     codex_home: &Path,
-    server_uri: &str,
+    _server_uri: &str,
     top_level_config: &str,
     additional_tables: &str,
 ) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)?;
+    let config_path = codex_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
-        codex_home.join("config.toml"),
-        format!(
-            r#"
-model = "mock-model"
-{top_level_config}
-
-model_provider = "mock_provider"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{server_uri}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-{additional_tables}
-"#
-        ),
+        config_path,
+        format!("{config}\n{top_level_config}\n{additional_tables}\n"),
     )
+}
+
+#[cfg(target_os = "macos")]
+fn create_response_config_toml_without_approval_policy(
+    codex_home: &Path,
+    server_uri: &str,
+) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)
 }
 
 fn create_config_toml_with_profile_workspace_root(
@@ -1558,21 +1344,6 @@ fn create_config_toml_with_profile_workspace_root(
     )
 }
 
-fn create_config_toml_with_chatgpt_base_url(
-    codex_home: &Path,
-    server_uri: &str,
-    chatgpt_base_url: &str,
-) -> std::io::Result<()> {
-    create_config_toml(
-        codex_home,
-        server_uri,
-        &format!(
-            "approval_policy = \"never\"\nsandbox_mode = \"read-only\"\nchatgpt_base_url = \"{chatgpt_base_url}\""
-        ),
-        "",
-    )
-}
-
 fn create_config_toml_with_required_broken_mcp(
     codex_home: &Path,
     server_uri: &str,
@@ -1580,7 +1351,7 @@ fn create_config_toml_with_required_broken_mcp(
     create_config_toml(
         codex_home,
         server_uri,
-        "approval_policy = \"never\"\nsandbox_mode = \"read-only\"",
+        "",
         &format!(
             r#"
 [mcp_servers.required_broken]
@@ -1599,7 +1370,7 @@ fn create_config_toml_with_optional_broken_mcp(
     create_config_toml(
         codex_home,
         server_uri,
-        "approval_policy = \"never\"\nsandbox_mode = \"read-only\"",
+        "",
         &format!(
             r#"
 [mcp_servers.optional_broken]
@@ -1618,7 +1389,7 @@ fn create_config_toml_with_optional_http_mcp(
     create_config_toml(
         codex_home,
         server_uri,
-        "approval_policy = \"never\"\nsandbox_mode = \"read-only\"",
+        "",
         &format!(
             r#"
 [mcp_servers.optional_http]

@@ -1,11 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
-use app_test_support::create_mock_responses_server_repeating_assistant;
-use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
 use codex_app_server_protocol::ExperimentalFeature;
@@ -19,7 +15,6 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_config::LoaderOverrides;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::ConfigBuilder;
 use codex_features::FEATURES;
 use codex_features::Stage;
@@ -29,12 +24,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use wiremock::Mock;
 use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::header;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -103,42 +93,29 @@ async fn experimental_feature_list_returns_feature_metadata_with_stage() -> Resu
 }
 
 #[tokio::test]
-async fn experimental_feature_list_marks_apps_and_plugins_disabled_by_workspace_policy()
--> Result<()> {
+async fn experimental_feature_list_uses_local_policy_without_workspace_settings_io() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let server = MockServer::start().await;
+    let outbound_probe = MockServer::start().await;
+    let proxy_uri = outbound_probe.uri();
     std::fs::write(
         codex_home.path().join("config.toml"),
-        format!(
-            r#"chatgpt_base_url = "{}/backend-api/"
-"#,
-            server.uri()
-        ),
+        "[features]\napps = true\nplugins = true\n",
     )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123")
-            .plan_type("team"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/accounts/account-123/settings"))
-        .and(header("authorization", "Bearer chatgpt-token"))
-        .and(header("chatgpt-account-id", "account-123"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(r#"{"beta_settings":{"enable_plugins":false}}"#),
-        )
-        .mount(&server)
-        .await;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .without_managed_config()
+        .with_env_overrides(&[
+            ("HTTP_PROXY", Some(proxy_uri.as_str())),
+            ("http_proxy", Some(proxy_uri.as_str())),
+            ("HTTPS_PROXY", Some(proxy_uri.as_str())),
+            ("https_proxy", Some(proxy_uri.as_str())),
+            ("ALL_PROXY", None),
+            ("all_proxy", None),
+            ("NO_PROXY", None),
+            ("no_proxy", None),
+        ])
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
@@ -157,25 +134,31 @@ async fn experimental_feature_list_marks_apps_and_plugins_disabled_by_workspace_
         .iter()
         .find(|feature| feature.name == "plugins")
         .expect("plugins feature should be present");
-    assert!(!apps.enabled);
-    assert!(!plugins.enabled);
+    assert!(apps.enabled);
+    assert!(plugins.enabled);
     assert!(apps.default_enabled);
     assert!(plugins.default_enabled);
+    assert!(
+        outbound_probe
+            .received_requests()
+            .await
+            .expect("probe should record requests")
+            .is_empty(),
+        "experimentalFeature/list must not fetch persisted-auth workspace settings"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn experimental_feature_list_resolves_thread_project_config() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
     let workspace_key = workspace.path().to_string_lossy().replace('\\', "\\\\");
-    MockResponsesConfig::new(&server.uri())
-        .with_extra_config(&format!(
-            "[projects.\"{workspace_key}\"]\ntrust_level = \"trusted\""
-        ))
-        .write(codex_home.path())?;
-    let project_config_dir = workspace.path().join(".codex");
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!("[projects.\"{workspace_key}\"]\ntrust_level = \"trusted\"\n"),
+    )?;
+    let project_config_dir = workspace.path().join(".whisply");
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),
@@ -186,12 +169,13 @@ memories = true
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .without_auto_env()
         .without_managed_config()
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
     let thread_start_id = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams {
+        .send_thread_start_request(ThreadStartParams {
             cwd: Some(workspace.path().display().to_string()),
             ..Default::default()
         })

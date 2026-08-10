@@ -61,9 +61,12 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
 
     let server = start_mock_server().await;
     let skill_body = "skill body";
-    let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
-        write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
-    });
+    let mut builder =
+        test_codex()
+            .with_trusted_workspace()
+            .with_workspace_setup(move |cwd, fs| async move {
+                write_repo_skill(cwd, fs, "demo", "demo skill", skill_body).await
+            });
     let test = builder.build_with_auto_env(&server).await?;
 
     let skill_path = test
@@ -159,6 +162,7 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
         shadow_selection_enabled: false,
     });
     let mut builder = test_codex()
+        .with_trusted_workspace()
         .with_extensions(Arc::new(extensions.build()))
         .with_workspace_setup(move |cwd, _fs| async move {
             let source_skill_dir = cwd.join("shared-skills/linked-demo");
@@ -248,9 +252,12 @@ async fn idle_user_turn_includes_skill_instructions_in_the_first_request() -> Re
 
     let server = start_mock_server().await;
     let skill_body = "queued skill body";
-    let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
-        write_repo_skill(cwd, fs, "queued-demo", "queued demo skill", skill_body).await
-    });
+    let mut builder =
+        test_codex()
+            .with_trusted_workspace()
+            .with_workspace_setup(move |cwd, fs| async move {
+                write_repo_skill(cwd, fs, "queued-demo", "queued demo skill", skill_body).await
+            });
     let test = builder.build_with_auto_env(&server).await?;
     let skill_path = test
         .config

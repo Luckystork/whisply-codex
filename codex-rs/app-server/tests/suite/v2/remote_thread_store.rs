@@ -18,8 +18,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server::in_process;
 use codex_app_server::in_process::InProcessClientHandle;
@@ -75,9 +78,9 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 async fn thread_section_operations_without_sqlite_return_method_not_found() -> Result<()> {
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
-    create_config_toml_with_thread_store(codex_home.path(), "http://127.0.0.1:1", &store_id)?;
+    create_config_toml_with_thread_store(codex_home.path(), &store_id)?;
     let _in_memory_store = InMemoryThreadStoreId { store_id };
-    let client = start_in_process_server(codex_home.path()).await?;
+    let client = start_in_process_server(codex_home.path(), None).await?;
 
     let section_id = Uuid::now_v7().to_string();
 
@@ -164,10 +167,9 @@ async fn thread_section_operations_without_sqlite_return_method_not_found() -> R
 
 #[tokio::test]
 async fn thread_start_rejects_paginated_history_without_list_support() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
-    create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
+    create_config_toml_with_thread_store(codex_home.path(), &store_id)?;
 
     let _in_memory_store = InMemoryThreadStoreId { store_id };
     let mut mcp = TestAppServer::builder()
@@ -204,6 +206,7 @@ async fn thread_start_rejects_paginated_history_without_list_support() -> Result
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_delete_with_non_local_thread_store_does_not_create_local_persistence() -> Result<()>
 {
@@ -212,12 +215,13 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     let store_id = Uuid::new_v4().to_string();
     // Plugin startup warmups may create `.tmp` under codex_home. Disable them
     // here so this regression stays focused on thread persistence artifacts.
-    create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
+    create_config_toml_with_thread_store(codex_home.path(), &store_id)?;
 
     let thread_store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
 
-    let mut client = start_in_process_server(codex_home.path()).await?;
+    let gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?.into_in_process_gateway()?;
+    let mut client = start_in_process_server(codex_home.path(), Some(gateway.client())).await?;
 
     let response = client
         .request(ClientRequest::ThreadStart {
@@ -310,7 +314,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
-                model_provider: "mock_provider".to_string(),
+                model_provider: "whisply".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
         })
@@ -323,6 +327,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     .await?;
 
     client.shutdown().await?;
+    gateway.assert_healthy()?;
 
     let calls = thread_store.calls().await;
     assert_eq!(calls.create_thread, 2);
@@ -342,12 +347,13 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
-    create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
+    create_config_toml_with_thread_store(codex_home.path(), &store_id)?;
 
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
     let config = Arc::new(
@@ -361,7 +367,13 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     let thread_store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
 
-    let mut client = start_in_process_client(config.clone(), loader_overrides.clone()).await?;
+    let gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?.into_in_process_gateway()?;
+    let mut client = start_in_process_client(
+        config.clone(),
+        loader_overrides.clone(),
+        Some(gateway.client()),
+    )
+    .await?;
     let response = client
         .request(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
@@ -402,7 +414,7 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     .await??;
     client.shutdown().await?;
 
-    let client = start_in_process_client(config, loader_overrides).await?;
+    let client = start_in_process_client(config, loader_overrides, Some(gateway.client())).await?;
     let reads_before_resume = thread_store.calls().await.read_thread_with_history;
     // The in-memory store is pathless, so resume currently fails later while
     // assembling the response. The history-bearing probe must still be reused.
@@ -422,10 +434,14 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     );
 
     client.shutdown().await?;
+    gateway.assert_healthy()?;
     Ok(())
 }
 
-async fn start_in_process_server(codex_home: &Path) -> Result<InProcessClientHandle> {
+async fn start_in_process_server(
+    codex_home: &Path,
+    managed_gateway_client: Option<Arc<codex_whisply::ManagedGatewayClient>>,
+) -> Result<InProcessClientHandle> {
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
     let config = Arc::new(
         ConfigBuilder::default()
@@ -436,12 +452,13 @@ async fn start_in_process_server(codex_home: &Path) -> Result<InProcessClientHan
             .await?,
     );
 
-    Ok(start_in_process_client(config, loader_overrides).await?)
+    Ok(start_in_process_client(config, loader_overrides, managed_gateway_client).await?)
 }
 
 async fn start_in_process_client(
     config: Arc<Config>,
     loader_overrides: LoaderOverrides,
+    managed_gateway_client: Option<Arc<codex_whisply::ManagedGatewayClient>>,
 ) -> std::io::Result<InProcessClientHandle> {
     in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
@@ -455,6 +472,7 @@ async fn start_in_process_client(
         log_db: None,
         state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,
@@ -564,11 +582,10 @@ impl Drop for InMemoryThreadStoreId {
 
 fn create_config_toml_with_thread_store(
     codex_home: &Path,
-    server_uri: &str,
     store_id: &str,
 ) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config(&format!(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(&format!(
             "experimental_thread_store = {{ type = \"in_memory\", id = \"{store_id}\" }}"
         ))
         .disable_feature(Feature::Plugins)

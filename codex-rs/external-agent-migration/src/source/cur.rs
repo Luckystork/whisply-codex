@@ -72,47 +72,6 @@ impl CurSource {
                 TomlValue::String(sandbox_mode.to_string()),
             );
         }
-        if sandbox_mode != Some("workspace-write") {
-            return;
-        }
-
-        let mut workspace_write = toml::map::Map::new();
-        if let Some(paths) = sandbox
-            .get("additionalReadwritePaths")
-            .and_then(JsonValue::as_array)
-        {
-            let paths = paths
-                .iter()
-                .filter_map(JsonValue::as_str)
-                .filter(|path| Path::new(path).is_absolute())
-                .map(|path| TomlValue::String(path.to_string()))
-                .collect::<Vec<_>>();
-            if !paths.is_empty() {
-                workspace_write.insert("writable_roots".to_string(), TomlValue::Array(paths));
-            }
-        }
-        if sandbox.get("disableTmpWrite").and_then(JsonValue::as_bool) == Some(true) {
-            workspace_write.insert("exclude_slash_tmp".to_string(), TomlValue::Boolean(true));
-            workspace_write.insert(
-                "exclude_tmpdir_env_var".to_string(),
-                TomlValue::Boolean(true),
-            );
-        }
-        if sandbox
-            .get("networkPolicy")
-            .and_then(JsonValue::as_object)
-            .and_then(|network| network.get("default"))
-            .and_then(JsonValue::as_str)
-            == Some("allow")
-        {
-            workspace_write.insert("network_access".to_string(), TomlValue::Boolean(true));
-        }
-        if !workspace_write.is_empty() {
-            root.insert(
-                "sandbox_workspace_write".to_string(),
-                TomlValue::Table(workspace_write),
-            );
-        }
     }
 
     pub fn build_mcp_config(source_dir: &Path) -> io::Result<TomlValue> {

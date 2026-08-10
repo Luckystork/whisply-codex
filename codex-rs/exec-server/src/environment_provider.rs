@@ -7,6 +7,7 @@ use crate::client_api::ExecServerTransportParams;
 use crate::environment::CODEX_EXEC_SERVER_URL_ENV_VAR;
 use crate::environment::LOCAL_ENVIRONMENT_ID;
 use crate::environment::REMOTE_ENVIRONMENT_ID;
+use crate::environment::validate_broker_only_execution_environment_websocket_url;
 
 /// Lists the remote environment transports available to Codex.
 ///
@@ -64,11 +65,12 @@ impl DefaultEnvironmentProvider {
         Self::new(std::env::var(CODEX_EXEC_SERVER_URL_ENV_VAR).ok())
     }
 
-    pub(crate) fn snapshot_inner(&self) -> EnvironmentProviderSnapshot {
+    pub(crate) fn snapshot_inner(&self) -> Result<EnvironmentProviderSnapshot, ExecServerError> {
         let mut environments = Vec::new();
         let (exec_server_url, disabled) = normalize_exec_server_url(self.exec_server_url.clone());
 
         if let Some(exec_server_url) = exec_server_url {
+            validate_broker_only_execution_environment_websocket_url(&exec_server_url)?;
             environments.push((
                 REMOTE_ENVIRONMENT_ID.to_string(),
                 ExecServerTransportParams::websocket_url(
@@ -90,17 +92,17 @@ impl DefaultEnvironmentProvider {
             EnvironmentDefault::EnvironmentId(LOCAL_ENVIRONMENT_ID.to_string())
         };
 
-        EnvironmentProviderSnapshot {
+        Ok(EnvironmentProviderSnapshot {
             environments,
             default,
             include_local,
-        }
+        })
     }
 }
 
 impl EnvironmentProvider for DefaultEnvironmentProvider {
     fn snapshot(&self) -> EnvironmentProviderFuture<'_> {
-        Box::pin(async { Ok(self.snapshot_inner()) })
+        Box::pin(async { self.snapshot_inner() })
     }
 }
 
@@ -199,6 +201,35 @@ mod tests {
             default,
             EnvironmentDefault::EnvironmentId(REMOTE_ENVIRONMENT_ID.to_string())
         );
+    }
+
+    #[test]
+    fn default_provider_accepts_literal_ipv6_loopback_wss_url() {
+        let snapshot = DefaultEnvironmentProvider::new(Some("wss://[::1]:8765".to_string()))
+            .snapshot_inner()
+            .expect("loopback execution environment should be accepted");
+
+        assert!(matches!(
+            &snapshot.environments[0].1,
+            ExecServerTransportParams::WebSocketUrl { websocket_url, .. }
+                if websocket_url == "wss://[::1]:8765"
+        ));
+    }
+
+    #[test]
+    fn default_provider_rejects_non_loopback_websocket_urls() {
+        for exec_server_url in [
+            "ws://executor.example:8765",
+            "wss://192.0.2.1:8765",
+        ] {
+            let err = DefaultEnvironmentProvider::new(Some(exec_server_url.to_string()))
+                .snapshot_inner()
+                .expect_err("non-loopback execution environment should be rejected");
+            assert_eq!(
+                err.to_string(),
+                "exec-server protocol error: execution environment websocket URL must use a literal loopback IPv4 or IPv6 host"
+            );
+        }
     }
 
     #[test]

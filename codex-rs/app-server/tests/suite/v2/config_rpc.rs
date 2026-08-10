@@ -24,6 +24,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ToolsV2;
 use codex_app_server_protocol::WriteStatus;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_core::config::set_project_trust_level;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::WebSearchContextSize;
@@ -643,7 +644,7 @@ async fn config_read_includes_project_layers_for_cwd() -> Result<()> {
     write_config(&codex_home, r#"model = "gpt-user""#)?;
 
     let workspace = TempDir::new()?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),

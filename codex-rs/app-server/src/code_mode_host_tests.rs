@@ -49,3 +49,14 @@ fn explicit_websocket_host_selects_remote_transport() {
         CodeModeHostTransport::WebSocket(url)
     );
 }
+
+#[test]
+fn broker_only_keeps_local_code_mode_host_and_rejects_websocket_hosts() {
+    let local = CodeModeHostTransport::Local;
+    let websocket = CodeModeHostTransport::WebSocket(
+        Url::parse("ws://127.0.0.1:8765").expect("loopback websocket URL should parse"),
+    );
+
+    assert!(local.is_available_in_broker_only());
+    assert!(!websocket.is_available_in_broker_only());
+}

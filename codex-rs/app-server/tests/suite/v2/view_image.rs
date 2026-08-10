@@ -1,7 +1,10 @@
+#![cfg(target_os = "macos")]
+
 use std::time::Duration;
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_final_assistant_message_sse_response;
@@ -43,17 +46,18 @@ async fn fresh_context_subagent_inherits_disabled_view_image_and_mcp_tools() -> 
     let responses_server = responses::start_mock_server().await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&responses_server.uri())
+    ManagedWhisplyConfig::new()
         .with_model("gpt-5.4")
-        .with_provider_config("supports_websockets = false")
-        .with_extra_config(&format!(
+        .with_additional_config(&format!(
             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_server_url}/mcp\"\n\n[features.multi_agent_v2]\nenabled = true"
         ))
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&responses_server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
     let ThreadStartResponse { thread, .. } = mcp
@@ -203,8 +207,7 @@ async fn guardian_reviewer_inherits_disabled_view_image() -> Result<()> {
     )
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&responses_server.uri())
-        .with_provider_config("supports_websockets = false")
+    ManagedWhisplyConfig::new()
         .write(codex_home.path())?;
 
     let guardian_thread_id = create_fake_parented_rollout_with_source(
@@ -212,15 +215,17 @@ async fn guardian_reviewer_inherits_disabled_view_image() -> Result<()> {
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "review a requested action",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
         ThreadId::new().into(),
         ThreadId::new(),
     )?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&responses_server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
     let resume_id = mcp

@@ -1,29 +1,20 @@
+#![recursion_limit = "256"]
+
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
-use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
-use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
-use codex_cli::read_access_token_from_stdin;
-use codex_cli::read_api_key_from_stdin;
-use codex_cli::run_login_status;
-use codex_cli::run_login_with_access_token;
-use codex_cli::run_login_with_api_key;
-use codex_cli::run_login_with_chatgpt;
-use codex_cli::run_login_with_device_code;
-use codex_cli::run_logout;
 use codex_cloud_tasks::Cli as CloudTasksCli;
 use codex_exec::Cli as ExecCli;
 use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
 use codex_execpolicy::ExecPolicyCheckCommand;
-use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_rollout_trace::replay_bundle;
 use codex_state::StateRuntime;
@@ -45,29 +36,28 @@ use supports_color::Stream;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod desktop_app;
 mod doctor;
 mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
-mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
 mod state_db_recovery;
-#[cfg(not(windows))]
+mod whisply_config;
+mod whisply_diagnostics;
+mod whisply_skills;
+mod whisply_verify;
+#[cfg(target_os = "linux")]
 mod wsl_paths;
 
 use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
-use crate::remote_control_cmd::RemoteControlCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
 use codex_config::LoaderOverrides;
-use codex_core::build_models_manager;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
@@ -78,17 +68,34 @@ use codex_features::FEATURES;
 use codex_features::Stage;
 use codex_features::is_known_feature_key;
 use codex_home::CodexHomeUserInstructionsProvider;
-use codex_login::AuthManager;
-use codex_login::CodexAuth;
-use codex_login::read_codex_access_token_from_env;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
 use codex_memories_write::clear_memory_roots_contents;
-use codex_models_manager::bundled_models_response;
+use codex_model_provider::create_model_provider;
+use codex_model_provider::whisply_provider_info;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
+use codex_whisply::BrokerError;
+use codex_whisply::BrokerErrorCode;
+use codex_whisply::BrokerLoginStatus;
+use codex_whisply::HostControlsAudioAssistMode;
+use codex_whisply::HostControlsBuiltinCapability;
+use codex_whisply::HostControlsCommand;
+use codex_whisply::HostControlsComputerUseRoute;
+use codex_whisply::HostControlsInteractiveAction;
+use codex_whisply::HostControlsPatch;
+use codex_whisply::HostControlsPermissionMode;
+use codex_whisply::HostControlsThreadDirectory;
+use codex_whisply::NativeBrokerClient;
+use codex_whisply::PRODUCT_NAME;
+use codex_whisply::UPSTREAM_COMMIT;
+use codex_whisply::UPSTREAM_TAG;
+use codex_whisply::WHISPLY_RUNTIME_VERSION;
+use codex_whisply::first_party_tool_registry;
 
-/// Codex CLI
+/// Whisply CLI
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
 #[derive(Debug, Parser)]
@@ -98,13 +105,14 @@ use codex_terminal_detection::TerminalName;
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
-    // `codex-x86_64-unknown-linux-musl`, but the help output should always use
-    // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    // `whisply-x86_64-unknown-linux-musl`, but the help output should always use
+    // the generic `whisply` command name that users run.
+    bin_name = "whisply",
+    version = "0.147.0-wsply.1",
+    override_usage = "whisply [OPTIONS] [PROMPT]\n       whisply [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
-    /// Enable process-only PSP routing for first-party ChatGPT requests.
+    /// Enable process-only first-party routing selected by the managed launcher.
     #[arg(long, global = true, hide = true)]
     psp: bool,
 
@@ -126,33 +134,51 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
-    /// Run Codex non-interactively.
+    /// Run Whisply non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
 
     /// Run a code review non-interactively.
     Review(ReviewCommand),
 
-    /// Manage login.
+    /// Manage Whisply account sign-in for the managed runtime.
     Login(LoginCommand),
 
-    /// Remove stored authentication credentials.
+    /// Show how to sign out of the managed Whisply account.
     Logout(LogoutCommand),
 
-    /// Manage external MCP servers for Codex.
+    /// Show the opaque managed account currently selected for this runtime.
+    Whoami,
+
+    /// List models from Whisply's signed managed catalog.
+    Models(ModelsCommand),
+
+    /// Read or change ordinary controls in the active Whisply Mac app.
+    Controls(ControlsCommand),
+
+    /// Show cost-based managed account Usage.
+    Usage(UsageCommand),
+
+    /// List and inspect first-party account connectors.
+    Connectors(ConnectorsCommand),
+
+    /// List first-party tool descriptors and their declared ownership.
+    Tools(ToolsCommand),
+
+    /// Manage external MCP servers for Whisply.
     Mcp(McpCli),
 
-    /// Manage Codex plugins.
+    /// Manage Whisply plugins.
     Plugin(PluginCli),
 
-    /// Start Codex as an MCP server (stdio).
+    /// Start Whisply as an MCP server (stdio).
     McpServer(McpServerCommand),
 
     /// [experimental] Run the app server or related tooling.
     AppServer(AppServerCommand),
 
-    /// [experimental] Manage the app-server daemon with remote control enabled.
-    RemoteControl(RemoteControlCommand),
+    /// Unavailable in Whisply: standalone remote control bypasses the managed app.
+    RemoteControl(ManagedUnavailableCommand),
 
     /// Launch the Desktop app (opens the app installer if missing).
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -161,13 +187,16 @@ enum Subcommand {
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
 
-    /// Update Codex to the latest version.
+    /// Report how the Whisply app bundle manages runtime updates.
     Update,
 
-    /// Diagnose local Codex installation, config, auth, and runtime health.
+    /// Show the Whisply runtime version and verified-source identity.
+    Version(VersionCommand),
+
+    /// Diagnose local Whisply installation, config, auth, and runtime health.
     Doctor(DoctorCommand),
 
-    /// Run commands within a Codex-provided sandbox.
+    /// Run commands within the Whisply-provided sandbox.
     Sandbox(HostSandboxArgs),
 
     /// Debugging tools.
@@ -177,7 +206,7 @@ enum Subcommand {
     #[clap(hide = true)]
     Execpolicy(ExecpolicyCommand),
 
-    /// Apply the latest diff produced by Codex agent as a `git apply` to your local working tree.
+    /// Apply the latest diff produced by the Whisply agent as a `git apply` to your local working tree.
     #[clap(visible_alias = "a")]
     Apply(ApplyCommand),
 
@@ -196,13 +225,31 @@ enum Subcommand {
     /// Fork a previous interactive session (picker by default; use --last to fork the most recent).
     Fork(ForkCommand),
 
-    /// [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally.
+    /// List and safely export saved managed sessions.
+    Sessions(SessionsCommand),
+
+    /// Manage user-created Whisply skills in the managed product home.
+    Skills(whisply_skills::SkillsCommand),
+
+    /// Inspect or change the supported Whisply configuration controls.
+    Config(whisply_config::ConfigCommand),
+
+    /// Create, inspect, and remove named Whisply configuration profiles.
+    Profile(whisply_config::ProfileCommand),
+
+    /// Run zero-authority diagnostics and presentation-fixture checks.
+    Diagnostics(whisply_diagnostics::DiagnosticsCommand),
+
+    /// Run the fixed, zero-authority Whisply release-test plan.
+    Test(whisply_verify::TestCommand),
+
+    /// Unavailable in Whisply: cloud tasks require direct ChatGPT authority.
     #[clap(name = "cloud", alias = "cloud-tasks")]
     Cloud(CloudTasksCli),
 
-    /// Internal: run the responses API proxy.
+    /// Unavailable in Whisply: responses traffic must use the managed gateway.
     #[clap(hide = true)]
-    ResponsesApiProxy(ResponsesApiProxyArgs),
+    ResponsesApiProxy(ManagedUnavailableCommand),
 
     /// Internal: relay stdio to a Unix domain socket.
     #[clap(hide = true, name = "stdio-to-uds")]
@@ -215,12 +262,24 @@ enum Subcommand {
     Features(FeaturesCli),
 }
 
+#[derive(Debug, Args)]
+struct VersionCommand {
+    /// Include pinned upstream source and local manifest contract paths.
+    #[arg(long)]
+    verbose: bool,
+}
+
 #[derive(Debug, Parser)]
 struct CompletionCommand {
     /// Shell to generate completions for
     #[clap(value_enum, default_value_t = Shell::Bash)]
     shell: Shell,
 }
+
+/// Keeps retired command names parseable long enough to return the managed
+/// unavailable error, without linking their direct-client implementations.
+#[derive(Debug, Args)]
+struct ManagedUnavailableCommand {}
 
 #[derive(Debug, Parser)]
 struct DebugCommand {
@@ -238,6 +297,9 @@ enum DebugSubcommand {
 
     /// Render the model-visible prompt input list as JSON.
     PromptInput(DebugPromptInputCommand),
+
+    /// Run fixed developer verification suites from a checked-out Whisply source tree.
+    Verify(whisply_verify::VerifyCommand),
 
     /// Replay a rollout trace bundle and write reduced state JSON.
     #[clap(hide = true)]
@@ -278,10 +340,70 @@ struct DebugPromptInputCommand {
 }
 
 #[derive(Debug, Parser)]
-struct DebugModelsCommand {
-    /// Skip refresh and dump only the bundled catalog shipped with this binary.
-    #[arg(long = "bundled", default_value_t = false)]
-    bundled: bool,
+struct DebugModelsCommand;
+
+#[derive(Debug, Args)]
+struct ModelsCommand {
+    /// Emit the stable public model projection as JSON.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct UsageCommand {
+    /// Emit the exact broker-only Usage projection as JSON.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ConnectorsCommand {
+    #[command(subcommand)]
+    action: Option<ConnectorsSubcommand>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ConnectorsSubcommand {
+    /// List current account connections and their product availability.
+    List {
+        /// Emit the full bounded Website projection as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show one current connection, or all current connections when omitted.
+    Status {
+        /// First-party connection id from `whisply connectors list`.
+        id: Option<String>,
+        /// Emit the full bounded Website projection as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Open Whisply's first-party connector management page.
+    Open,
+}
+
+#[derive(Debug, Args)]
+struct ToolsCommand {
+    #[command(subcommand)]
+    action: Option<ToolsSubcommand>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ToolsSubcommand {
+    /// List static first-party descriptors. This does not claim handler availability.
+    List {
+        /// Emit the registry snapshot as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show one descriptor and the availability boundary that owns it.
+    Status {
+        /// Stable first-party tool id from `whisply tools list`.
+        id: String,
+        /// Emit the descriptor as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -396,6 +518,66 @@ struct ForkCommand {
     config_overrides: SessionTuiCli,
 }
 
+#[derive(Debug, Args)]
+struct SessionsCommand {
+    #[command(subcommand)]
+    action: SessionsSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum SessionsSubcommand {
+    /// List active, archived, or all saved sessions through the managed app server.
+    List(SessionsListCommand),
+    /// Export a bounded, redacted public transcript for one saved session.
+    Export(SessionsExportCommand),
+}
+
+#[derive(Debug, Args)]
+struct SessionsListCommand {
+    /// List archived sessions instead of active sessions.
+    #[arg(long, conflicts_with = "all")]
+    archived: bool,
+
+    /// List both active and archived sessions.
+    #[arg(long)]
+    all: bool,
+
+    /// Maximum number of sessions to return (1-200).
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
+    limit: u32,
+
+    /// Case-insensitive title search interpreted by the managed app server.
+    #[arg(long, value_name = "TEXT")]
+    search: Option<String>,
+
+    /// Emit the stable public session projection as JSON.
+    #[arg(long)]
+    json: bool,
+
+    #[clap(flatten)]
+    remote: InteractiveRemoteOptions,
+
+    #[clap(flatten)]
+    config_overrides: SessionArchiveConfigOverrides,
+}
+
+#[derive(Debug, Args)]
+struct SessionsExportCommand {
+    /// Session id (UUID) or exact saved session name.
+    #[arg(value_name = "SESSION")]
+    target: String,
+
+    /// Write a new owner-only export file instead of stdout. Existing files are never overwritten.
+    #[arg(long, short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    #[clap(flatten)]
+    remote: InteractiveRemoteOptions,
+
+    #[clap(flatten)]
+    config_overrides: SessionArchiveConfigOverrides,
+}
+
 /// TUI arguments for session commands where a parsed prompt implies an explicit session id.
 ///
 /// This keeps `--last PROMPT` valid while rejecting `--last SESSION_ID PROMPT`.
@@ -435,7 +617,7 @@ type HostSandboxArgs = UnsupportedSandboxArgs;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Debug, Parser)]
 struct UnsupportedSandboxArgs {
-    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
+    /// Layer $WHISPLY_HOME/<name>.config.toml on top of the base user config.
     #[arg(long = "profile", short = 'p')]
     pub config_profile: Option<ProfileV2Name>,
 
@@ -462,19 +644,10 @@ enum ExecpolicySubcommand {
 
 #[derive(Debug, Parser)]
 struct LoginCommand {
-    #[clap(skip)]
-    config_overrides: CliConfigOverrides,
-
-    #[arg(
-        long = "with-api-key",
-        help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)"
-    )]
+    #[arg(long = "with-api-key", hide = true)]
     with_api_key: bool,
 
-    #[arg(
-        long = "with-access-token",
-        help = "Read the access token from stdin (e.g. `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`)"
-    )]
+    #[arg(long = "with-access-token", hide = true)]
     with_access_token: bool,
 
     #[arg(
@@ -487,7 +660,7 @@ struct LoginCommand {
     )]
     api_key: Option<String>,
 
-    #[arg(long = "device-auth")]
+    #[arg(long = "device-auth", hide = true)]
     use_device_code: bool,
 
     /// EXPERIMENTAL: Use custom OAuth issuer base URL (advanced)
@@ -507,12 +680,692 @@ struct LoginCommand {
 enum LoginSubcommand {
     /// Show login status.
     Status,
+
+    /// Show the opaque managed account selected by the native broker.
+    Whoami,
 }
 
 #[derive(Debug, Parser)]
 struct LogoutCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+}
+
+#[derive(Debug, Parser)]
+struct ControlsCommand {
+    #[command(subcommand)]
+    action: ControlsSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum ControlsSubcommand {
+    /// Print the active app's current ordinary-control snapshot.
+    Snapshot {
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+    /// Enable or disable the paired Computer Use master control.
+    ComputerUseMaster {
+        #[arg(
+            long,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        enabled: bool,
+    },
+    /// Enable or disable one Computer Use route.
+    ComputerUseRoute {
+        #[arg(long)]
+        route: String,
+        #[arg(
+            long,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        enabled: bool,
+    },
+    /// Enable or disable one ordinary built-in capability.
+    Builtin {
+        #[arg(long)]
+        capability: String,
+        #[arg(
+            long,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        enabled: bool,
+    },
+    /// Change a product thread's directory, permission mode, or screen preference.
+    Thread {
+        #[arg(long)]
+        session_id: String,
+        #[arg(long, conflicts_with = "no_directory")]
+        directory: Option<String>,
+        #[arg(long)]
+        no_directory: bool,
+        #[arg(long)]
+        permission: Option<String>,
+        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        prefer_screen: Option<bool>,
+    },
+    /// Change Audio Assist mode or transcript task suggestions.
+    AudioAssist {
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        transcript_task_suggestions: Option<bool>,
+    },
+    /// Stop Computer Use only when it belongs to this exact product session.
+    StopComputerUse {
+        #[arg(long)]
+        session_id: String,
+    },
+    /// Return ordinary GUI guidance for an interaction that needs user presence.
+    RequestInteractive {
+        #[arg(long)]
+        action: String,
+    },
+}
+
+fn native_broker_for_cli() -> anyhow::Result<Arc<NativeBrokerClient>> {
+    let broker = NativeBrokerClient::from_environment()
+        .map_err(broker_cli_error)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "The managed Whisply broker is unavailable. Start Whisply from the installed app."
+            )
+        })?;
+    broker.hello().map_err(broker_cli_error)?;
+    Ok(broker)
+}
+
+fn broker_cli_error(error: BrokerError) -> anyhow::Error {
+    match error {
+        BrokerError::Rejected(BrokerErrorCode::LoginRequired)
+        | BrokerError::Rejected(BrokerErrorCode::Unauthenticated) => anyhow::anyhow!(
+            "Sign in is required. Run `whisply login` from the managed Whisply app."
+        ),
+        BrokerError::Rejected(BrokerErrorCode::StaleEpoch)
+        | BrokerError::Rejected(BrokerErrorCode::Expired) => anyhow::anyhow!(
+            "The managed Whisply account state changed. Run `whisply login status` and try again."
+        ),
+        BrokerError::Rejected(BrokerErrorCode::ManifestMismatch)
+        | BrokerError::Rejected(BrokerErrorCode::InvalidClient)
+        | BrokerError::Rejected(BrokerErrorCode::DescriptorInvalid) => anyhow::anyhow!(
+            "This runtime is not accepted by the managed Whisply broker. Restart it from the installed app."
+        ),
+        BrokerError::Rejected(BrokerErrorCode::Unavailable)
+        | BrokerError::UnsupportedPlatform
+        | BrokerError::Io
+        | BrokerError::InvalidPeer
+        | BrokerError::UnsafeSocket => anyhow::anyhow!(
+            "The managed Whisply broker is temporarily unavailable. Restart the app and try again."
+        ),
+        _ => anyhow::anyhow!(
+            "The managed Whisply broker rejected the request. Restart the app and try again."
+        ),
+    }
+}
+
+fn print_whisply_login_status() -> anyhow::Result<()> {
+    let status = native_broker_for_cli()?
+        .status()
+        .map_err(broker_cli_error)?;
+    if status.authenticated {
+        println!("Signed in to the managed Whisply account.");
+    } else {
+        println!("Not signed in. Run `whisply login` to open managed browser sign-in.");
+    }
+    Ok(())
+}
+
+fn print_whisply_whoami() -> anyhow::Result<()> {
+    let status = native_broker_for_cli()?
+        .status()
+        .map_err(broker_cli_error)?;
+    if !status.authenticated {
+        anyhow::bail!("Not signed in. Run `whisply login` first.");
+    }
+    let account_key = status
+        .opaque_account_key
+        .ok_or_else(|| anyhow::anyhow!("The managed account projection is unavailable."))?;
+    println!("{account_key}");
+    Ok(())
+}
+
+fn begin_whisply_browser_login() -> anyhow::Result<()> {
+    let broker = native_broker_for_cli()?;
+    let login = broker.login_begin().map_err(broker_cli_error)?;
+    open_managed_browser(&login.authorization_url)?;
+    // The native broker owns callback handling. Never print or persist the
+    // URL/handle because either may be sensitive broker-local material.
+    println!(
+        "Browser sign-in opened. Complete it in the browser, then run `whisply login status`."
+    );
+    Ok(())
+}
+
+fn open_managed_browser(authorization_url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg(authorization_url)
+            .status()
+            .map_err(|_| anyhow::anyhow!("Unable to open managed browser sign-in."))?;
+        if status.success() {
+            return Ok(());
+        }
+        anyhow::bail!("Unable to open managed browser sign-in.");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = authorization_url;
+        anyhow::bail!(
+            "Managed browser sign-in is available only through the Whisply app on this platform."
+        );
+    }
+}
+
+/// Fetches the only public model catalog path. The model provider constructs
+/// its endpoint exclusively from the verified native descriptor and verifies
+/// the gateway's signed catalog before projecting it to Codex model metadata.
+async fn load_signed_whisply_models()
+-> anyhow::Result<Vec<codex_protocol::openai_models::ModelInfo>> {
+    let provider = create_model_provider(whisply_provider_info(), None);
+    let models_manager = provider.models_manager_without_cache(None);
+    let catalog = models_manager
+        .raw_model_catalog(
+            RefreshStrategy::OnlineIfUncached,
+            HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
+        )
+        .await;
+    if catalog.models.is_empty() {
+        anyhow::bail!(
+            "The signed Whisply model catalog is unavailable. Start Whisply from the managed app and sign in."
+        );
+    }
+    Ok(catalog.models)
+}
+
+fn whisply_public_model_projection(
+    models: Vec<codex_protocol::openai_models::ModelInfo>,
+) -> serde_json::Value {
+    let models = models
+        .into_iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.slug,
+                "name": model.display_name,
+                "reasoningEfforts": model
+                    .supported_reasoning_levels
+                    .iter()
+                    .map(|level| level.effort.as_str())
+                    .collect::<Vec<_>>(),
+                "defaultReasoningEffort": model
+                    .default_reasoning_level
+                    .as_ref()
+                    .map(codex_protocol::openai_models::ReasoningEffort::as_str),
+                "inputModalities": model
+                    .input_modalities
+                    .iter()
+                    .map(|modality| format!("{modality:?}").to_ascii_lowercase())
+                    .collect::<Vec<_>>(),
+                "contextLimit": model.context_window,
+                "outputLimit": model.max_context_window,
+                "supportsToolCalls": model.supports_parallel_tool_calls,
+                "supportsReasoningSummary": model.supports_reasoning_summary_parameter,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "models": models })
+}
+
+async fn run_whisply_models(json: bool) -> anyhow::Result<()> {
+    let projection = whisply_public_model_projection(load_signed_whisply_models().await?);
+    if json {
+        serde_json::to_writer_pretty(std::io::stdout(), &projection)?;
+        println!();
+        return Ok(());
+    }
+    let models = projection
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("The signed Whisply model catalog is invalid."))?;
+    for model in models {
+        let id = model
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let name = model
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let efforts = model
+            .get("reasoningEfforts")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        println!("{id}\t{name}\t{efforts}");
+    }
+    Ok(())
+}
+
+fn current_broker_epoch(broker: &NativeBrokerClient) -> anyhow::Result<Option<String>> {
+    let status = broker.status().map_err(broker_cli_error)?;
+    if !status.authenticated {
+        anyhow::bail!("Not signed in. Run `whisply login` first.");
+    }
+    Ok(status.account_epoch)
+}
+
+fn current_broker_account_binding(
+    broker: &NativeBrokerClient,
+) -> anyhow::Result<BrokerLoginStatus> {
+    let status = broker.status().map_err(broker_cli_error)?;
+    if !status.authenticated
+        || status
+            .opaque_account_key
+            .as_deref()
+            .map(str::is_empty)
+            .unwrap_or(true)
+        || status
+            .account_epoch
+            .as_deref()
+            .map(str::is_empty)
+            .unwrap_or(true)
+    {
+        anyhow::bail!("Not signed in. Run `whisply login` first.");
+    }
+    Ok(status)
+}
+
+fn run_whisply_controls(command: ControlsCommand) -> anyhow::Result<()> {
+    let broker = native_broker_for_cli()?;
+    let account_epoch = current_broker_epoch(&broker)?;
+    let snapshot_revision = |session_id: Option<&str>| -> anyhow::Result<u64> {
+        let snapshot = broker
+            .host_controls_snapshot(account_epoch.as_deref(), session_id)
+            .map_err(broker_cli_error)?;
+        snapshot
+            .get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                anyhow::anyhow!("The active Whisply app returned an invalid control snapshot.")
+            })
+    };
+    let print = |value: serde_json::Value| -> anyhow::Result<()> {
+        serde_json::to_writer_pretty(std::io::stdout(), &value)?;
+        println!();
+        Ok(())
+    };
+
+    match command.action {
+        ControlsSubcommand::Snapshot { session_id } => print(
+            broker
+                .host_controls_snapshot(account_epoch.as_deref(), session_id.as_deref())
+                .map_err(broker_cli_error)?,
+        ),
+        ControlsSubcommand::ComputerUseMaster { enabled } => {
+            let revision = snapshot_revision(None)?;
+            print(
+                broker
+                    .host_controls_apply(
+                        account_epoch.as_deref(),
+                        revision,
+                        HostControlsPatch::ComputerUseMaster { enabled },
+                    )
+                    .map_err(broker_cli_error)?,
+            )
+        }
+        ControlsSubcommand::ComputerUseRoute { route, enabled } => {
+            let revision = snapshot_revision(None)?;
+            print(
+                broker
+                    .host_controls_apply(
+                        account_epoch.as_deref(),
+                        revision,
+                        HostControlsPatch::ComputerUseRoute {
+                            route: parse_host_controls_route(&route)?,
+                            enabled,
+                        },
+                    )
+                    .map_err(broker_cli_error)?,
+            )
+        }
+        ControlsSubcommand::Builtin {
+            capability,
+            enabled,
+        } => {
+            let revision = snapshot_revision(None)?;
+            print(
+                broker
+                    .host_controls_apply(
+                        account_epoch.as_deref(),
+                        revision,
+                        HostControlsPatch::BuiltinCapability {
+                            capability: parse_host_controls_builtin(&capability)?,
+                            enabled,
+                        },
+                    )
+                    .map_err(broker_cli_error)?,
+            )
+        }
+        ControlsSubcommand::Thread {
+            session_id,
+            directory,
+            no_directory,
+            permission,
+            prefer_screen,
+        } => {
+            if directory.is_none()
+                && !no_directory
+                && permission.is_none()
+                && prefer_screen.is_none()
+            {
+                anyhow::bail!("Choose at least one thread control to change.");
+            }
+            let revision = snapshot_revision(Some(&session_id))?;
+            let directory = if no_directory {
+                Some(HostControlsThreadDirectory::NoDirectory)
+            } else {
+                directory
+                    .map(|canonical_path| HostControlsThreadDirectory::Directory { canonical_path })
+            };
+            print(
+                broker
+                    .host_controls_apply(
+                        account_epoch.as_deref(),
+                        revision,
+                        HostControlsPatch::Thread {
+                            session_id,
+                            directory,
+                            permission_mode: permission
+                                .as_deref()
+                                .map(parse_host_controls_permission)
+                                .transpose()?,
+                            prefer_screen,
+                        },
+                    )
+                    .map_err(broker_cli_error)?,
+            )
+        }
+        ControlsSubcommand::AudioAssist {
+            mode,
+            transcript_task_suggestions,
+        } => {
+            if mode.is_none() && transcript_task_suggestions.is_none() {
+                anyhow::bail!("Choose an Audio Assist mode or transcript-task-suggestions value.");
+            }
+            let revision = snapshot_revision(None)?;
+            print(
+                broker
+                    .host_controls_apply(
+                        account_epoch.as_deref(),
+                        revision,
+                        HostControlsPatch::AudioAssist {
+                            mode: mode
+                                .as_deref()
+                                .map(parse_host_controls_audio_mode)
+                                .transpose()?,
+                            transcript_task_suggestions_enabled: transcript_task_suggestions,
+                        },
+                    )
+                    .map_err(broker_cli_error)?,
+            )
+        }
+        ControlsSubcommand::StopComputerUse { session_id } => print(
+            broker
+                .host_controls_execute(
+                    account_epoch.as_deref(),
+                    HostControlsCommand::StopComputerUse { session_id },
+                )
+                .map_err(broker_cli_error)?,
+        ),
+        ControlsSubcommand::RequestInteractive { action } => print(
+            broker
+                .host_controls_execute(
+                    account_epoch.as_deref(),
+                    HostControlsCommand::RequestInteractive {
+                        action: parse_host_controls_interactive_action(&action)?,
+                    },
+                )
+                .map_err(broker_cli_error)?,
+        ),
+    }
+}
+
+fn parse_host_controls_route(value: &str) -> anyhow::Result<HostControlsComputerUseRoute> {
+    match value {
+        "native-apps" | "native_apps" => Ok(HostControlsComputerUseRoute::NativeApps),
+        "existing-browser" | "existing_browser" => {
+            Ok(HostControlsComputerUseRoute::ExistingBrowser)
+        }
+        "spawned-browser" | "spawned_browser" => Ok(HostControlsComputerUseRoute::SpawnedBrowser),
+        "local-files" | "local_files" => Ok(HostControlsComputerUseRoute::LocalFiles),
+        _ => anyhow::bail!(
+            "Unknown Computer Use route. Use native-apps, existing-browser, spawned-browser, or local-files."
+        ),
+    }
+}
+
+fn parse_host_controls_builtin(value: &str) -> anyhow::Result<HostControlsBuiltinCapability> {
+    match value {
+        "browser" => Ok(HostControlsBuiltinCapability::Browser),
+        "chrome" => Ok(HostControlsBuiltinCapability::Chrome),
+        "computer-use" | "computer_use" => Ok(HostControlsBuiltinCapability::ComputerUse),
+        "documents" => Ok(HostControlsBuiltinCapability::Documents),
+        "pdf" => Ok(HostControlsBuiltinCapability::Pdf),
+        "spreadsheets" => Ok(HostControlsBuiltinCapability::Spreadsheets),
+        "presentations" => Ok(HostControlsBuiltinCapability::Presentations),
+        _ => anyhow::bail!("Unknown built-in capability."),
+    }
+}
+
+fn parse_host_controls_permission(value: &str) -> anyhow::Result<HostControlsPermissionMode> {
+    match value {
+        "ask" => Ok(HostControlsPermissionMode::Ask),
+        "auto" => Ok(HostControlsPermissionMode::Auto),
+        "full-access" | "full_access" => Ok(HostControlsPermissionMode::FullAccess),
+        _ => anyhow::bail!("Unknown permission mode. Use ask, auto, or full-access."),
+    }
+}
+
+fn parse_host_controls_audio_mode(value: &str) -> anyhow::Result<HostControlsAudioAssistMode> {
+    match value {
+        "manual" => Ok(HostControlsAudioAssistMode::Manual),
+        "automatic" | "auto" => Ok(HostControlsAudioAssistMode::Automatic),
+        _ => anyhow::bail!("Unknown Audio Assist mode. Use manual or automatic."),
+    }
+}
+
+fn parse_host_controls_interactive_action(
+    value: &str,
+) -> anyhow::Result<HostControlsInteractiveAction> {
+    match value {
+        "computer-use-accessibility-permission" => {
+            Ok(HostControlsInteractiveAction::ComputerUseAccessibilityPermission)
+        }
+        "computer-use-screen-recording-permission" => {
+            Ok(HostControlsInteractiveAction::ComputerUseScreenRecordingPermission)
+        }
+        "choose-thread-directory" => Ok(HostControlsInteractiveAction::ChooseThreadDirectory),
+        "choose-trusted-application" => Ok(HostControlsInteractiveAction::ChooseTrustedApplication),
+        "choose-window" => Ok(HostControlsInteractiveAction::ChooseWindow),
+        "system-settings" => Ok(HostControlsInteractiveAction::SystemSettings),
+        _ => anyhow::bail!("Unknown interactive action."),
+    }
+}
+
+fn run_whisply_usage(json: bool) -> anyhow::Result<()> {
+    let broker = native_broker_for_cli()?;
+    let binding = current_broker_account_binding(&broker)?;
+    let snapshot = broker.account_usage(&binding).map_err(|_| {
+        anyhow::anyhow!("Current managed Usage is unavailable. Try again from the Whisply app.")
+    })?;
+    if json {
+        serde_json::to_writer_pretty(std::io::stdout(), &snapshot)?;
+        println!();
+        return Ok(());
+    }
+
+    println!("Usage ({})", snapshot.tier);
+    for window in &snapshot.windows {
+        let category = match window.category {
+            codex_whisply::UsageWindowCategory::Usage => "usage",
+            codex_whisply::UsageWindowCategory::Transcription => "transcription",
+        };
+        let kind = match window.window {
+            codex_whisply::UsageWindowKind::FiveHour => "five-hour",
+            codex_whisply::UsageWindowKind::Weekly => "weekly",
+        };
+        let reset = window.resets_at.as_deref().unwrap_or("not scheduled");
+        println!(
+            "{category}/{kind}: settled {:.3}, reserved {:.3}, cap {:.3}, used {:.1}% (resets {reset})",
+            window.settled,
+            window.reserved,
+            window.cap,
+            window.used_fraction * 100.0,
+        );
+    }
+    println!(
+        "Rate card {} · {} {}",
+        snapshot.metering.rate_card_version, snapshot.metering.basis, snapshot.metering.currency,
+    );
+    Ok(())
+}
+
+fn load_broker_connections() -> anyhow::Result<codex_whisply::ContextualConnectionsSnapshot> {
+    let broker = native_broker_for_cli()?;
+    let binding = current_broker_account_binding(&broker)?;
+    broker.account_connections(&binding).map_err(|_| {
+        anyhow::anyhow!(
+            "Current managed connector state is unavailable. Try again from the Whisply app."
+        )
+    })
+}
+
+fn print_connections_human(snapshot: &codex_whisply::ContextualConnectionsSnapshot) {
+    if snapshot.connections.is_empty() {
+        println!("No first-party connectors are currently connected.");
+        return;
+    }
+    for connection in &snapshot.connections {
+        let provider = format!("{:?}", connection.provider).to_ascii_lowercase();
+        let status = format!("{:?}", connection.status).to_ascii_lowercase();
+        let products = connection.products.join(", ");
+        println!("{}\t{}\t{}\t{}", connection.id, provider, status, products);
+    }
+}
+
+fn run_whisply_connectors(command: ConnectorsCommand) -> anyhow::Result<()> {
+    match command
+        .action
+        .unwrap_or(ConnectorsSubcommand::List { json: false })
+    {
+        ConnectorsSubcommand::Open => open_first_party_connections_page(),
+        ConnectorsSubcommand::List { json } => {
+            let snapshot = load_broker_connections()?;
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &snapshot)?;
+                println!();
+            } else {
+                print_connections_human(&snapshot);
+            }
+            Ok(())
+        }
+        ConnectorsSubcommand::Status { id, json } => {
+            let snapshot = load_broker_connections()?;
+            if let Some(id) = id
+                && !snapshot
+                    .connections
+                    .iter()
+                    .any(|connection| connection.id == id)
+            {
+                anyhow::bail!("No current first-party connector matches that id.");
+            }
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &snapshot)?;
+                println!();
+            } else {
+                print_connections_human(&snapshot);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn open_first_party_connections_page() -> anyhow::Result<()> {
+    const CONNECTIONS_URL: &str = "https://whisply.net/account/connections/";
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg(CONNECTIONS_URL)
+            .status()
+            .map_err(|_| anyhow::anyhow!("Unable to open Whisply connector management."))?;
+        if status.success() {
+            return Ok(());
+        }
+        anyhow::bail!("Unable to open Whisply connector management.");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!(
+            "Whisply connector management is available through the Whisply app on macOS."
+        );
+    }
+}
+
+fn run_whisply_tools(command: ToolsCommand) -> anyhow::Result<()> {
+    let registry = first_party_tool_registry();
+    match command
+        .action
+        .unwrap_or(ToolsSubcommand::List { json: false })
+    {
+        ToolsSubcommand::List { json } => {
+            let snapshot = registry.snapshot(WHISPLY_RUNTIME_VERSION)?;
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &snapshot)?;
+                println!();
+            } else {
+                for descriptor in registry.descriptors() {
+                    println!(
+                        "{}\t{}\t{:?}\t{:?}",
+                        descriptor.id,
+                        descriptor.display_name,
+                        descriptor.owner,
+                        descriptor.action_class,
+                    );
+                }
+                println!(
+                    "Availability is owner-authenticated at execution time; this command does not claim a live handler."
+                );
+            }
+            Ok(())
+        }
+        ToolsSubcommand::Status { id, json } => {
+            let descriptor = registry
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("No first-party tool matches that id."))?;
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), descriptor)?;
+                println!();
+            } else {
+                println!("{} ({})", descriptor.display_name, descriptor.id);
+                println!("Owner: {:?}", descriptor.owner);
+                println!("Action class: {:?}", descriptor.action_class);
+                println!(
+                    "Availability: resolved by the authenticated owner only at execution time."
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -581,33 +1434,9 @@ struct ExecServerCommand {
     )]
     request_dispatch_mode: codex_exec_server::RequestDispatchMode,
 
-    /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default), `stdio`, `stdio://`.
-    #[arg(long = "listen", value_name = "URL", conflicts_with = "remote")]
+    /// Transport endpoint URL. Supported values: `ws://LOOPBACK_IP:PORT` (default), `stdio`, `stdio://`.
+    #[arg(long = "listen", value_name = "URL")]
     listen: Option<String>,
-
-    /// Register this exec-server as a remote environment using the given base URL.
-    #[arg(long = "remote", value_name = "URL", requires = "environment_id")]
-    remote: Option<String>,
-
-    /// Environment id to attach to when registering remotely.
-    #[arg(long = "environment-id", value_name = "ID")]
-    environment_id: Option<String>,
-
-    /// Human-readable environment name.
-    #[arg(long = "name", value_name = "NAME")]
-    name: Option<String>,
-
-    /// Use Agent Identity auth from CODEX_ACCESS_TOKEN for remote registration.
-    #[arg(long = "use-agent-identity-auth", requires = "remote")]
-    use_agent_identity_auth: bool,
-
-    /// Exit when the parent-owned standard-input pipe closes.
-    #[arg(
-        long = "exit-on-stdin-close",
-        env = codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR,
-        requires_if("true", "remote")
-    )]
-    exit_on_stdin_close: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -638,19 +1467,19 @@ struct AppServerDaemonCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum AppServerDaemonSubcommand {
-    /// Install durable local app-server management for SSH-driven use.
+    /// Unavailable in Whisply: bootstrap starts the standalone updater.
     Bootstrap(AppServerBootstrapCommand),
 
-    /// Start the local app server daemon if it is not already running.
+    /// Unavailable in Whisply: persisted daemon state can enable remote control.
     Start,
 
-    /// Restart the local app server daemon.
+    /// Unavailable in Whisply: persisted daemon state can enable remote control.
     Restart,
 
-    /// Enable remote control for future starts and a currently running managed daemon.
+    /// Unavailable in Whisply: remote control is owned by the managed app.
     EnableRemoteControl,
 
-    /// Disable remote control for future starts and a currently running managed daemon.
+    /// Unavailable in Whisply: remote control is owned by the managed app.
     DisableRemoteControl,
 
     /// Stop the local app server daemon.
@@ -659,7 +1488,7 @@ enum AppServerDaemonSubcommand {
     /// Print local CLI and running app-server versions as JSON.
     Version,
 
-    /// [internal] Run the detached pid-backed standalone updater loop.
+    /// [internal] Unavailable in Whisply: standalone updater loop.
     #[clap(hide = true)]
     PidUpdateLoop,
 }
@@ -776,66 +1605,22 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the update action and print the result.
+/// Report the only supported update path for the managed runtime.
 fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
-    println!();
-    let cmd_str = action.command_str();
-    println!("Updating Codex via `{cmd_str}`...");
-
-    let status = {
-        #[cfg(windows)]
-        {
-            if action == UpdateAction::StandaloneWindows {
-                let (cmd, args) = action.command_args();
-                // Run the standalone PowerShell installer with PowerShell
-                // itself. Routing this through `cmd.exe /C` would parse
-                // PowerShell metacharacters like `|` before PowerShell sees
-                // the installer command.
-                std::process::Command::new(cmd).args(args).status()?
-            } else {
-                // On Windows, run via cmd.exe so .CMD/.BAT are correctly resolved (PATHEXT semantics).
-                std::process::Command::new("cmd")
-                    .args(["/C", &cmd_str])
-                    .status()?
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let (cmd, args) = action.command_args();
-            let command_path = crate::wsl_paths::normalize_for_wsl(cmd);
-            let normalized_args: Vec<String> = args
-                .iter()
-                .map(crate::wsl_paths::normalize_for_wsl)
-                .collect();
-            std::process::Command::new(&command_path)
-                .args(&normalized_args)
-                .status()?
-        }
-    };
-    if !status.success() {
-        anyhow::bail!("`{cmd_str}` failed with status {status}");
-    }
-    println!("\n🎉 Update ran successfully! Please restart Codex.");
+    // The downstream runtime is never independently installed, downloaded, or
+    // patched. The owning Whisply app update replaces the verified Runtime
+    // support tree atomically, including this executable and its catalog key
+    // resource. Keep this callback so upstream TUI update prompts cannot
+    // launch a package-manager or curl-based updater.
+    let _ = action;
+    println!(
+        "Whisply updates are installed by the managed app bundle. Update the Whisply app, then restart it."
+    );
     Ok(())
 }
 
 fn run_update_command() -> anyhow::Result<()> {
-    #[cfg(debug_assertions)]
-    {
-        anyhow::bail!(
-            "`codex update` is not available in debug builds. Install a release build of Codex to use this command."
-        );
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        let Some(action) = codex_tui::get_update_action() else {
-            anyhow::bail!(
-                "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
-            );
-        };
-        run_update_action(action)
-    }
+    run_update_action(UpdateAction::ManagedAppBundle)
 }
 
 fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
@@ -856,23 +1641,159 @@ async fn run_session_archive_cli_command(
         remote,
         config_overrides,
     } = cmd;
-    interactive =
+    let options = managed_session_command_options(
+        interactive,
+        root_config_overrides,
+        remote,
+        config_overrides,
+        root_remote,
+        root_remote_auth_token_env,
+        arg0_paths,
+    )?;
+    codex_tui::run_session_archive_command(action, target, options)
+        .await
+        .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+fn managed_session_command_options(
+    interactive: TuiCli,
+    root_config_overrides: CliConfigOverrides,
+    remote: InteractiveRemoteOptions,
+    config_overrides: SessionArchiveConfigOverrides,
+    root_remote: Option<String>,
+    root_remote_auth_token_env: Option<String>,
+    arg0_paths: Arg0DispatchPaths,
+) -> anyhow::Result<codex_tui::SessionArchiveCommandOptions> {
+    let mut interactive =
         finalize_session_archive_interactive(interactive, root_config_overrides, config_overrides);
+    configure_managed_session_provider(&mut interactive, "sessions")?;
+
+    // Do not perform a broker status preflight here. The native capability is
+    // an inherited, one-shot launch descriptor consumed by the managed model
+    // provider when the embedded app server initializes. Session operations
+    // force that provider below, so a separate CLI probe would consume the
+    // authority before the app-server boundary can use it.
     let explicit_remote_endpoint = resolve_remote_endpoint(
         remote.remote.or(root_remote),
         remote.remote_auth_token_env.or(root_remote_auth_token_env),
     )?;
-    codex_tui::run_session_archive_command(
-        action,
-        target,
-        codex_tui::SessionArchiveCommandOptions {
-            cli: interactive,
-            arg0_paths,
-            explicit_remote_endpoint,
-        },
-    )
-    .await
-    .map_err(|err| anyhow::anyhow!("{err}"))
+    Ok(codex_tui::SessionArchiveCommandOptions {
+        cli: interactive,
+        arg0_paths,
+        explicit_remote_endpoint,
+    })
+}
+
+fn configure_managed_session_provider(
+    interactive: &mut TuiCli,
+    command: &str,
+) -> anyhow::Result<()> {
+    if interactive.oss || interactive.oss_provider.is_some() {
+        anyhow::bail!(
+            "{command} requires the managed Whisply gateway; local providers are not supported"
+        );
+    }
+
+    let overrides = interactive
+        .config_overrides
+        .parse_overrides()
+        .map_err(|error| {
+            anyhow::anyhow!("failed to parse managed session configuration: {error}")
+        })?;
+    for (key, value) in overrides {
+        if key == "model_provider" && value.as_str() != Some("whisply") {
+            anyhow::bail!(
+                "{command} does not accept a user-selected model provider; use the managed Whisply gateway"
+            );
+        }
+        if key == "model_providers" || key.starts_with("model_providers.") {
+            anyhow::bail!("{command} does not accept custom model provider configuration");
+        }
+    }
+
+    // Profile/base config can retain an old local-provider selection for
+    // compatible non-session workflows. Session lifecycle is always routed
+    // through the release-owned Whisply provider, and this final override is
+    // deliberately appended after all user CLI overrides.
+    interactive
+        .config_overrides
+        .raw_overrides
+        .push(r#"model_provider="whisply""#.to_string());
+    Ok(())
+}
+
+fn print_session_list(entries: &[codex_tui::SessionListEntry], json: bool) -> anyhow::Result<()> {
+    if json {
+        serde_json::to_writer_pretty(std::io::stdout(), entries)?;
+        println!();
+        return Ok(());
+    }
+    for entry in entries {
+        let collection = if entry.archived { "archived" } else { "active" };
+        let name = terminal_cell(entry.name.as_deref().unwrap_or("(untitled)"));
+        let preview = terminal_cell(&entry.preview);
+        println!("{}\t{collection}\t{name}\t{preview}", entry.id);
+    }
+    Ok(())
+}
+
+/// List rows include user-supplied titles and previews. Keep them in a single
+/// terminal cell so a stored escape sequence cannot repaint a terminal or
+/// forge an adjacent row. JSON exports remain JSON-escaped by serde.
+fn terminal_cell(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn write_session_export(
+    export: &codex_tui::SessionExport,
+    output: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let encoded = serde_json::to_vec_pretty(export)?;
+    if encoded.len() > 2 * 1024 * 1024 {
+        anyhow::bail!("The bounded session export exceeded its 2 MiB public export limit.");
+    }
+    let Some(output) = output else {
+        std::io::stdout().write_all(&encoded)?;
+        println!();
+        return Ok(());
+    };
+
+    if output.is_absolute() && output.parent().is_none() {
+        anyhow::bail!("Refusing to write an export to a filesystem root.");
+    }
+    let parent = output
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Export output must have a parent directory."))?;
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        anyhow::bail!("Export output directory does not exist.");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&output)
+        .map_err(|error| anyhow::anyhow!("Failed to create the session export: {error}"))?;
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    println!(
+        "Exported a bounded redacted session transcript to {}.",
+        output.display()
+    );
+    Ok(())
 }
 
 fn delete_action(target: &str, force: bool) -> anyhow::Result<codex_tui::SessionArchiveAction> {
@@ -911,7 +1832,8 @@ struct FeatureToggles {
 struct InteractiveRemoteOptions {
     /// Connect the TUI to a remote app server endpoint.
     ///
-    /// Accepted forms: `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`.
+    /// Accepted forms: literal `ws://LOOPBACK_IP:PORT`, literal
+    /// `wss://LOOPBACK_IP:PORT`, `unix://`, or `unix://PATH`.
     #[arg(long = "remote", value_name = "ADDR")]
     remote: Option<String>,
 
@@ -977,6 +1899,7 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
+    codex_whisply::seal_inherited_runtime_descriptors()?;
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         cli_main(arg0_paths, remote_control_disabled).await?;
@@ -1065,6 +1988,46 @@ async fn cli_main(
                 root_config_overrides.clone(),
             );
             codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+        }
+        Some(Subcommand::Models(ModelsCommand { json })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "models",
+            )?;
+            run_whisply_models(json).await?;
+        }
+        Some(Subcommand::Controls(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "controls",
+            )?;
+            run_whisply_controls(command)?;
+        }
+        Some(Subcommand::Usage(UsageCommand { json })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "usage",
+            )?;
+            run_whisply_usage(json)?;
+        }
+        Some(Subcommand::Connectors(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "connectors",
+            )?;
+            run_whisply_connectors(command)?;
+        }
+        Some(Subcommand::Tools(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "tools",
+            )?;
+            run_whisply_tools(command)?;
         }
         Some(Subcommand::McpServer(McpServerCommand { strict_config })) => {
             reject_remote_mode_for_subcommand(
@@ -1183,50 +2146,26 @@ async fn cli_main(
                     )
                     .await?;
                 }
-                Some(AppServerSubcommand::Daemon(daemon_cli)) => match daemon_cli.subcommand {
-                    AppServerDaemonSubcommand::Start => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Start).await?;
+                Some(AppServerSubcommand::Daemon(daemon_cli)) => {
+                    reject_legacy_app_server_daemon_subcommand(&daemon_cli.subcommand)?;
+                    match daemon_cli.subcommand {
+                        AppServerDaemonSubcommand::Stop => {
+                            print_app_server_daemon_output(AppServerLifecycleCommand::Stop).await?;
+                        }
+                        AppServerDaemonSubcommand::Version => {
+                            print_app_server_daemon_output(AppServerLifecycleCommand::Version)
+                                .await?;
+                        }
+                        AppServerDaemonSubcommand::Bootstrap(_)
+                        | AppServerDaemonSubcommand::Start
+                        | AppServerDaemonSubcommand::Restart
+                        | AppServerDaemonSubcommand::EnableRemoteControl
+                        | AppServerDaemonSubcommand::DisableRemoteControl
+                        | AppServerDaemonSubcommand::PidUpdateLoop => {
+                            unreachable!("rejected before standalone daemon setup")
+                        }
                     }
-                    AppServerDaemonSubcommand::Bootstrap(bootstrap_cli) => {
-                        let output =
-                            codex_app_server_daemon::bootstrap(AppServerBootstrapOptions {
-                                remote_control_enabled: bootstrap_cli.remote_control,
-                            })
-                            .await?;
-                        println!("{}", serde_json::to_string(&output)?);
-                    }
-                    AppServerDaemonSubcommand::Restart => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart).await?;
-                    }
-                    AppServerDaemonSubcommand::EnableRemoteControl => {
-                        print_app_server_remote_control_output(AppServerRemoteControlMode::Enabled)
-                            .await?;
-                    }
-                    AppServerDaemonSubcommand::DisableRemoteControl => {
-                        print_app_server_remote_control_output(
-                            AppServerRemoteControlMode::Disabled,
-                        )
-                        .await?;
-                    }
-                    AppServerDaemonSubcommand::Stop => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Stop).await?;
-                    }
-                    AppServerDaemonSubcommand::Version => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Version).await?;
-                    }
-                    AppServerDaemonSubcommand::PidUpdateLoop => {
-                        let cli_overrides = root_config_overrides
-                            .parse_overrides()
-                            .map_err(anyhow::Error::msg)?;
-                        let config = ConfigBuilder::default()
-                            .cli_overrides(cli_overrides)
-                            .build()
-                            .await
-                            .map_err(anyhow::Error::from);
-                        let http_client_factory = updater_http_client_factory(config);
-                        codex_app_server_daemon::run_pid_update_loop(http_client_factory).await?;
-                    }
-                },
+                }
                 Some(AppServerSubcommand::Proxy(proxy_cli)) => {
                     let socket_path = match proxy_cli.socket_path {
                         Some(socket_path) => socket_path,
@@ -1259,21 +2198,7 @@ async fn cli_main(
                 }
             }
         }
-        Some(Subcommand::RemoteControl(remote_control_cli)) => {
-            let subcommand_name = remote_control_cli.subcommand_name();
-            reject_remote_mode_for_subcommand(
-                root_remote.as_deref(),
-                root_remote_auth_token_env.as_deref(),
-                subcommand_name,
-            )?;
-            remote_control_cmd::run(
-                remote_control_cli,
-                arg0_paths.clone(),
-                root_config_overrides,
-                psp,
-            )
-            .await?;
-        }
+        Some(Subcommand::RemoteControl(_)) => reject_remote_control_for_whisply()?,
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(app_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1291,6 +2216,16 @@ async fn cli_main(
             remote,
             config_overrides,
         })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "resume",
+            )?;
+            reject_remote_mode_for_subcommand(
+                remote.remote.as_deref(),
+                remote.remote_auth_token_env.as_deref(),
+                "resume",
+            )?;
             let SessionTuiCli(config_overrides) = config_overrides;
             interactive = finalize_resume_interactive(
                 interactive,
@@ -1301,6 +2236,7 @@ async fn cli_main(
                 include_non_interactive,
                 config_overrides,
             );
+            configure_managed_session_provider(&mut interactive, "resume")?;
             let exit_info = run_interactive_tui(
                 interactive,
                 remote.remote.or(root_remote.clone()),
@@ -1313,6 +2249,16 @@ async fn cli_main(
             handle_app_exit(exit_info)?;
         }
         Some(Subcommand::Archive(cmd)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "archive",
+            )?;
+            reject_remote_mode_for_subcommand(
+                cmd.remote.remote.as_deref(),
+                cmd.remote.remote_auth_token_env.as_deref(),
+                "archive",
+            )?;
             let output = run_session_archive_cli_command(
                 codex_tui::SessionArchiveAction::Archive,
                 cmd,
@@ -1326,6 +2272,16 @@ async fn cli_main(
             println!("{output}");
         }
         Some(Subcommand::Delete(DeleteCommand { session, force })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "delete",
+            )?;
+            reject_remote_mode_for_subcommand(
+                session.remote.remote.as_deref(),
+                session.remote.remote_auth_token_env.as_deref(),
+                "delete",
+            )?;
             let action = delete_action(&session.target, force)?;
             let output = run_session_archive_cli_command(
                 action,
@@ -1340,6 +2296,16 @@ async fn cli_main(
             println!("{output}");
         }
         Some(Subcommand::Unarchive(cmd)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "unarchive",
+            )?;
+            reject_remote_mode_for_subcommand(
+                cmd.remote.remote.as_deref(),
+                cmd.remote.remote_auth_token_env.as_deref(),
+                "unarchive",
+            )?;
             let output = run_session_archive_cli_command(
                 codex_tui::SessionArchiveAction::Unarchive,
                 cmd,
@@ -1359,6 +2325,16 @@ async fn cli_main(
             remote,
             config_overrides,
         })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "fork",
+            )?;
+            reject_remote_mode_for_subcommand(
+                remote.remote.as_deref(),
+                remote.remote_auth_token_env.as_deref(),
+                "fork",
+            )?;
             let SessionTuiCli(config_overrides) = config_overrides;
             interactive = finalize_fork_interactive(
                 interactive,
@@ -1368,6 +2344,7 @@ async fn cli_main(
                 all,
                 config_overrides,
             );
+            configure_managed_session_provider(&mut interactive, "fork")?;
             let exit_info = run_interactive_tui(
                 interactive,
                 remote.remote.or(root_remote.clone()),
@@ -1379,61 +2356,167 @@ async fn cli_main(
             .await?;
             handle_app_exit(exit_info)?;
         }
-        Some(Subcommand::Login(mut login_cli)) => {
+        Some(Subcommand::Sessions(SessionsCommand { action })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "sessions",
+            )?;
+            match action {
+                SessionsSubcommand::List(SessionsListCommand {
+                    archived,
+                    all,
+                    limit,
+                    search,
+                    json,
+                    remote,
+                    config_overrides,
+                }) => {
+                    reject_remote_mode_for_subcommand(
+                        remote.remote.as_deref(),
+                        remote.remote_auth_token_env.as_deref(),
+                        "sessions list",
+                    )?;
+                    let scope = if all {
+                        codex_tui::SessionCollectionScope::All
+                    } else if archived {
+                        codex_tui::SessionCollectionScope::Archived
+                    } else {
+                        codex_tui::SessionCollectionScope::Active
+                    };
+                    let options = managed_session_command_options(
+                        interactive,
+                        root_config_overrides.clone(),
+                        remote,
+                        config_overrides,
+                        root_remote.clone(),
+                        root_remote_auth_token_env.clone(),
+                        arg0_paths.clone(),
+                    )?;
+                    let entries =
+                        codex_tui::run_session_list_command(options, scope, limit, search)
+                            .await
+                            .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    print_session_list(&entries, json)?;
+                }
+                SessionsSubcommand::Export(SessionsExportCommand {
+                    target,
+                    output,
+                    remote,
+                    config_overrides,
+                }) => {
+                    reject_remote_mode_for_subcommand(
+                        remote.remote.as_deref(),
+                        remote.remote_auth_token_env.as_deref(),
+                        "sessions export",
+                    )?;
+                    let options = managed_session_command_options(
+                        interactive,
+                        root_config_overrides.clone(),
+                        remote,
+                        config_overrides,
+                        root_remote.clone(),
+                        root_remote_auth_token_env.clone(),
+                        arg0_paths.clone(),
+                    )?;
+                    let export = codex_tui::run_session_export_command(options, target)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    write_session_export(&export, output)?;
+                }
+            }
+        }
+        Some(Subcommand::Skills(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "skills",
+            )?;
+            whisply_skills::run(command)?;
+        }
+        Some(Subcommand::Config(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "config",
+            )?;
+            whisply_config::run_config(command).await?;
+        }
+        Some(Subcommand::Profile(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "profile",
+            )?;
+            whisply_config::run_profile(command).await?;
+        }
+        Some(Subcommand::Diagnostics(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "diagnostics",
+            )?;
+            whisply_diagnostics::run(command)?;
+        }
+        Some(Subcommand::Test(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "test release",
+            )?;
+            reject_release_test_overrides(psp, &root_config_overrides)?;
+            whisply_verify::run_test(command)?;
+        }
+        Some(Subcommand::Login(login_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
                 root_remote_auth_token_env.as_deref(),
                 "login",
             )?;
-            prepend_config_flags(
-                &mut login_cli.config_overrides,
-                root_config_overrides.clone(),
-            );
             match login_cli.action {
                 Some(LoginSubcommand::Status) => {
-                    run_login_status(login_cli.config_overrides).await;
+                    print_whisply_login_status()?;
                 }
+                Some(LoginSubcommand::Whoami) => print_whisply_whoami()?,
                 None => {
-                    if login_cli.with_api_key && login_cli.with_access_token {
+                    if login_cli.with_api_key
+                        || login_cli.with_access_token
+                        || login_cli.api_key.is_some()
+                        || login_cli.use_device_code
+                        || login_cli.issuer_base_url.is_some()
+                        || login_cli.client_id.is_some()
+                    {
                         eprintln!(
-                            "Choose one login credential source: --with-api-key or --with-access-token."
+                            "Whisply does not accept API keys, access tokens, or custom OAuth settings in the runtime. Sign in through the managed Whisply app."
                         );
-                        std::process::exit(1);
-                    } else if login_cli.use_device_code {
-                        run_login_with_device_code(
-                            login_cli.config_overrides,
-                            login_cli.issuer_base_url,
-                            login_cli.client_id,
-                        )
-                        .await;
-                    } else if login_cli.api_key.is_some() {
-                        eprintln!(
-                            "The --api-key flag is no longer supported. Pipe the key instead, e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`."
-                        );
-                        std::process::exit(1);
-                    } else if login_cli.with_api_key {
-                        let api_key = read_api_key_from_stdin();
-                        run_login_with_api_key(login_cli.config_overrides, api_key).await;
-                    } else if login_cli.with_access_token {
-                        let access_token = read_access_token_from_stdin();
-                        run_login_with_access_token(login_cli.config_overrides, access_token).await;
+                        std::process::exit(2);
                     } else {
-                        run_login_with_chatgpt(login_cli.config_overrides).await;
+                        begin_whisply_browser_login()?;
                     }
                 }
             }
         }
-        Some(Subcommand::Logout(mut logout_cli)) => {
+        Some(Subcommand::Logout(logout_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
                 root_remote_auth_token_env.as_deref(),
                 "logout",
             )?;
-            prepend_config_flags(
-                &mut logout_cli.config_overrides,
-                root_config_overrides.clone(),
-            );
-            run_logout(logout_cli.config_overrides).await;
+            let _ = logout_cli.config_overrides;
+            let broker = native_broker_for_cli()?;
+            let status = broker.status().map_err(broker_cli_error)?;
+            broker
+                .logout(status.account_epoch.as_deref())
+                .map_err(broker_cli_error)?;
+            println!("Signed out of the managed Whisply account.");
+        }
+        Some(Subcommand::Whoami) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "whoami",
+            )?;
+            print_whisply_whoami()?;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1451,33 +2534,27 @@ async fn cli_main(
             )?;
             run_update_command()?;
         }
+        Some(Subcommand::Version(VersionCommand { verbose })) => {
+            print_whisply_version(verbose)?;
+        }
         Some(Subcommand::Doctor(doctor_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
                 root_remote_auth_token_env.as_deref(),
                 "doctor",
             )?;
-            doctor::run_doctor(
+            // Type-erase this sizeable diagnostics future at the CLI boundary;
+            // it keeps command dispatch independent from doctor internals.
+            let doctor_result = Box::pin(doctor::run_doctor(
                 doctor_cli,
                 root_config_overrides.clone(),
                 &interactive,
                 &arg0_paths,
-            )
-            .await?;
+            ))
+            .await;
+            doctor_result?;
         }
-        Some(Subcommand::Cloud(mut cloud_cli)) => {
-            reject_remote_mode_for_subcommand(
-                root_remote.as_deref(),
-                root_remote_auth_token_env.as_deref(),
-                "cloud",
-            )?;
-            prepend_config_flags(
-                &mut cloud_cli.config_overrides,
-                root_config_overrides.clone(),
-            );
-            codex_cloud_tasks::run_main(cloud_cli, arg0_paths.codex_linux_sandbox_exe.clone())
-                .await?;
-        }
+        Some(Subcommand::Cloud(_)) => reject_cloud_tasks_for_whisply()?,
         Some(Subcommand::Sandbox(mut sandbox_cli)) => {
             let config_profile = sandbox_cli
                 .config_profile
@@ -1541,7 +2618,7 @@ async fn cli_main(
                     root_remote_auth_token_env.as_deref(),
                     "debug models",
                 )?;
-                run_debug_models_command(cmd, root_config_overrides).await?;
+                run_debug_models_command(cmd).await?;
             }
             DebugSubcommand::AppServer(cmd) => {
                 reject_remote_mode_for_subcommand(
@@ -1564,6 +2641,14 @@ async fn cli_main(
                     arg0_paths.clone(),
                 )
                 .await?;
+            }
+            DebugSubcommand::Verify(command) => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug verify",
+                )?;
+                whisply_verify::run(command)?;
             }
             DebugSubcommand::TraceReduce(cmd) => {
                 reject_remote_mode_for_subcommand(
@@ -1604,15 +2689,7 @@ async fn cli_main(
             );
             run_apply_command(apply_cli, /*cwd*/ None).await?;
         }
-        Some(Subcommand::ResponsesApiProxy(args)) => {
-            reject_remote_mode_for_subcommand(
-                root_remote.as_deref(),
-                root_remote_auth_token_env.as_deref(),
-                "responses-api-proxy",
-            )?;
-            tokio::task::spawn_blocking(move || codex_responses_api_proxy::run_main(args))
-                .await??;
-        }
+        Some(Subcommand::ResponsesApiProxy(_)) => reject_responses_api_proxy_for_whisply()?,
         Some(Subcommand::StdioToUds(cmd)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -1710,15 +2787,57 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Delete(_)
         | Subcommand::Unarchive(_)
         | Subcommand::Fork(_)
+        | Subcommand::Sessions(_)
         | Subcommand::Mcp(_)
         | Subcommand::Sandbox(_)
         | Subcommand::Debug(DebugCommand {
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex sessions`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
         ),
     }
+}
+
+/// `whisply test release` is a fixed, zero-authority plan. Root configuration
+/// and process-only routing flags would make that plan caller-controlled, so
+/// reject them before the command reaches the release-test boundary.
+fn reject_release_test_overrides(
+    psp: bool,
+    root_config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<()> {
+    if psp || !root_config_overrides.raw_overrides.is_empty() {
+        anyhow::bail!(
+            "`whisply test release` uses a fixed plan and does not accept process routing, configuration, or feature overrides"
+        );
+    }
+    Ok(())
+}
+
+fn print_whisply_version(verbose: bool) -> anyhow::Result<()> {
+    if !verbose {
+        println!("{PRODUCT_NAME} {WHISPLY_RUNTIME_VERSION}");
+        return Ok(());
+    }
+
+    let tool_registry = first_party_tool_registry();
+    let report = serde_json::json!({
+        "product": PRODUCT_NAME,
+        "executable": "whisply",
+        "runtimeVersion": WHISPLY_RUNTIME_VERSION,
+        "upstream": {
+            "tag": UPSTREAM_TAG,
+            "commit": UPSTREAM_COMMIT,
+        },
+        "manifestSource": "Runtime/upstream-base.json",
+        "protocolSchemaSource": "Runtime/whisply-codex/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
+        "toolRegistry": {
+            "source": "Runtime/whisply-codex/codex-rs/whisply-runtime/src/tools.rs",
+            "sha256": tool_registry.hash()?,
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 async fn run_exec_server_command(
@@ -1735,163 +2854,36 @@ async fn run_exec_server_command(
         codex_self_exe,
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
-    if let Some(base_url) = cmd.remote {
-        let environment_id = cmd
-            .environment_id
-            .ok_or_else(|| anyhow::anyhow!("--environment-id is required when --remote is set"))?;
-        let config = load_exec_server_config(root_config_overrides, strict_config).await?;
-        let (_otel, telemetry) = exec_server_telemetry::init(Some(&config));
-        let auth_provider =
-            load_exec_server_remote_auth_provider(&config, &base_url, cmd.use_agent_identity_auth)
-                .await?;
-        let mut remote_config = codex_exec_server::RemoteEnvironmentConfig::new(
-            base_url,
-            environment_id,
-            auth_provider,
-            config.http_client_factory(),
-        )?;
-        if let Some(name) = cmd.name {
-            remote_config.name = name;
-        }
-        remote_config.request_dispatch_mode = cmd.request_dispatch_mode;
-        let remote_config = remote_config.with_telemetry(telemetry);
-        let parent_lifetime = if cmd.exit_on_stdin_close {
-            exec_server_telemetry::ParentLifetime::StdinPipe
-        } else {
-            exec_server_telemetry::ParentLifetime::Independent
-        };
-        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
-        exec_server_telemetry::run_until_shutdown(
-            async move {
-                codex_exec_server::run_remote_environment_until_shutdown(
-                    remote_config,
-                    runtime_paths,
-                    async move {
-                        let _ = shutdown_receiver.await;
-                    },
-                )
-                .await
-            },
-            parent_lifetime,
-            exec_server_telemetry::ShutdownBehavior::Graceful(shutdown_sender),
-        )
-        .await?;
-        Ok(())
+    let config_result = load_exec_server_config(root_config_overrides, strict_config).await;
+    let config = if strict_config {
+        Some(config_result?)
     } else {
-        let config_result = load_exec_server_config(root_config_overrides, strict_config).await;
-        let config = if strict_config {
-            Some(config_result?)
-        } else {
-            config_result.ok()
-        };
-        let (_otel, telemetry) = exec_server_telemetry::init(config.as_ref());
-        let http_client_factory = config
-            .as_ref()
-            .map(codex_core::config::Config::http_client_factory)
-            .unwrap_or_else(|| {
-                codex_http_client::HttpClientFactory::new(
-                    codex_http_client::OutboundProxyPolicy::ReqwestDefault,
-                )
-            });
-        let listen_url = cmd
-            .listen
-            .unwrap_or_else(|| codex_exec_server::DEFAULT_LISTEN_URL.to_string());
-        exec_server_telemetry::run_until_shutdown(
-            async move {
-                codex_exec_server::run_main_with_telemetry(
-                    &listen_url,
-                    runtime_paths,
-                    telemetry,
-                    http_client_factory,
-                    cmd.request_dispatch_mode,
-                )
-                .await
-            },
-            exec_server_telemetry::ParentLifetime::Independent,
-            exec_server_telemetry::ShutdownBehavior::Immediate,
+        config_result.ok()
+    };
+    let (_otel, telemetry) = exec_server_telemetry::init(config.as_ref());
+    let http_client_factory = config
+        .as_ref()
+        .map(codex_core::config::Config::http_client_factory)
+        .unwrap_or_else(|| {
+            codex_http_client::HttpClientFactory::new(
+                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+            )
+        });
+    let listen_url = cmd
+        .listen
+        .unwrap_or_else(|| codex_exec_server::DEFAULT_LISTEN_URL.to_string());
+    exec_server_telemetry::run_until_shutdown(async move {
+        codex_exec_server::run_main_with_telemetry(
+            &listen_url,
+            runtime_paths,
+            telemetry,
+            http_client_factory,
+            cmd.request_dispatch_mode,
         )
         .await
-        .map_err(anyhow::Error::from_boxed)
-    }
-}
-
-async fn load_exec_server_remote_auth_provider(
-    config: &codex_core::config::Config,
-    base_url: &str,
-    use_agent_identity_auth: bool,
-) -> anyhow::Result<codex_api::SharedAuthProvider> {
-    if use_agent_identity_auth {
-        read_codex_access_token_from_env().ok_or_else(|| {
-            anyhow::anyhow!("CODEX_ACCESS_TOKEN is required when --use-agent-identity-auth is set")
-        })?;
-        let auth = AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
-            .await
-            .auth()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Agent Identity authentication is unavailable"))?;
-        if !matches!(auth, CodexAuth::AgentIdentity(_)) {
-            anyhow::bail!(
-                "CODEX_ACCESS_TOKEN did not provide permitted Agent Identity authentication"
-            );
-        }
-        return Ok(codex_model_provider::auth_provider_from_auth(&auth));
-    }
-
-    let auth = load_exec_server_remote_auth(
-        config,
-        "remote exec-server registration requires ChatGPT authentication or API key authentication; run `codex login` or set CODEX_API_KEY",
-    )
-    .await?;
-
-    if !is_supported_exec_server_remote_auth(&auth) {
-        anyhow::bail!(
-            "remote exec-server registration requires ChatGPT authentication or API key authentication; Agent Identity auth requires --use-agent-identity-auth"
-        );
-    }
-
-    if auth.is_api_key_auth() {
-        validate_api_key_remote_host(base_url)?;
-    }
-
-    Ok(codex_model_provider::auth_provider_from_auth(&auth))
-}
-
-fn is_supported_exec_server_remote_auth(auth: &CodexAuth) -> bool {
-    auth.is_chatgpt_auth() || auth.is_api_key_auth()
-}
-
-fn validate_api_key_remote_host(base_url: &str) -> anyhow::Result<()> {
-    let url = url::Url::parse(base_url)
-        .map_err(|err| anyhow::anyhow!("invalid remote exec-server registration URL: {err}"))?;
-    let host = url.host().ok_or_else(|| {
-        anyhow::anyhow!("remote exec-server registration URL must include a host")
-    })?;
-
-    let is_loopback = match &host {
-        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
-        url::Host::Ipv4(ip) => ip.is_loopback(),
-        url::Host::Ipv6(ip) => ip.is_loopback(),
-    };
-    let is_openai_host = match &host {
-        url::Host::Domain(host) => ["openai.com", "openai.org"].into_iter().any(|domain| {
-            host.eq_ignore_ascii_case(domain)
-                || host.to_ascii_lowercase().ends_with(&format!(".{domain}"))
-        }),
-        _ => false,
-    };
-    let is_allowed = match url.scheme() {
-        "https" => is_loopback || is_openai_host,
-        "http" => is_loopback,
-        _ => false,
-    };
-
-    if !is_allowed {
-        anyhow::bail!(
-            "remote exec-server API-key authentication is restricted to HTTPS openai.com and openai.org hosts and subdomains or loopback hosts"
-        );
-    }
-
-    Ok(())
+    })
+    .await
+    .map_err(anyhow::Error::from_boxed)
 }
 
 async fn load_exec_server_config(
@@ -1906,27 +2898,6 @@ async fn load_exec_server_config(
         .strict_config(strict_config)
         .build()
         .await?)
-}
-
-async fn load_exec_server_remote_auth(
-    config: &codex_core::config::Config,
-    missing_auth_error: &'static str,
-) -> anyhow::Result<codex_login::CodexAuth> {
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
-
-    let auth = match auth_manager.auth().await {
-        Some(auth) => auth,
-        None => {
-            auth_manager.reload().await;
-            auth_manager
-                .auth()
-                .await
-                .ok_or_else(|| anyhow::anyhow!(missing_auth_error))?
-        }
-    };
-
-    Ok(auth)
 }
 
 async fn enable_feature_in_config(feature: &str) -> anyhow::Result<()> {
@@ -2074,15 +3045,7 @@ async fn run_debug_prompt_input_command(
     let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
         config.codex_home.clone(),
     ));
-    let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
     let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
-    codex_git_attribution::install(
-        &mut extensions,
-        auth_manager,
-        config.chatgpt_base_url.clone(),
-        config.http_client_factory(),
-    );
     codex_skills_extension::install(&mut extensions, |config: &Config| {
         codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
@@ -2106,34 +3069,11 @@ async fn run_debug_prompt_input_command(
     Ok(())
 }
 
-async fn run_debug_models_command(
-    cmd: DebugModelsCommand,
-    root_config_overrides: CliConfigOverrides,
-) -> anyhow::Result<()> {
-    let catalog = if cmd.bundled {
-        bundled_models_response()?
-    } else {
-        let cli_overrides = root_config_overrides
-            .parse_overrides()
-            .map_err(anyhow::Error::msg)?;
-        let config = ConfigBuilder::default()
-            .cli_overrides(cli_overrides)
-            .build()
-            .await?;
-        let auth_manager =
-            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;
-        let models_manager = build_models_manager(&config, auth_manager);
-        models_manager
-            .raw_model_catalog(
-                RefreshStrategy::OnlineIfUncached,
-                config.http_client_factory(),
-            )
-            .await
-    };
-
-    serde_json::to_writer(std::io::stdout(), &catalog)?;
-    println!();
-    Ok(())
+async fn run_debug_models_command(cmd: DebugModelsCommand) -> anyhow::Result<()> {
+    let _ = cmd;
+    // Keep the old hidden route as a compatibility spelling, but make its
+    // output use the same signed managed catalog as `whisply models --json`.
+    run_whisply_models(/*json*/ true).await
 }
 
 async fn run_debug_clear_memories_command(
@@ -2195,6 +3135,39 @@ fn reject_remote_mode_for_subcommand(
     Ok(())
 }
 
+fn reject_cloud_tasks_for_whisply() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`whisply cloud` is unavailable because cloud tasks require direct ChatGPT authority"
+    );
+}
+
+fn reject_responses_api_proxy_for_whisply() -> anyhow::Result<()> {
+    anyhow::bail!("`whisply responses-api-proxy` is unavailable; use the managed Whisply gateway");
+}
+
+fn reject_remote_control_for_whisply() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "`whisply remote-control` is unavailable; remote control is owned by the managed Whisply app"
+    );
+}
+
+fn reject_legacy_app_server_daemon_subcommand(
+    subcommand: &AppServerDaemonSubcommand,
+) -> anyhow::Result<()> {
+    let name = match subcommand {
+        AppServerDaemonSubcommand::Bootstrap(_) => "bootstrap",
+        AppServerDaemonSubcommand::Start => "start",
+        AppServerDaemonSubcommand::Restart => "restart",
+        AppServerDaemonSubcommand::EnableRemoteControl => "enable-remote-control",
+        AppServerDaemonSubcommand::DisableRemoteControl => "disable-remote-control",
+        AppServerDaemonSubcommand::PidUpdateLoop => "pid-update-loop",
+        AppServerDaemonSubcommand::Stop | AppServerDaemonSubcommand::Version => return Ok(()),
+    };
+    anyhow::bail!(
+        "`whisply app-server daemon {name}` is unavailable because standalone daemon management can start remote control or an updater"
+    );
+}
+
 fn reject_root_strict_config_for_subcommand(
     strict_config: bool,
     subcommand: &Option<Subcommand>,
@@ -2237,20 +3210,33 @@ fn unsupported_subcommand_name_for_strict_config(
         | Some(Subcommand::Delete(_))
         | Some(Subcommand::Unarchive(_))
         | Some(Subcommand::Fork(_))
+        | Some(Subcommand::Sessions(_))
         | Some(Subcommand::Doctor(_)) => None,
         Some(Subcommand::AppServer(app_server)) if app_server.subcommand.is_none() => None,
         Some(Subcommand::AppServer(app_server)) => {
             Some(app_server_subcommand_name(app_server.subcommand.as_ref()))
         }
-        Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
+        Some(Subcommand::RemoteControl(_)) => Some("remote-control"),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
         Some(Subcommand::Logout(_)) => Some("logout"),
+        Some(Subcommand::Whoami) => Some("whoami"),
+        Some(Subcommand::Models(_)) => Some("models"),
+        Some(Subcommand::Controls(_)) => Some("controls"),
+        Some(Subcommand::Usage(_)) => Some("usage"),
+        Some(Subcommand::Connectors(_)) => Some("connectors"),
+        Some(Subcommand::Tools(_)) => Some("tools"),
+        Some(Subcommand::Skills(_)) => Some("skills"),
+        Some(Subcommand::Config(_)) => Some("config"),
+        Some(Subcommand::Profile(_)) => Some("profile"),
+        Some(Subcommand::Diagnostics(_)) => Some("diagnostics"),
+        Some(Subcommand::Test(_)) => Some("test release"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
+        Some(Subcommand::Version(_)) => Some("version"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
         Some(Subcommand::Debug(_)) => Some("debug"),
@@ -2322,28 +3308,6 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
 
 async fn print_app_server_daemon_output(command: AppServerLifecycleCommand) -> anyhow::Result<()> {
     let output = codex_app_server_daemon::run(command).await?;
-    println!("{}", serde_json::to_string(&output)?);
-    Ok(())
-}
-
-fn updater_http_client_factory(
-    config: anyhow::Result<codex_core::config::Config>,
-) -> codex_http_client::HttpClientFactory {
-    match config {
-        Ok(config) => config.http_client_factory(),
-        Err(error) => {
-            eprintln!("warning: failed to load updater network configuration: {error}");
-            codex_http_client::HttpClientFactory::new(
-                codex_http_client::OutboundProxyPolicy::ReqwestDefault,
-            )
-        }
-    }
-}
-
-async fn print_app_server_remote_control_output(
-    mode: AppServerRemoteControlMode,
-) -> anyhow::Result<()> {
-    let output = codex_app_server_daemon::set_remote_control(mode).await?;
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
@@ -2451,6 +3415,21 @@ fn resolve_remote_endpoint(
     remote: Option<String>,
     remote_auth_token_env: Option<String>,
 ) -> std::io::Result<Option<codex_tui::RemoteAppServerEndpoint>> {
+    resolve_remote_endpoint_with(
+        remote,
+        remote_auth_token_env,
+        read_remote_auth_token_from_env_var,
+    )
+}
+
+fn resolve_remote_endpoint_with<F>(
+    remote: Option<String>,
+    remote_auth_token_env: Option<String>,
+    read_auth_token: F,
+) -> std::io::Result<Option<codex_tui::RemoteAppServerEndpoint>>
+where
+    F: FnOnce(&str) -> anyhow::Result<String>,
+{
     let mut remote_endpoint = remote
         .as_deref()
         .map(codex_tui::resolve_remote_addr)
@@ -2464,17 +3443,16 @@ fn resolve_remote_endpoint(
         };
         if !codex_tui::remote_addr_supports_auth_token(endpoint) {
             return Err(std::io::Error::other(
-                "`--remote-auth-token-env` requires a `wss://` or loopback `ws://` remote.",
+                "`--remote-auth-token-env` requires a literal loopback WebSocket `--remote`.",
             ));
         }
-        let auth_token = read_remote_auth_token_from_env_var(&remote_auth_token_env)
-            .map_err(std::io::Error::other)?;
+        let auth_token = read_auth_token(&remote_auth_token_env).map_err(std::io::Error::other)?;
         let codex_tui::RemoteAppServerEndpoint::WebSocket {
             auth_token: slot, ..
         } = endpoint
         else {
             return Err(std::io::Error::other(
-                "`--remote-auth-token-env` requires a `wss://` or loopback `ws://` remote.",
+                "`--remote-auth-token-env` requires a literal loopback WebSocket `--remote`.",
             ));
         };
         *slot = Some(auth_token);
@@ -2642,89 +3620,122 @@ mod tests {
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
 
-    #[tokio::test]
-    async fn updater_http_client_factory_honors_respect_system_proxy() {
-        let codex_home = tempfile::tempdir().expect("temporary Codex home");
-        let config = ConfigBuilder::default()
-            .codex_home(codex_home.path().to_path_buf())
-            .cli_overrides(vec![(
-                "features.respect_system_proxy".to_string(),
-                toml::Value::Boolean(true),
-            )])
-            .build()
-            .await
-            .expect("config should load");
-
+    #[test]
+    fn cloud_tasks_are_rejected_before_runtime_setup() {
+        let err = reject_cloud_tasks_for_whisply()
+            .expect_err("Whisply must not start the direct cloud-tasks client");
         assert_eq!(
-            updater_http_client_factory(Ok(config)).outbound_proxy_policy(),
-            codex_http_client::OutboundProxyPolicy::RespectSystemProxy
+            err.to_string(),
+            "`whisply cloud` is unavailable because cloud tasks require direct ChatGPT authority"
         );
     }
 
     #[test]
-    fn updater_http_client_factory_falls_back_when_config_load_fails() {
+    fn direct_proxy_and_remote_control_commands_are_rejected_without_runtime_setup() {
+        let proxy = reject_responses_api_proxy_for_whisply()
+            .expect_err("Whisply must not start the direct responses proxy");
         assert_eq!(
-            updater_http_client_factory(Err(anyhow::anyhow!("invalid config")))
-                .outbound_proxy_policy(),
-            codex_http_client::OutboundProxyPolicy::ReqwestDefault
+            proxy.to_string(),
+            "`whisply responses-api-proxy` is unavailable; use the managed Whisply gateway"
+        );
+
+        let remote_control = reject_remote_control_for_whisply()
+            .expect_err("Whisply must not start standalone remote control");
+        assert_eq!(
+            remote_control.to_string(),
+            "`whisply remote-control` is unavailable; remote control is owned by the managed Whisply app"
         );
     }
 
     #[test]
-    fn exec_server_remote_auth_accepts_api_key_auth() {
-        let auth = CodexAuth::from_api_key("sk-test");
+    fn standalone_daemon_authority_commands_are_rejected_but_local_stop_and_version_remain() {
+        let rejected = [
+            AppServerDaemonSubcommand::Bootstrap(AppServerBootstrapCommand {
+                remote_control: false,
+            }),
+            AppServerDaemonSubcommand::Start,
+            AppServerDaemonSubcommand::Restart,
+            AppServerDaemonSubcommand::EnableRemoteControl,
+            AppServerDaemonSubcommand::DisableRemoteControl,
+            AppServerDaemonSubcommand::PidUpdateLoop,
+        ];
+        for subcommand in &rejected {
+            let err = reject_legacy_app_server_daemon_subcommand(subcommand)
+                .expect_err("standalone daemon authority must be unavailable");
+            assert!(err.to_string().contains("standalone daemon management"));
+        }
 
-        assert!(is_supported_exec_server_remote_auth(&auth));
-    }
-
-    #[test]
-    fn exec_server_remote_api_key_auth_accepts_https_openai_domains() {
-        for base_url in [
-            "https://openai.com/api",
-            "https://service.openai.com/api",
-            "https://openai.org/api",
-            "https://service.openai.org/api",
+        for subcommand in [
+            AppServerDaemonSubcommand::Stop,
+            AppServerDaemonSubcommand::Version,
         ] {
-            assert!(validate_api_key_remote_host(base_url).is_ok());
+            reject_legacy_app_server_daemon_subcommand(&subcommand)
+                .expect("safe local daemon action should remain available");
         }
     }
 
     #[test]
-    fn exec_server_remote_api_key_auth_accepts_http_loopback() {
-        for base_url in [
-            "http://localhost:8098/api",
-            "http://127.0.0.1:8098/api",
-            "http://[::1]:8098/api",
-        ] {
-            assert!(validate_api_key_remote_host(base_url).is_ok());
+    fn controls_cli_parsing_excludes_overlay_only_names() {
+        let cli = MultitoolCli::try_parse_from([
+            "whisply",
+            "controls",
+            "computer-use-route",
+            "--route",
+            "native-apps",
+            "--enabled",
+            "true",
+        ])
+        .expect("ordinary control should parse");
+        let Some(Subcommand::Controls(ControlsCommand {
+            action: ControlsSubcommand::ComputerUseRoute { route, enabled },
+        })) = cli.subcommand
+        else {
+            panic!("expected ordinary Computer Use route control");
+        };
+        assert_eq!(route, "native-apps");
+        assert!(enabled);
+        assert_matches!(
+            parse_host_controls_route(&route),
+            Ok(HostControlsComputerUseRoute::NativeApps)
+        );
+
+        for overlay_only in ["arm", "exam", "invisible", "undetected"] {
+            assert!(
+                MultitoolCli::try_parse_from(["whisply", "controls", overlay_only]).is_err(),
+                "{overlay_only} must not be a controls subcommand"
+            );
+            assert!(parse_host_controls_route(overlay_only).is_err());
+            assert!(parse_host_controls_builtin(overlay_only).is_err());
+            assert!(parse_host_controls_interactive_action(overlay_only).is_err());
         }
     }
 
     #[test]
-    fn exec_server_remote_api_key_auth_rejects_http_openai_domain() {
-        for base_url in [
-            "http://service.openai.com/api",
-            "http://service.openai.org/api",
-        ] {
-            let error = validate_api_key_remote_host(base_url)
-                .expect_err("reject plaintext OpenAI destination");
+    fn controls_cli_rejects_unsupported_ordinary_values() {
+        assert!(parse_host_controls_route("system-settings").is_err());
+        assert!(parse_host_controls_builtin("local-files").is_err());
+        assert!(parse_host_controls_permission("unrestricted").is_err());
+        assert!(parse_host_controls_audio_mode("invisible").is_err());
+    }
 
-            assert_eq!(
-                error.to_string(),
-                "remote exec-server API-key authentication is restricted to HTTPS openai.com and openai.org hosts and subdomains or loopback hosts"
+    #[test]
+    fn exec_server_rejects_legacy_remote_registration_flags() {
+        for flag in [
+            "--remote",
+            "--environment-id",
+            "--name",
+            "--use-agent-identity-auth",
+            "--exit-on-stdin-close",
+        ] {
+            let mut args = vec!["whisply", "exec-server", flag];
+            if matches!(flag, "--remote" | "--environment-id" | "--name") {
+                args.push("https://example.invalid");
+            }
+            assert!(
+                MultitoolCli::try_parse_from(args).is_err(),
+                "{flag} must not be a Whisply public CLI option"
             );
         }
-    }
-
-    #[test]
-    fn exec_server_remote_api_key_auth_rejects_suffix_spoof() {
-        let error = validate_api_key_remote_host("https://service.openai.org.evil.example/api")
-            .expect_err("reject suffix spoof");
-
-        assert_eq!(
-            error.to_string(),
-            "remote exec-server API-key authentication is restricted to HTTPS openai.com and openai.org hosts and subdomains or loopback hosts"
-        );
     }
 
     fn finalize_resume_from_args(args: &[&str]) -> TuiCli {
@@ -3170,18 +4181,120 @@ mod tests {
     }
 
     #[test]
-    fn debug_models_parses_bundled_flag() {
-        let cli =
-            MultitoolCli::try_parse_from(["codex", "debug", "models", "--bundled"]).expect("parse");
+    fn public_models_commands_reject_bundled_fallback_and_parse_managed_routes() {
+        assert!(MultitoolCli::try_parse_from(["codex", "debug", "models", "--bundled"]).is_err());
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["codex", "models", "--json"])
+                .expect("managed models parse")
+                .subcommand,
+            Some(Subcommand::Models(ModelsCommand { json: true }))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["codex", "usage", "--json"])
+                .expect("usage parse")
+                .subcommand,
+            Some(Subcommand::Usage(UsageCommand { json: true }))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["codex", "connectors", "status", "google-main"])
+                .expect("connectors parse")
+                .subcommand,
+            Some(Subcommand::Connectors(ConnectorsCommand {
+                action: Some(ConnectorsSubcommand::Status { .. })
+            }))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["codex", "tools", "status", "whisply.files"])
+                .expect("tools parse")
+                .subcommand,
+            Some(Subcommand::Tools(ToolsCommand {
+                action: Some(ToolsSubcommand::Status { .. })
+            }))
+        ));
+    }
 
-        let Some(Subcommand::Debug(DebugCommand {
-            subcommand: DebugSubcommand::Models(cmd),
-        })) = cli.subcommand
-        else {
-            panic!("expected debug models subcommand");
-        };
+    #[test]
+    fn public_session_skill_config_and_diagnostic_commands_parse() {
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["whisply", "sessions", "list", "--all", "--limit", "20"])
+                .expect("sessions list parses")
+                .subcommand,
+            Some(Subcommand::Sessions(_))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["whisply", "sessions", "export", "session-id"])
+                .expect("sessions export parses")
+                .subcommand,
+            Some(Subcommand::Sessions(_))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["whisply", "skills", "validate"])
+                .expect("skills validate parses")
+                .subcommand,
+            Some(Subcommand::Skills(_))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["whisply", "config", "model", "gpt-5.6-luna"])
+                .expect("config model parses")
+                .subcommand,
+            Some(Subcommand::Config(_))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from(["whisply", "profile", "create", "work"])
+                .expect("profile create parses")
+                .subcommand,
+            Some(Subcommand::Profile(_))
+        ));
+        assert!(matches!(
+            MultitoolCli::try_parse_from([
+                "whisply",
+                "diagnostics",
+                "force-ui",
+                "chat.overlay",
+                "--state",
+                "empty",
+            ])
+            .expect("fixture-only force-ui parses")
+            .subcommand,
+            Some(Subcommand::Diagnostics(_))
+        ));
+        assert!(
+            MultitoolCli::try_parse_from([
+                "whisply",
+                "diagnostics",
+                "force-ui",
+                "chat.overlay",
+                "--state",
+                "empty",
+                "--force",
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            MultitoolCli::try_parse_from([
+                "whisply",
+                "test",
+                "release",
+                "--group",
+                "policy",
+                "--dry-run",
+            ])
+            .expect("fixed release test parses")
+            .subcommand,
+            Some(Subcommand::Test(_))
+        ));
+        assert!(
+            MultitoolCli::try_parse_from(["whisply", "test", "release", "--command", "true",])
+                .is_err()
+        );
+    }
 
-        assert!(cmd.bundled);
+    #[test]
+    fn public_session_rows_cannot_emit_terminal_control_sequences() {
+        assert_eq!(
+            terminal_cell("title\u{1b}[2J\nnext\tcell"),
+            "title [2J next cell"
+        );
     }
 
     #[test]
@@ -3202,19 +4315,19 @@ mod tests {
 
     #[test]
     fn plugin_marketplace_help_uses_plugin_namespace() {
-        let help = help_from_args(&["codex", "plugin", "marketplace", "--help"]);
+        let help = help_from_args(&["whisply", "plugin", "marketplace", "--help"]);
         assert!(
-            help.contains("Usage: codex plugin marketplace [OPTIONS] <COMMAND>"),
+            help.contains("Usage: whisply plugin marketplace [OPTIONS] <COMMAND>"),
             "{help}"
         );
 
         for (subcommand, usage) in [
-            ("add", "Usage: codex plugin marketplace add"),
-            ("list", "Usage: codex plugin marketplace list"),
-            ("upgrade", "Usage: codex plugin marketplace upgrade"),
-            ("remove", "Usage: codex plugin marketplace remove"),
+            ("add", "Usage: whisply plugin marketplace add"),
+            ("list", "Usage: whisply plugin marketplace list"),
+            ("upgrade", "Usage: whisply plugin marketplace upgrade"),
+            ("remove", "Usage: whisply plugin marketplace remove"),
         ] {
-            let help = help_from_args(&["codex", "plugin", "marketplace", subcommand, "--help"]);
+            let help = help_from_args(&["whisply", "plugin", "marketplace", subcommand, "--help"]);
             assert!(help.contains(usage), "{help}");
         }
     }
@@ -3911,10 +5024,9 @@ mod tests {
     fn reject_remote_flag_for_remote_control() {
         let cli = MultitoolCli::try_parse_from(["codex", "--remote", "unix://", "remote-control"])
             .expect("parse");
-        let Some(Subcommand::RemoteControl(remote_control)) = &cli.subcommand else {
+        let Some(Subcommand::RemoteControl(_)) = &cli.subcommand else {
             panic!("expected remote-control subcommand");
         };
-        assert_eq!(remote_control.subcommand_name(), "remote-control");
 
         let err = reject_remote_mode_for_subcommand(
             cli.remote.remote.as_deref(),
@@ -3927,12 +5039,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_control_pair_parses() {
-        let cli = MultitoolCli::try_parse_from(["codex", "remote-control", "pair"]).expect("parse");
-        let Some(Subcommand::RemoteControl(remote_control)) = &cli.subcommand else {
-            panic!("expected remote-control subcommand");
-        };
-        assert_eq!(remote_control.subcommand_name(), "remote-control pair");
+    fn remote_control_pair_is_not_a_callable_legacy_subcommand() {
+        assert!(MultitoolCli::try_parse_from(["codex", "remote-control", "pair"]).is_err());
     }
 
     #[test]
@@ -3940,6 +5048,19 @@ mod tests {
         let cli = MultitoolCli::try_parse_from(["codex", "--remote", "unix://codex.sock"])
             .expect("parse");
         assert_eq!(cli.remote.remote.as_deref(), Some("unix://codex.sock"));
+    }
+
+    #[test]
+    fn remote_help_advertises_literal_loopback_websocket_endpoints() {
+        let mut command = MultitoolCli::command();
+        let mut help = Vec::new();
+        command
+            .write_long_help(&mut help)
+            .expect("render long help");
+        let help = String::from_utf8(help).expect("help should be UTF-8");
+
+        assert!(help.contains("literal `ws://LOOPBACK_IP:PORT`"));
+        assert!(help.contains("literal `wss://LOOPBACK_IP:PORT`"));
     }
 
     #[test]
@@ -4040,6 +5161,24 @@ mod tests {
         })
         .expect_err("empty env vars should be rejected");
         assert!(err.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn remote_auth_token_env_rejects_non_loopback_or_userinfo_remote_before_environment_read() {
+        for remote in [
+            "wss://executor.example:443",
+            "ws://username@127.0.0.1:4500",
+            "wss://username:password@[::1]:4500",
+        ] {
+            let err = resolve_remote_endpoint_with(
+                Some(remote.to_string()),
+                Some("CODEX_REMOTE_AUTH_TOKEN".to_string()),
+                |_| panic!("invalid remote must be rejected before reading its auth token"),
+            )
+            .expect_err("invalid --remote should be rejected");
+
+            assert!(err.to_string().contains("invalid remote address"));
+        }
     }
 
     #[test]

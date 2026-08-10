@@ -3,7 +3,7 @@
 //! This module owns the low-level OSC title write path and the sanitization
 //! that happens immediately before we emit it. It is intentionally narrow:
 //! callers decide when the title should change and whether an empty title means
-//! "leave the old title alone" or "clear the title Codex last wrote".
+//! "leave the old title alone" or "clear the title Whisply last wrote".
 //! This module does not attempt to read or restore the terminal's previous
 //! title because that is not portable across terminals.
 //!
@@ -70,7 +70,7 @@ pub(crate) fn set_terminal_title(title: &str) -> io::Result<SetTerminalTitleResu
 /// Clears the current terminal title by writing an empty OSC title payload.
 ///
 /// This clears the visible title; it does not restore whatever title the shell
-/// or a previous program may have set before Codex started managing the title.
+/// or a previous program may have set before Whisply started managing the title.
 pub(crate) fn clear_terminal_title() -> io::Result<()> {
     if !stdout().is_terminal() {
         return Ok(());

@@ -3,9 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_final_assistant_message_sse_response;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence;
 use axum::Router;
 use codex_app_server_protocol::CapabilityRootLocation;
@@ -33,13 +35,18 @@ use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnEnvironmentParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_features::Feature;
 use codex_utils_path_uri::PathUri;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
 use futures::SinkExt;
 use pretty_assertions::assert_eq;
@@ -92,11 +99,9 @@ const LATE_ENVIRONMENT_ID: &str = "late-environment";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
-    let responses_server = responses::start_mock_server().await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
     let codex_home = TempDir::new()?;
-    mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
-        .write(codex_home.path())?;
+    mcp_tool_config("", &mcp_server_url, AUTO_COMPACT_LIMIT).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -158,11 +163,9 @@ async fn mcp_server_tool_call_returns_tool_result() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_uses_session_client_extensions() -> Result<()> {
-    let responses_server = responses::start_mock_server().await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
     let codex_home = TempDir::new()?;
-    mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
-        .write(codex_home.path())?;
+    mcp_tool_config("", &mcp_server_url, AUTO_COMPACT_LIMIT).write(codex_home.path())?;
 
     let app_ui = json!({
         "mimeTypes": [
@@ -233,6 +236,7 @@ async fn mcp_server_tool_call_uses_session_client_extensions() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_mcp_tool_call_uses_session_client_extensions() -> Result<()> {
     let call_id = "call-session-capabilities";
@@ -263,7 +267,7 @@ async fn model_mcp_tool_call_uses_session_client_extensions() -> Result<()> {
         ],
         "futureField": {"preserved": true},
     });
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&responses_server.uri())
         .with_codex_home(codex_home.path())
         .build()
         .await?;
@@ -371,11 +375,9 @@ async fn mcp_server_tool_call_returns_error_for_unknown_thread() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_round_trips_elicitation() -> Result<()> {
-    let responses_server = responses::start_mock_server().await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
     let codex_home = TempDir::new()?;
-    mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
-        .write(codex_home.path())?;
+    mcp_tool_config("", &mcp_server_url, AUTO_COMPACT_LIMIT).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -461,12 +463,11 @@ async fn mcp_server_tool_call_round_trips_elicitation() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_elicitation_survives_environment_runtime_refresh() -> Result<()> {
-    let responses_server = responses::start_mock_server().await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
     let exec_listener = TcpListener::bind("127.0.0.1:0").await?;
     let exec_server_url = format!("ws://{}", exec_listener.local_addr()?);
     let codex_home = TempDir::new()?;
-    mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
+    mcp_tool_config("", &mcp_server_url, AUTO_COMPACT_LIMIT)
         .enable_feature(Feature::DeferredExecutor)
         .write(codex_home.path())?;
 
@@ -581,11 +582,9 @@ async fn mcp_server_elicitation_survives_environment_runtime_refresh() -> Result
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_server_tool_call_forwards_url_elicitation() -> Result<()> {
-    let responses_server = responses::start_mock_server().await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server().await?;
     let codex_home = TempDir::new()?;
-    mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
-        .write(codex_home.path())?;
+    mcp_tool_config("", &mcp_server_url, AUTO_COMPACT_LIMIT).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -659,6 +658,7 @@ async fn mcp_server_tool_call_forwards_url_elicitation() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tool_call_completion_notification_contains_truncated_large_result() -> Result<()> {
     let call_id = "call-large-mcp";
@@ -688,7 +688,7 @@ async fn mcp_tool_call_completion_notification_contains_truncated_large_result()
     )
     .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&responses_server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -772,6 +772,7 @@ async fn mcp_tool_call_completion_notification_contains_truncated_large_result()
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tool_call_hint_survives_mid_call_thread_read_and_resume() -> Result<()> {
     let call_id = "call-mid-flight-mcp";
@@ -797,7 +798,7 @@ async fn mcp_tool_call_hint_survives_mid_call_thread_read_and_resume() -> Result
     mcp_tool_config(&responses_server.uri(), &mcp_server_url, AUTO_COMPACT_LIMIT)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&responses_server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1165,16 +1166,15 @@ async fn wait_for_mcp_tool_call_completed(
 }
 
 fn mcp_tool_config(
-    server_uri: &str,
+    _server_uri: &str,
     mcp_server_url: &str,
     auto_compact_limit: i64,
-) -> MockResponsesConfig {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config(&format!(
+) -> ManagedWhisplyConfig {
+    ManagedWhisplyConfig::new()
+        .with_additional_config(&format!(
             "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = {auto_compact_limit}"
         ))
-        .with_provider_config("supports_websockets = false")
-        .with_extra_config(&format!(
+        .with_additional_config(&format!(
             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_server_url}/mcp\""
         ))
 }

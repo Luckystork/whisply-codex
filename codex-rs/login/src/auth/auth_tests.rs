@@ -1144,6 +1144,102 @@ impl ExternalAuth for StaticExternalAuth {
 }
 
 #[tokio::test]
+#[serial(codex_auth_env)]
+async fn broker_only_auth_source_quarantines_stored_environment_and_external_auth() {
+    let codex_home = tempdir().expect("temporary auth home");
+    let auth_path = get_auth_file(codex_home.path());
+    std::fs::write(
+        &auth_path,
+        r#"{
+  "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": "legacy-api-key",
+  "tokens": {
+    "id_token": "legacy.header.payload",
+    "access_token": "legacy-chatgpt-access",
+    "refresh_token": "legacy-chatgpt-refresh"
+  },
+  "agent_identity": {
+    "type": "jwt",
+    "jwt": "legacy-agent-identity"
+  }
+}"#,
+    )
+    .expect("write legacy auth fixture");
+    let auth_before = std::fs::read(&auth_path).expect("read legacy auth fixture");
+    let _api_key_guard = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "legacy-api-key-from-env");
+    let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "legacy-agent-env");
+    let config = AuthConfig {
+        codex_home: codex_home.path().to_path_buf(),
+        auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        keyring_backend_kind: AuthKeyringBackendKind::Direct,
+        source_mode: AuthSourceMode::BrokerOnly,
+        forced_login_method: None,
+        chatgpt_base_url: None,
+        forced_chatgpt_workspace_id: None,
+        managed_auth_policy: ManagedAuthPolicy::default(),
+        auth_route_config: crate::test_support::transport_default_auth_route_config(),
+    };
+
+    assert!(
+        config.validate().is_ok(),
+        "broker-only is a valid auth state"
+    );
+    let supplied_direct_auth = vec![
+        CodexAuth::from_api_key("legacy-supplied-api-key"),
+        CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
+            api_key: "legacy-bedrock-api-key".to_string(),
+            region: "us-west-2".to_string(),
+        }),
+        CodexAuth::Headers(crate::auth::AuthHeaders::new(http::HeaderMap::new())),
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ];
+    for auth in supplied_direct_auth {
+        assert!(
+            !config.allows_auth(&auth),
+            "broker-only must not admit any directly supplied legacy credential: {auth:?}"
+        );
+    }
+    assert_eq!(
+        config
+            .load_auth(/*enable_codex_api_key_env*/ true)
+            .await
+            .expect("broker-only load must not inspect auth storage"),
+        None
+    );
+
+    let manager =
+        AuthManager::shared_from_auth_config(config, /*enable_codex_api_key_env*/ true).await;
+    assert_eq!(
+        manager.auth_cached(),
+        None,
+        "startup must not cache legacy auth"
+    );
+    assert_eq!(
+        manager.auth().await,
+        None,
+        "auth must not expose a cached credential"
+    );
+    assert!(
+        !manager.reload().await,
+        "reload must continue to quarantine persisted and environment auth"
+    );
+    let error = manager
+        .set_external_auth(Arc::new(StaticExternalAuth(CodexAuth::from_api_key(
+            "legacy-external-api-key",
+        ))))
+        .await
+        .expect_err("broker-only must reject an external auth bridge");
+    assert!(error.to_string().contains("managed by the installed app"));
+    assert!(!manager.has_external_auth());
+    assert_eq!(manager.auth().await, None);
+    assert_eq!(
+        std::fs::read(&auth_path).expect("read quarantined auth fixture"),
+        auth_before,
+        "broker-only must retain but never rewrite legacy auth evidence"
+    );
+}
+
+#[tokio::test]
 async fn external_auth_provider_can_install_headers() {
     let mut headers = http::HeaderMap::new();
     headers.insert(
@@ -1378,6 +1474,7 @@ async fn build_config(
         codex_home: codex_home.to_path_buf(),
         auth_credentials_store_mode: AuthCredentialsStoreMode::File,
         keyring_backend_kind: AuthKeyringBackendKind::Direct,
+        source_mode: AuthSourceMode::Direct,
         forced_login_method,
         forced_chatgpt_workspace_id,
         managed_auth_policy: ManagedAuthPolicy::default(),
@@ -1951,6 +2048,7 @@ async fn enforce_login_restrictions_logs_out_for_personal_access_token_workspace
         codex_home: codex_home.path().to_path_buf(),
         auth_credentials_store_mode: AuthCredentialsStoreMode::File,
         keyring_backend_kind: AuthKeyringBackendKind::default(),
+        source_mode: AuthSourceMode::Direct,
         forced_login_method: None,
         forced_chatgpt_workspace_id: Some(vec![WORKSPACE_ID_ALLOWED.to_string()]),
         managed_auth_policy: ManagedAuthPolicy::default(),
@@ -2076,6 +2174,7 @@ async fn enforce_login_restrictions_logs_out_for_agent_identity_workspace_mismat
         codex_home: codex_home.path().to_path_buf(),
         auth_credentials_store_mode: AuthCredentialsStoreMode::File,
         keyring_backend_kind: AuthKeyringBackendKind::Direct,
+        source_mode: AuthSourceMode::Direct,
         forced_login_method: None,
         forced_chatgpt_workspace_id: Some(vec![WORKSPACE_ID_ALLOWED.to_string()]),
         managed_auth_policy: ManagedAuthPolicy::default(),

@@ -7,6 +7,7 @@ mod key_chords;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
+#[cfg(target_os = "macos")]
 mod safety_buffering;
 #[path = "tests/session_lifecycle_requests.rs"]
 mod session_lifecycle_requests;
@@ -39,6 +40,12 @@ use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
+#[cfg(target_os = "macos")]
+use app_test_support::create_mock_responses_server_repeating_assistant;
 use assert_matches::assert_matches;
 
 use crate::app_command::AppCommand as Op;
@@ -1795,6 +1802,7 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
     })
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
     const WORKER_THREADS: usize = 1;
@@ -1808,8 +1816,20 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
 
     runtime.block_on(async {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-        let mut app_server =
-            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+        ManagedWhisplyConfig::new()
+            .with_model("gpt-5.6-terra")
+            .write(app.config.codex_home.as_path())?;
+        app.config.model = Some("gpt-5.6-terra".to_string());
+        let server = create_mock_responses_server_repeating_assistant("unused").await;
+        let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())
+            .map_err(|err| color_eyre::eyre::eyre!(err))?
+            .into_in_process_gateway()
+            .map_err(|err| color_eyre::eyre::eyre!(err))?;
+        let mut app_server = crate::start_embedded_app_server_for_picker_with_managed_gateway(
+            &app.config,
+            managed_gateway.client(),
+        )
+        .await?;
         let root = app_server
             .start_thread(app.chat_widget.config_ref())
             .await?;
@@ -1953,6 +1973,10 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             !std::iter::from_fn(|| app_event_rx.try_recv().ok())
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
+        app_server.shutdown().await?;
+        managed_gateway
+            .assert_healthy()
+            .map_err(|err| color_eyre::eyre::eyre!(err))?;
         Ok(())
     })
 }

@@ -146,6 +146,17 @@ impl PendingAppServerRequests {
                     message: "Dynamic tool calls are not available in TUI yet.".to_string(),
                 })
             }
+            ServerRequest::WhisplyToolExecute { request_id, .. }
+            | ServerRequest::WhisplyToolCancel { request_id, .. } => {
+                // The standalone TUI does not implement the authenticated
+                // native bridge. Do not route these through generic tools or
+                // leave a trusted request pending without an owner.
+                Some(UnsupportedAppServerRequest {
+                    request_id: request_id.clone(),
+                    message: "First-party Whisply tools require the managed native app."
+                        .to_string(),
+                })
+            }
             ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
             ServerRequest::AttestationGenerate { request_id, .. } => {
                 Some(UnsupportedAppServerRequest {
@@ -356,6 +367,8 @@ impl PendingAppServerRequests {
                 .values()
                 .any(|pending_request_id| pending_request_id == request_id),
             ServerRequest::DynamicToolCall { .. }
+            | ServerRequest::WhisplyToolExecute { .. }
+            | ServerRequest::WhisplyToolCancel { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }

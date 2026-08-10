@@ -133,7 +133,8 @@ async fn prepared_environment_manager_builds_with_the_explicit_http_policy() {
     let prepared = PreparedEnvironmentManager {
         source: PreparedEnvironmentSource::Snapshot(
             DefaultEnvironmentProvider::new(Some("ws://127.0.0.1:8765".to_string()))
-                .snapshot_inner(),
+                .snapshot_inner()
+                .expect("loopback environment should be valid"),
         ),
     };
     let manager = prepared

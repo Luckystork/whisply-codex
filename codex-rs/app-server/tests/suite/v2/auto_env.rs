@@ -1,8 +1,13 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
-use app_test_support::write_mock_responses_config_toml;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
@@ -13,7 +18,6 @@ use core_test_support::responses;
 use core_test_support::skip_if_host_windows;
 use core_test_support::skip_if_remote;
 use pretty_assertions::assert_eq;
-use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -57,6 +61,7 @@ async fn builder_interposes_fixed_delay_for_auto_env() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_start_with_auto_env_exposes_fixture_cwd_to_model() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -70,18 +75,12 @@ async fn thread_start_with_auto_env_exposes_fixture_cwd_to_model() -> Result<()>
     )
     .await;
     let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml(
-        codex_home.path(),
-        &server.uri(),
-        &BTreeMap::new(),
-        /*auto_compact_limit*/ 100_000,
-        /*requires_openai_auth*/ None,
-        "mock_provider",
-        "compact",
-    )?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;

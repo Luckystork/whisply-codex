@@ -1,9 +1,13 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_final_assistant_message_sse_response;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_repeating_assistant;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence;
+#[cfg(target_os = "macos")]
 use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ItemCompletedNotification;
@@ -20,17 +24,25 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadStartedNotification;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadStatusChangedNotification;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnItemsView;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_features::Feature;
 use codex_skills::system_cache_root_dir;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
+#[cfg(target_os = "macos")]
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -41,9 +53,8 @@ const COLLIDING_REVIEW_SKILL_MARKER: &str = "COLLIDING_REVIEW_SKILL_MARKER";
 
 #[tokio::test]
 async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -83,6 +94,7 @@ async fn review_start_rejects_detached_delivery_for_paginated_parent() -> Result
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()> {
     let review_payload = json!({
@@ -108,7 +120,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -191,6 +203,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 #[ignore = "TODO(owenlin0): flaky"]
 async fn review_start_exec_approval_item_id_matches_command_execution_item() -> Result<()> {
@@ -210,13 +223,12 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
     let server = create_mock_responses_server_sequence(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_provider_name("Mock provider")
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -287,9 +299,8 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
 
 #[tokio::test]
 async fn review_start_rejects_empty_base_branch() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -322,6 +333,7 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
 }
 
 #[cfg_attr(target_os = "windows", ignore = "flaky on windows CI")]
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -361,7 +373,7 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
         review_skill_path.display()
     );
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -452,9 +464,8 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
 
 #[tokio::test]
 async fn review_start_rejects_empty_commit_sha() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -489,9 +500,8 @@ async fn review_start_rejects_empty_commit_sha() -> Result<()> {
 
 #[tokio::test]
 async fn review_start_rejects_empty_custom_instructions() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -541,6 +551,7 @@ async fn start_default_thread(mcp: &mut TestAppServer) -> Result<String> {
     Ok(thread.id)
 }
 
+#[cfg(target_os = "macos")]
 async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) -> Result<()> {
     let _: TurnStartResponse = mcp
         .request(|request_id| ClientRequest::TurnStart {
@@ -564,9 +575,8 @@ async fn materialize_thread_rollout(mcp: &mut TestAppServer, thread_id: &str) ->
     Ok(())
 }
 
-fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri)
-        .with_provider_name("Mock provider")
+fn create_config_toml(codex_home: &std::path::Path, _server_uri: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home)
 }

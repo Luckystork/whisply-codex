@@ -1,12 +1,9 @@
 use std::collections::HashMap;
-use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::write_chatgpt_auth;
-use codex_config::types::AuthCredentialsStoreMode;
-use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use codex_mcp_server::CodexToolCallParam;
 use codex_mcp_server::ExecApprovalElicitRequestParams;
 use codex_mcp_server::ExecApprovalResponse;
@@ -22,14 +19,10 @@ use rmcp::model::RequestId;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use wiremock::Mock;
 use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
 
-use core_test_support::skip_if_no_network;
 use mcp_test_support::McpProcess;
+use mcp_test_support::assert_mock_responses_request_count;
 use mcp_test_support::create_apply_patch_sse_response;
 use mcp_test_support::create_final_assistant_message_sse_response;
 use mcp_test_support::create_mock_responses_server;
@@ -45,13 +38,6 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// command, as expected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_shell_command_approval_triggers_elicitation() {
-    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
-        println!(
-            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
-        );
-        return;
-    }
-
     // Apparently `#[tokio::test]` must return `()`, so we create a helper
     // function that returns `Result` so we can use `?` in favor of `unwrap`.
     shell_command_approval_triggers_elicitation()
@@ -92,8 +78,11 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
 
     let McpHandle {
         process: mut mcp_process,
-        server: _server,
+        server,
         dir: _dir,
+        // Keep the native-broker fixture alive until the child has completed
+        // its managed descriptor refreshes and model turns.
+        gateway: _gateway,
     } = create_mcp_process(vec![
         create_shell_command_sse_response(
             shell_command.clone(),
@@ -188,6 +177,7 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
     );
 
     assert!(created_file.is_file(), "created file should exist");
+    assert_mock_responses_request_count(&server, 2).await?;
 
     Ok(())
 }
@@ -224,13 +214,6 @@ fn create_expected_elicitation_request_params(
 /// sending the approval applies the patch, as expected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_patch_approval_triggers_elicitation() {
-    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
-        println!(
-            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
-        );
-        return;
-    }
-
     patch_approval_triggers_elicitation()
         .await
         .expect("patch approval should trigger elicitation");
@@ -254,8 +237,11 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
 
     let McpHandle {
         process: mut mcp_process,
-        server: _server,
+        server,
         dir: _dir,
+        // Keep the native-broker fixture alive until the child has completed
+        // its managed descriptor refreshes and model turns.
+        gateway: _gateway,
     } = create_mcp_process(vec![
         create_apply_patch_sse_response(&patch_content, "call1234")?,
         create_final_assistant_message_sse_response("Patch has been applied successfully!")?,
@@ -352,14 +338,13 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
 
     let file_contents = std::fs::read_to_string(test_file.as_path())?;
     assert_eq!(file_contents, "modified content\n");
+    assert_mock_responses_request_count(&server, 2).await?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_codex_tool_passes_base_instructions() {
-    skip_if_no_network!();
-
     // Apparently `#[tokio::test]` must return `()`, so we create a helper
     // function that returns `Result` so we can use `?` in favor of `unwrap`.
     codex_tool_passes_base_instructions()
@@ -373,32 +358,21 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     let server =
         create_mock_responses_server(vec![create_final_assistant_message_sse_response("Enjoy!")?])
             .await;
-    let caller_server = MockServer::start().await;
 
-    // Run `codex mcp` with a specific config.toml.
+    // Run `whisply mcp` with a managed BrokerOnly config and test-owned
+    // native-broker descriptor transport.
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path())?;
+    let gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let skill_dir = codex_home.path().join("skills").join("demo");
     std::fs::create_dir_all(&skill_dir)?;
     std::fs::write(
         skill_dir.join("SKILL.md"),
         "---\nname: demo\ndescription: Demo skill.\n---\n# Demo\n\nUse this skill.\n",
     )?;
-    write_chatgpt_auth(
+    let mut mcp_process = McpProcess::new_with_managed_gateway(
         codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token").account_id("workspace-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/wham/settings/user"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "commit_attribution_enabled": true,
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let mut mcp_process = McpProcess::new_with_env(
-        codex_home.path(),
+        &gateway,
         &[("OPENAI_API_KEY", None), ("CODEX_ACCESS_TOKEN", None)],
     )
     .await?;
@@ -408,10 +382,6 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     let codex_request_id = mcp_process
         .send_codex_tool_call(CodexToolCallParam {
             prompt: "How are you?".to_string(),
-            config: Some(HashMap::from([(
-                "chatgpt_base_url".to_string(),
-                json!(format!("{}/backend-api", caller_server.uri())),
-            )])),
             base_instructions: Some("You are a helpful assistant.".to_string()),
             developer_instructions: Some("Foreshadow upcoming tool calls.".to_string()),
             ..Default::default()
@@ -471,18 +441,6 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
         .collect();
     let developer_text = developer_contents.join("\n");
     assert_eq!(
-        developer_text
-            .matches("Co-authored-by: Codex <noreply@openai.com>")
-            .count(),
-        1
-    );
-    assert_eq!(
-        developer_text
-            .matches("Generated with [Codex](https://openai.com/codex/).")
-            .count(),
-        1
-    );
-    assert_eq!(
         developer_text.matches("- demo: Demo skill.").count(),
         1,
         "host skill catalog should be included exactly once"
@@ -497,21 +455,12 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
         developer_contents.contains(&"Foreshadow upcoming tool calls."),
         "expected developer instructions in developer messages, got {developer_contents:?}"
     );
-    let caller_requests = caller_server.received_requests().await.unwrap();
-    assert!(
-        caller_requests
-            .iter()
-            .all(|request| request.url.path() != "/backend-api/wham/settings/user"),
-        "attribution settings must use the process-level base URL"
-    );
-
+    assert_mock_responses_request_count(&server, 1).await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_codex_tool_forwards_skills_extension_warnings() {
-    skip_if_no_network!();
-
     codex_tool_forwards_skills_extension_warnings()
         .await
         .expect("codex tool should forward skills extension warnings");
@@ -522,7 +471,8 @@ async fn codex_tool_forwards_skills_extension_warnings() -> anyhow::Result<()> {
         create_mock_responses_server(vec![create_final_assistant_message_sse_response("Enjoy!")?])
             .await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path())?;
+    let gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let skills_dir = codex_home.path().join("skills");
     for index in 0..200 {
         let name = format!("skill-{index:03}");
@@ -536,7 +486,8 @@ async fn codex_tool_forwards_skills_extension_warnings() -> anyhow::Result<()> {
             ),
         )?;
     }
-    let mut mcp_process = McpProcess::new(codex_home.path()).await?;
+    let mut mcp_process =
+        McpProcess::new_with_managed_gateway(codex_home.path(), &gateway, &[]).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp_process.initialize()).await??;
 
     let codex_request_id = mcp_process
@@ -581,6 +532,7 @@ async fn codex_tool_forwards_skills_extension_warnings() -> anyhow::Result<()> {
         mcp_process.read_stream_until_response_message(RequestId::Number(codex_request_id)),
     )
     .await??;
+    assert_mock_responses_request_count(&server, 1).await?;
 
     Ok(())
 }
@@ -624,47 +576,48 @@ pub struct McpHandle {
     /// Retain the temporary directory for the lifetime of the McpProcess.
     #[allow(dead_code)]
     dir: TempDir,
+    /// Retain the managed gateway while the child consumes its descriptors.
+    #[allow(dead_code)]
+    gateway: ManagedWhisplyGatewayFixture,
 }
 
 async fn create_mcp_process(responses: Vec<String>) -> anyhow::Result<McpHandle> {
     let server = create_mock_responses_server(responses).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
-    let mut mcp_process = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp_process.initialize()).await??;
+    create_config_toml(codex_home.path())?;
+    let gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
+    let mut mcp_process =
+        match McpProcess::new_with_managed_gateway(codex_home.path(), &gateway, &[]).await {
+            Ok(process) => process,
+            Err(error) => {
+                server.reset().await;
+                return Err(error);
+            }
+        };
+    match timeout(DEFAULT_READ_TIMEOUT, mcp_process.initialize()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            server.reset().await;
+            return Err(error);
+        }
+        Err(error) => {
+            server.reset().await;
+            return Err(error.into());
+        }
+    }
     Ok(McpHandle {
         process: mcp_process,
         server,
         dir: codex_home,
+        gateway,
     })
 }
 
-/// Create a Codex config that uses the mock server as the model provider.
-/// It also uses `approval_policy = "untrusted"` so that we exercise the
-/// elicitation code path for shell commands.
-fn create_config_toml(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
-    let config_toml = codex_home.join("config.toml");
-    std::fs::write(
-        config_toml,
-        format!(
-            r#"
-model = "mock-model"
-approval_policy = "untrusted"
-sandbox_policy = "workspace-write"
-
-model_provider = "mock_provider"
-chatgpt_base_url = "{server_uri}/backend-api"
-cli_auth_credentials_store = "file"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{server_uri}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-
-[features]
-"#
-        ),
-    )
+/// Creates a BrokerOnly config that uses the managed gateway transport while
+/// retaining the untrusted approval path exercised by the elicitation tests.
+fn create_config_toml(codex_home: &Path) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new()
+        .with_approval_policy("untrusted")
+        .with_sandbox_mode("workspace-write")
+        .write(codex_home)
 }

@@ -16,6 +16,7 @@ use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT;
 use crate::client_api::ExecServerTransportParams;
 use crate::client_api::StdioExecServerCommand;
 use crate::environment::LOCAL_ENVIRONMENT_ID;
+use crate::environment::validate_broker_only_execution_environment_websocket_url;
 use crate::environment_provider::EnvironmentDefault;
 use crate::environment_provider::EnvironmentProviderSnapshot;
 
@@ -286,6 +287,7 @@ fn validate_websocket_url(url: String) -> Result<String, ExecServerError> {
     url.into_client_request().map_err(|err| {
         ExecServerError::Protocol(format!("environment url `{url}` is invalid: {err}"))
     })?;
+    validate_broker_only_execution_environment_websocket_url(url)?;
     Ok(url.to_string())
 }
 
@@ -501,6 +503,14 @@ mod tests {
                     ..Default::default()
                 },
                 "environment url `http://127.0.0.1:8765` must use ws:// or wss://",
+            ),
+            (
+                EnvironmentToml {
+                    id: "devbox".to_string(),
+                    url: Some("wss://executor.example:8765".to_string()),
+                    ..Default::default()
+                },
+                "execution environment websocket URL must use a literal loopback IPv4 or IPv6 host",
             ),
             (
                 EnvironmentToml {

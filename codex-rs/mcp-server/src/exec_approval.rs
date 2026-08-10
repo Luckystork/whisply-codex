@@ -84,7 +84,7 @@ pub(crate) async fn handle_exec_approval_request(
         Ok(value) => value,
         Err(err) => {
             let message = format!("Failed to serialize ExecApprovalElicitRequestParams: {err}");
-            error!("{message}");
+            error!("exec approval elicitation parameter serialization failed");
 
             outgoing.send_error(request_id.clone(), ErrorData::invalid_params(message, None));
 
@@ -116,15 +116,15 @@ async fn on_exec_approval_response(
     let response = receiver.await;
     let value = match response {
         Ok(value) => value,
-        Err(err) => {
-            error!("request failed: {err:?}");
+        Err(_) => {
+            error!("exec approval elicitation callback failed");
             return;
         }
     };
 
     // Try to deserialize `value` and then make the appropriate call to `codex`.
-    let response = serde_json::from_value::<ExecApprovalResponse>(value).unwrap_or_else(|err| {
-        error!("failed to deserialize ExecApprovalResponse: {err}");
+    let response = serde_json::from_value::<ExecApprovalResponse>(value).unwrap_or_else(|_| {
+        error!("exec approval response deserialization failed; denying approval");
         // If we cannot deserialize the response, we deny the request to be
         // conservative.
         ExecApprovalResponse {
@@ -132,14 +132,15 @@ async fn on_exec_approval_response(
         }
     });
 
-    if let Err(err) = codex
+    if codex
         .submit(Op::ExecApproval {
             id: approval_id,
             turn_id: Some(event_id),
             decision: response.decision,
         })
         .await
+        .is_err()
     {
-        error!("failed to submit ExecApproval: {err}");
+        error!("exec approval submission failed");
     }
 }

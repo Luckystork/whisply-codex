@@ -14,6 +14,9 @@ use codex_http_client::HttpClientFactory;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use codex_websocket_client::WebSocketConnector;
 use codex_websocket_client::WebSocketTlsMode;
+use codex_whisply::GATEWAY_AUTH_FD_ENV;
+use codex_whisply::GATEWAY_ENDPOINT_FD_ENV;
+use codex_whisply::NATIVE_BROKER_CAPABILITY_FD_ENV;
 
 use crate::ExecServerClient;
 use crate::ExecServerError;
@@ -441,6 +444,16 @@ fn stdio_command_process(stdio_command: &StdioExecServerCommand) -> Command {
     let mut command = Command::new(&stdio_command.program);
     command.args(&stdio_command.args);
     command.envs(&stdio_command.env);
+    // The parent may own sealed, one-shot managed-runtime descriptors. A
+    // custom executor cannot inherit those descriptors, nor their launch
+    // contract variables: the FDs have close-on-exec set before this spawn.
+    for descriptor_env in [
+        GATEWAY_AUTH_FD_ENV,
+        GATEWAY_ENDPOINT_FD_ENV,
+        NATIVE_BROKER_CAPABILITY_FD_ENV,
+    ] {
+        command.env_remove(descriptor_env);
+    }
     if let Some(cwd) = &stdio_command.cwd {
         command.current_dir(cwd);
     }

@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
@@ -49,10 +52,12 @@ async fn thread_shell_command_history_responses_exclude_persisted_command_execut
     std::fs::create_dir(&workspace)?;
 
     let server = create_mock_responses_server_sequence(vec![]).await;
-    MockResponsesConfig::new(&server.uri()).write(&codex_home)?;
+    ManagedWhisplyConfig::new().write(&codex_home)?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.as_path())
+        .with_managed_whisply_gateway(managed_gateway)
         // thread/shellCommand intentionally executes on the app-server host.
         .without_auto_env()
         .build_initialized()
@@ -164,10 +169,12 @@ async fn thread_shell_command_returns_error_when_local_environment_is_disabled()
     let codex_home = tmp.path().join("codex_home");
     std::fs::create_dir(&codex_home)?;
     let server = create_mock_responses_server_sequence(vec![]).await;
-    MockResponsesConfig::new(&server.uri()).write(&codex_home)?;
+    ManagedWhisplyConfig::new().write(&codex_home)?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.as_path())
+        .with_managed_whisply_gateway(managed_gateway)
         // This test intentionally exercises thread/shellCommand without a local host environment.
         .without_auto_env()
         .with_env_overrides(&[(CODEX_EXEC_SERVER_URL_ENV_VAR, Some("none"))])
@@ -215,12 +222,14 @@ async fn thread_shell_command_uses_existing_active_turn() -> Result<()> {
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .write(&codex_home)?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.as_path())
+        .with_managed_whisply_gateway(managed_gateway)
         // thread/shellCommand intentionally joins the app-server's host-local active turn.
         .without_auto_env()
         .build_initialized()

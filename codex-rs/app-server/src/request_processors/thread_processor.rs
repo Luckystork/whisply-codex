@@ -14,6 +14,11 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_whisply::ApprovalContractMode;
+use codex_whisply::DirectoryContractMode;
+use codex_whisply::DirectorySelection;
+use codex_whisply::WhisplyThreadContracts;
+use codex_whisply::ensure_private_runtime_directory;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -993,13 +998,13 @@ impl ThreadRequestProcessor {
             model_provider,
             allow_provider_model_fallback,
             service_tier,
-            cwd,
-            runtime_workspace_roots,
-            approval_policy,
-            approvals_reviewer,
-            sandbox,
+            mut cwd,
+            mut runtime_workspace_roots,
+            mut approval_policy,
+            mut approvals_reviewer,
+            mut sandbox,
             permissions,
-            config,
+            mut config,
             service_name,
             base_instructions,
             developer_instructions,
@@ -1024,6 +1029,110 @@ impl ThreadRequestProcessor {
                 "paginated threads require thread/turns/list and thread/items/list support",
             ));
         }
+        let whisply_contracts = match config.as_mut() {
+            Some(config) => WhisplyThreadContracts::take_from_config(config)
+                .map_err(|error| invalid_request(error.to_string()))?,
+            None => None,
+        };
+        if config
+            .as_ref()
+            .is_some_and(std::collections::HashMap::is_empty)
+        {
+            config = None;
+        }
+
+        if let Some(contracts) = whisply_contracts.as_ref() {
+            // Whisply's native contract is the authoritative public control.
+            // Reject duplicate generic controls instead of allowing their
+            // precedence to produce a different sandbox/approval projection.
+            if approval_policy.is_some()
+                || approvals_reviewer.is_some()
+                || sandbox.is_some()
+                || permissions.is_some()
+            {
+                return Err(invalid_request(
+                    "Whisply directory and permission modes must be supplied only through their namespaced config contracts",
+                ));
+            }
+            match contracts.directory.mode {
+                DirectoryContractMode::NoDirectory => {
+                    if cwd.is_some() || runtime_workspace_roots.is_some() {
+                        return Err(invalid_request(
+                            "No directory cannot be combined with cwd or runtimeWorkspaceRoots",
+                        ));
+                    }
+                    // This private, account-scoped path supplies a real cwd
+                    // to upstream code without selecting a user workspace or
+                    // inheriting its project discovery/configuration.
+                    let neutral_workspace =
+                        self.config_manager.codex_home().join("neutral-workspace");
+                    let neutral_workspace = ensure_private_runtime_directory(&neutral_workspace)
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "failed to prepare Whisply no-directory workspace: {error}"
+                            ))
+                        })?;
+                    let neutral_workspace = AbsolutePathBuf::from_absolute_path(neutral_workspace)
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "failed to resolve Whisply no-directory workspace: {error}"
+                            ))
+                        })?;
+                    cwd = Some(neutral_workspace.display().to_string());
+                    runtime_workspace_roots = Some(vec![neutral_workspace]);
+                }
+                DirectoryContractMode::SelectedDirectory => {
+                    let Some(selected_directory) = cwd.as_deref() else {
+                        return Err(invalid_request(
+                            "selectedDirectory requires an absolute cwd",
+                        ));
+                    };
+                    if runtime_workspace_roots.is_some() {
+                        return Err(invalid_request(
+                            "selectedDirectory requires one absolute cwd and no runtimeWorkspaceRoots override",
+                        ));
+                    }
+                    let selected_directory = DirectorySelection::select(selected_directory)
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "selectedDirectory must be an existing canonical directory: {error}"
+                            ))
+                        })?;
+                    let DirectorySelection::Selected { canonical_path } = selected_directory else {
+                        return Err(invalid_request(
+                            "selectedDirectory requires an explicit canonical directory",
+                        ));
+                    };
+                    let canonical_path = AbsolutePathBuf::from_absolute_path(canonical_path)
+                        .map_err(|error| {
+                            invalid_request(format!(
+                                "failed to resolve selected Whisply directory: {error}"
+                            ))
+                        })?;
+                    cwd = Some(canonical_path.display().to_string());
+                    runtime_workspace_roots = Some(vec![canonical_path]);
+                }
+            }
+            match contracts.approval.mode {
+                ApprovalContractMode::Ask => {
+                    approval_policy = Some(codex_app_server_protocol::AskForApproval::OnRequest);
+                    approvals_reviewer = Some(codex_app_server_protocol::ApprovalsReviewer::User);
+                    sandbox = Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite);
+                }
+                ApprovalContractMode::Auto => {
+                    approval_policy = Some(codex_app_server_protocol::AskForApproval::OnRequest);
+                    approvals_reviewer =
+                        Some(codex_app_server_protocol::ApprovalsReviewer::AutoReview);
+                    sandbox = Some(codex_app_server_protocol::SandboxMode::WorkspaceWrite);
+                }
+                ApprovalContractMode::FullAccess => {
+                    approval_policy = Some(codex_app_server_protocol::AskForApproval::Never);
+                    approvals_reviewer = Some(codex_app_server_protocol::ApprovalsReviewer::User);
+                    sandbox = Some(codex_app_server_protocol::SandboxMode::DangerFullAccess);
+                }
+            }
+        }
+
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",

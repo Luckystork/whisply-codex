@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 #![cfg(not(windows))]
 //
 // Running these tests with the patched zsh fork:
@@ -7,7 +8,8 @@
 // network access are required the first time the artifact is fetched.
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
@@ -100,7 +102,8 @@ async fn turn_start_shell_zsh_fork_executes_command_v2() -> Result<()> {
         ]),
     )?;
 
-    let mut mcp = create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path).await?;
+    let mut mcp =
+        create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path, &server.uri()).await?;
 
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -215,7 +218,8 @@ async fn turn_start_shell_zsh_fork_exec_approval_decline_v2() -> Result<()> {
         ]),
     )?;
 
-    let mut mcp = create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path).await?;
+    let mut mcp =
+        create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path, &server.uri()).await?;
 
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -344,7 +348,8 @@ async fn turn_start_shell_zsh_fork_exec_approval_cancel_v2() -> Result<()> {
         ]),
     )?;
 
-    let mut mcp = create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path).await?;
+    let mut mcp =
+        create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path, &server.uri()).await?;
 
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -499,7 +504,8 @@ async fn turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2()
         ]),
     )?;
 
-    let mut mcp = create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path).await?;
+    let mut mcp =
+        create_zsh_test_mcp_process(&codex_home, &workspace, &zsh_path, &server.uri()).await?;
 
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -725,6 +731,7 @@ async fn create_zsh_test_mcp_process(
     codex_home: &Path,
     zdotdir: &Path,
     zsh_path: &Path,
+    gateway_base_url: &str,
 ) -> Result<TestAppServer> {
     let app_server = create_test_package_app_server(codex_home, zsh_path)?;
     let zdotdir = zdotdir.to_string_lossy().into_owned();
@@ -732,6 +739,7 @@ async fn create_zsh_test_mcp_process(
         .with_codex_home(codex_home)
         .with_program(&app_server)
         .with_env_overrides(&[("ZDOTDIR", Some(zdotdir.as_str()))])
+        .with_managed_whisply_gateway(ManagedWhisplyGatewayFixture::new(gateway_base_url)?)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await
 }
@@ -777,11 +785,11 @@ fn copy_with_permissions(source: &Path, destination: &Path) -> std::io::Result<(
 
 fn create_config_toml(
     codex_home: &Path,
-    server_uri: &str,
+    _server_uri: &str,
     approval_policy: &str,
     feature_flags: &BTreeMap<Feature, bool>,
 ) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri)
+    ManagedWhisplyConfig::new()
         .with_approval_policy(approval_policy)
         .disable_feature(Feature::RemoteModels)
         .with_features(feature_flags)

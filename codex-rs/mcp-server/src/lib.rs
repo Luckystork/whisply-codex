@@ -142,7 +142,7 @@ pub async fn run_main(
                             break;
                         }
                     }
-                    Err(e) => error!("Failed to deserialize JSON-RPC message: {e}"),
+                    Err(_) => error!("failed to deserialize JSON-RPC message"),
                 }
             }
 
@@ -183,16 +183,16 @@ pub async fn run_main(
             let msg: OutgoingJsonRpcMessage = outgoing_message.into();
             match serde_json::to_string(&msg) {
                 Ok(json) => {
-                    if let Err(e) = stdout.write_all(json.as_bytes()).await {
-                        error!("Failed to write to stdout: {e}");
+                    if stdout.write_all(json.as_bytes()).await.is_err() {
+                        error!("failed to write JSON-RPC message to stdout");
                         break;
                     }
-                    if let Err(e) = stdout.write_all(b"\n").await {
-                        error!("Failed to write newline to stdout: {e}");
+                    if stdout.write_all(b"\n").await.is_err() {
+                        error!("failed to write JSON-RPC newline to stdout");
                         break;
                     }
                 }
-                Err(e) => error!("Failed to serialize JSON-RPC message: {e}"),
+                Err(_) => error!("failed to serialize JSON-RPC message"),
             }
         }
 
@@ -212,17 +212,11 @@ mod tests {
     use super::*;
     use codex_config::types::OtelExporterKind;
     use codex_core::config::ConfigBuilder;
-    use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    #[test]
-    fn mcp_server_defaults_analytics_to_enabled() {
-        assert_eq!(DEFAULT_ANALYTICS_ENABLED, true);
-    }
-
     #[tokio::test]
-    async fn mcp_server_builds_otel_provider_with_logs_traces_and_metrics() -> anyhow::Result<()> {
+    async fn mcp_server_disables_otel_exporters_even_when_configured() -> anyhow::Result<()> {
         let codex_home = TempDir::new()?;
         let mut config = ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
@@ -244,16 +238,12 @@ mod tests {
             Some(OTEL_SERVICE_NAME),
             DEFAULT_ANALYTICS_ENABLED,
         )
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?
-        .expect("otel provider");
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-        assert!(provider.logger.is_some(), "expected log exporter");
         assert!(
-            provider.tracer_provider.is_some(),
-            "expected trace exporter"
+            provider.is_none(),
+            "BrokerOnly must suppress direct OTEL exporters even when a caller mutates Config"
         );
-        assert!(provider.metrics().is_some(), "expected metrics exporter");
-        provider.shutdown();
 
         Ok(())
     }

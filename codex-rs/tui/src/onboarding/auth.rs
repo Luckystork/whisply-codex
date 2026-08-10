@@ -1031,7 +1031,7 @@ mod tests {
     use codex_app_server_client::InProcessAppServerClient;
     use codex_app_server_client::InProcessClientStartArgs;
     use codex_arg0::Arg0DispatchPaths;
-    use codex_cloud_config::cloud_config_bundle_loader_for_storage;
+    use codex_config::CloudConfigBundleLoader;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1066,17 +1066,14 @@ mod tests {
             cli_overrides: Vec::new(),
             loader_overrides: Default::default(),
             strict_config: false,
-            cloud_config_bundle: cloud_config_bundle_loader_for_storage(
-                auth_config.clone(),
-                /*enable_codex_api_key_env*/ false,
-            )
-            .await,
+            cloud_config_bundle: CloudConfigBundleLoader::default(),
             feedback: codex_feedback::CodexFeedback::new(),
             log_db: None,
             state_db: None,
             environment_manager: Arc::new(
                 codex_app_server_client::EnvironmentManager::default_for_tests(),
             ),
+            managed_gateway_client: None,
             config_warnings: Vec::new(),
             session_source: serde_json::from_value(serde_json::json!("cli"))
                 .expect("cli session source should deserialize"),

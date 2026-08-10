@@ -1,6 +1,9 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::app_server_json_shutdown_event;
 use app_test_support::create_exec_command_sse_response;
@@ -54,14 +57,15 @@ async fn app_server_emits_structured_tool_call_timing_event() -> Result<()> {
     ])
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::UnifiedExec)
-        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 100000")
-        .with_provider_config("supports_websockets = false")
+        .with_additional_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 100000")
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .with_json_logging("warn,codex_core::tools::parallel=info")
         .build_initialized()
         .await?;

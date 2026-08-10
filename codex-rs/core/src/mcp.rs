@@ -21,14 +21,15 @@ use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpServerRegistration;
 use codex_mcp::McpToolCatalogCache;
 use codex_mcp::ToolInfo;
-use codex_mcp::codex_apps_mcp_server_config;
 use codex_mcp::configured_mcp_servers;
 use codex_mcp::effective_mcp_servers;
+use codex_mcp::is_whisply_rejected_mcp_server;
 use codex_plugin::AppConnectorId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::protocol::SessionSource;
 
 const LEGACY_CODEX_APPS_REGISTRATION_ID: &str = "legacy_codex_apps";
+const WHISPLY_MCP_ADMISSION_FILTER_REGISTRATION_ID: &str = "whisply_mcp_admission_filter";
 
 /// MCP configuration and capability availability derived from the same inputs.
 #[derive(Clone)]
@@ -137,7 +138,7 @@ impl McpManager {
     async fn runtime_config_with_context(
         &self,
         context: McpServerContributionContext<'_, Config>,
-        originator: Option<&str>,
+        _originator: Option<&str>,
     ) -> McpRuntimeProjection {
         let config = context.config();
         let mut selected_plugin_available = false;
@@ -209,22 +210,14 @@ impl McpManager {
         let mut mcp_config = config
             .to_mcp_config_with_loaded_plugins(&loaded_plugins, selected_plugin_registrations);
         let mut catalog = mcp_config.mcp_server_catalog.to_builder();
-        if mcp_config.apps_enabled {
-            catalog.register(McpServerRegistration::from_compatibility(
-                CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                LEGACY_CODEX_APPS_REGISTRATION_ID,
-                codex_apps_mcp_server_config(
-                    &mcp_config.chatgpt_base_url,
-                    mcp_config.apps_mcp_product_sku.as_deref(),
-                    originator,
-                ),
-            ));
-        } else {
-            catalog.remove_compatibility(
-                CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                LEGACY_CODEX_APPS_REGISTRATION_ID,
-            );
-        }
+        // Whisply does not delegate connector authority to the host-owned
+        // ChatGPT Apps MCP. Keep only the removal keyed to its compatibility
+        // registration so configured and plugin-contributed MCP servers retain
+        // their normal resolution boundaries.
+        catalog.remove_compatibility(
+            CODEX_APPS_MCP_SERVER_NAME.to_string(),
+            LEGACY_CODEX_APPS_REGISTRATION_ID,
+        );
 
         for overlay in overlays {
             match overlay {
@@ -245,6 +238,32 @@ impl McpManager {
                     name,
                 } => catalog.remove_extension(name, contributor_id, contribution_order),
             }
+        }
+        // Plugin manifests, executor-selected plugins, and extensions can
+        // deserialize McpServerConfig without passing through ConfigToml. Apply
+        // this source-independent admission filter only after every source has
+        // resolved. It prevents either the host-owned name or ChatGPT auth from
+        // materializing into a runtime MCP, while retaining ordinary OAuth and
+        // local servers.
+        let resolved_catalog = catalog.build();
+        let rejected_server_names = resolved_catalog
+            .configured_servers()
+            .into_iter()
+            .filter_map(|(name, server)| {
+                is_whisply_rejected_mcp_server(&name, &server).then_some(name)
+            })
+            .collect::<Vec<_>>();
+        let mut catalog = resolved_catalog.to_builder();
+        for (filter_order, name) in rejected_server_names.into_iter().enumerate() {
+            tracing::warn!(
+                server = name,
+                "Whisply rejected a host-owned or ChatGPT-authenticated MCP server"
+            );
+            catalog.remove_extension(
+                name,
+                WHISPLY_MCP_ADMISSION_FILTER_REGISTRATION_ID,
+                contribution_order + filter_order,
+            );
         }
         let catalog = catalog.build();
         for conflict in catalog.conflicts() {
@@ -288,5 +307,231 @@ impl McpManager {
     ) -> HashMap<String, EffectiveMcpServer> {
         let mcp_config = self.runtime_config(config).await;
         effective_mcp_servers(&mcp_config, auth)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConfigBuilder;
+    use codex_extension_api::ExtensionRegistryBuilder;
+    use codex_extension_api::McpServerContribution;
+    use codex_extension_api::McpServerContributionContext;
+    use codex_extension_api::McpServerContributor;
+    use codex_login::AuthCredentialsStoreMode;
+    use codex_login::AuthDotJson;
+    use codex_login::AuthKeyringBackendKind;
+    use codex_login::CodexAuth;
+    use codex_login::save_auth;
+    use codex_login::token_data::TokenData;
+    use codex_login::token_data::parse_chatgpt_jwt_claims;
+    use codex_protocol::auth::AuthMode;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+    use wiremock::MockServer;
+
+    #[tokio::test]
+    async fn runtime_projection_omits_host_owned_apps_with_chatgpt_auth() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await?;
+        let external_server: McpServerConfig = serde_json::from_value(json!({
+            "command": "external-mcp"
+        }))?;
+        let reserved_server: McpServerConfig = serde_json::from_value(json!({
+            "url": "https://example.invalid/mcp"
+        }))?;
+        config.mcp_servers.set(HashMap::from([
+            (CODEX_APPS_MCP_SERVER_NAME.to_string(), reserved_server),
+            ("external".to_string(), external_server),
+        ]))?;
+        let manager = McpManager::new(Arc::new(PluginsManager::new(
+            config.codex_home.to_path_buf(),
+        )));
+        let legacy_chatgpt_auth = CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.signature",
+            "legacy-account",
+            /*chatgpt_plan_type*/ None,
+        )?;
+
+        let runtime_config = manager.runtime_config(&config).await;
+        assert!(
+            runtime_config
+                .mcp_server_catalog
+                .server(CODEX_APPS_MCP_SERVER_NAME)
+                .is_none(),
+            "Whisply must not admit a configured or host-owned Apps MCP"
+        );
+        assert!(
+            runtime_config
+                .mcp_server_catalog
+                .server("external")
+                .is_some(),
+            "removing host-owned Apps must not remove configured external MCP servers"
+        );
+        assert!(
+            manager
+                .effective_servers(&config, Some(&legacy_chatgpt_auth))
+                .await
+                .get(CODEX_APPS_MCP_SERVER_NAME)
+                .is_none(),
+            "legacy ChatGPT auth must not reactivate host-owned Apps"
+        );
+        assert!(
+            manager
+                .effective_servers(&config, Some(&legacy_chatgpt_auth))
+                .await
+                .contains_key("external"),
+            "legacy auth must not remove configured external MCP servers"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_projection_rejects_selected_plugin_and_extension_chatgpt_aliases()
+    -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let remote = MockServer::start().await;
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+        let auth = persisted_chatgpt_auth(codex_home.path()).await?;
+        let mut registry = ExtensionRegistryBuilder::new();
+        registry.mcp_server_contributor(Arc::new(SelectedExecutorPluginChatgptAlias {
+            url: remote.uri(),
+        }));
+        registry.mcp_server_contributor(Arc::new(ArbitraryExtensionChatgptAlias {
+            url: remote.uri(),
+        }));
+        let manager = McpManager::new_with_extensions(
+            Arc::new(PluginsManager::new(config.codex_home.to_path_buf())),
+            Arc::new(registry.build()),
+            ConnectorRuntimeManager::default(),
+        );
+
+        let runtime_servers = manager.runtime_servers(&config).await;
+        let effective_servers = manager.effective_servers(&config, Some(&auth)).await;
+
+        for name in [
+            "selected_executor_plugin_chatgpt_alias",
+            "arbitrary_extension_chatgpt_alias",
+        ] {
+            assert!(
+                !runtime_servers.contains_key(name),
+                "the resolved runtime catalog must reject {name} before auth gating"
+            );
+            assert!(
+                !effective_servers.contains_key(name),
+                "persisted legacy ChatGPT auth must not reactivate {name}"
+            );
+        }
+        assert!(
+            remote
+                .received_requests()
+                .await
+                .expect("wiremock should retain request history")
+                .is_empty(),
+            "the admission filter must prevent all HTTP to rejected MCP aliases"
+        );
+        Ok(())
+    }
+
+    async fn persisted_chatgpt_auth(codex_home: &std::path::Path) -> anyhow::Result<CodexAuth> {
+        let id_token = parse_chatgpt_jwt_claims(
+            "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9wbGFuX3R5cGUiOiJwcm8iLCJjaGF0Z3B0X3VzZXJfaWQiOiJsZWdhY3ktdXNlciIsImNoYXRncHRfYWNjb3VudF9pZCI6ImxlZ2FjeS1hY2NvdW50In19.signature",
+        )?;
+        let auth_dot_json = AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token,
+                access_token: "legacy-chatgpt-token".to_string(),
+                refresh_token: "legacy-refresh-token".to_string(),
+                account_id: Some("legacy-account".to_string()),
+            }),
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+        };
+        save_auth(
+            codex_home,
+            &auth_dot_json,
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )?;
+        CodexAuth::from_auth_storage(
+            codex_home,
+            AuthCredentialsStoreMode::File,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            &codex_login::test_support::transport_default_auth_route_config(),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("persisted ChatGPT auth was not loaded"))
+    }
+
+    struct SelectedExecutorPluginChatgptAlias {
+        url: String,
+    }
+
+    impl McpServerContributor<Config> for SelectedExecutorPluginChatgptAlias {
+        fn id(&self) -> &'static str {
+            "selected_executor_plugin_chatgpt_alias"
+        }
+
+        fn contribute<'a>(
+            &'a self,
+            _context: McpServerContributionContext<'a, Config>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Vec<McpServerContribution>> {
+            let url = self.url.clone();
+            Box::pin(async move {
+                let config = serde_json::from_value(json!({
+                    "url": format!("{url}/backend-api/ps/mcp"),
+                    "auth": "chatgpt",
+                }))
+                .expect("test MCP config should deserialize");
+                vec![McpServerContribution::SelectedPlugin {
+                    name: "selected_executor_plugin_chatgpt_alias".to_string(),
+                    plugin_id: "selected-executor-plugin".to_string(),
+                    plugin_display_name: "Selected Executor Plugin".to_string(),
+                    selection_order: 0,
+                    config: Box::new(config),
+                }]
+            })
+        }
+    }
+
+    struct ArbitraryExtensionChatgptAlias {
+        url: String,
+    }
+
+    impl McpServerContributor<Config> for ArbitraryExtensionChatgptAlias {
+        fn id(&self) -> &'static str {
+            "arbitrary_extension_chatgpt_alias"
+        }
+
+        fn contribute<'a>(
+            &'a self,
+            _context: McpServerContributionContext<'a, Config>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Vec<McpServerContribution>> {
+            let url = self.url.clone();
+            Box::pin(async move {
+                let config = serde_json::from_value(json!({
+                    "url": format!("{url}/backend-api/ps/mcp"),
+                    "auth": "chatgpt",
+                }))
+                .expect("test MCP config should deserialize");
+                vec![McpServerContribution::Set {
+                    name: "arbitrary_extension_chatgpt_alias".to_string(),
+                    config: Box::new(config),
+                }]
+            })
+        }
     }
 }

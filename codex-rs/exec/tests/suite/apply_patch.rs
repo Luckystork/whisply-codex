@@ -80,6 +80,7 @@ async fn test_apply_patch_tool() -> anyhow::Result<()> {
 
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
+        .args(["--model", "gpt-5.2"])
         .arg("-s")
         .arg("danger-full-access")
         .arg("foo")
@@ -130,6 +131,7 @@ async fn test_apply_patch_freeform_tool() -> anyhow::Result<()> {
 
     test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
+        .args(["--model", "gpt-5.2"])
         .arg("-s")
         .arg("danger-full-access")
         .arg("foo")
@@ -148,22 +150,9 @@ async fn test_apply_patch_freeform_tool() -> anyhow::Result<()> {
 
 #[cfg(not(target_os = "windows"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shutdown_flushes_completed_turn_and_file_diff() -> anyhow::Result<()> {
-    use codex_login::AuthDotJson;
-    use codex_login::AuthKeyringBackendKind;
-    use codex_login::TokenData;
-    use codex_login::save_auth;
-    use codex_login::token_data::IdTokenInfo;
-    use codex_protocol::auth::AuthMode;
+async fn shutdown_persists_completed_turn_and_file_diff() -> anyhow::Result<()> {
     use core_test_support::skip_if_no_network;
     use core_test_support::test_codex_exec::test_codex_exec;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-    use wiremock::Mock;
-    use wiremock::ResponseTemplate;
-    use wiremock::matchers::method;
 
     skip_if_no_network!(Ok(()));
 
@@ -190,43 +179,7 @@ async fn shutdown_flushes_completed_turn_and_file_diff() -> anyhow::Result<()> {
             .context("add test git remote")?
             .success()
     );
-    save_auth(
-        test.home_path(),
-        &AuthDotJson {
-            auth_mode: Some(AuthMode::Chatgpt),
-            openai_api_key: None,
-            tokens: Some(TokenData {
-                id_token: IdTokenInfo {
-                    raw_jwt: "header.eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEyMyJ9.".to_string(),
-                    ..Default::default()
-                },
-                access_token: "test-access-token".to_string(),
-                refresh_token: "test-refresh-token".to_string(),
-                account_id: None,
-            }),
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-        },
-        codex_login::AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )?;
-
     let server = start_mock_server().await;
-    let deliveries = Arc::new(AtomicUsize::new(0));
-    let completed_deliveries = Arc::clone(&deliveries);
-    Mock::given(method("POST"))
-        .and(|request: &wiremock::Request| request.url.path().ends_with("events"))
-        .respond_with(move |_request: &wiremock::Request| {
-            // A request is counted only once its delayed handler has completed.
-            std::thread::sleep(Duration::from_millis(750));
-            completed_deliveries.fetch_add(1, Ordering::Release);
-            ResponseTemplate::new(200)
-        })
-        .expect(3..)
-        .mount(&server)
-        .await;
     mount_sse_sequence(
         &server,
         vec![
@@ -243,22 +196,10 @@ async fn shutdown_flushes_completed_turn_and_file_diff() -> anyhow::Result<()> {
     .await;
 
     test.cmd_with_server(&server)
-        .env_remove("CODEX_API_KEY")
-        .env_remove("CODEX_ANALYTICS_EVENTS_CAPTURE_FILE")
         .arg("--skip-git-repo-check")
+        .args(["--model", "gpt-5.2"])
         .arg("-s")
         .arg("danger-full-access")
-        .arg("-c")
-        .arg("model_provider=\"test\"")
-        .arg("-c")
-        .arg(format!(
-            "model_providers.test={{name=\"test\",base_url={:?},wire_api=\"responses\",requires_openai_auth=false,supports_websockets=false}}",
-            format!("{}/v1", server.uri())
-        ))
-        .arg("-c")
-        .arg("analytics.enabled=true")
-        .arg("-c")
-        .arg(format!("chatgpt_base_url={}", server.uri()))
         .arg("write the file")
         .assert()
         .success();
@@ -266,47 +207,6 @@ async fn shutdown_flushes_completed_turn_and_file_diff() -> anyhow::Result<()> {
     let persisted = std::fs::read_to_string(run_dir.join("flushed.md"))
         .context("read file written by apply_patch")?;
     assert_eq!(persisted, "persist this line\n");
-
-    let requests = server
-        .received_requests()
-        .await
-        .context("read analytics requests")?;
-    let request_paths = requests
-        .iter()
-        .map(|request| request.url.path().to_string())
-        .collect::<Vec<_>>();
-    let event_types = requests
-        .iter()
-        .filter(|request| request.url.path().ends_with("events"))
-        .flat_map(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body)
-                .ok()
-                .and_then(|body| {
-                    body.get("events")
-                        .and_then(serde_json::Value::as_array)
-                        .cloned()
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|event| event["event_type"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        deliveries.load(Ordering::Acquire) >= 3,
-        "the runtime exited before the delayed analytics deliveries completed (completed={}, events={event_types:?}, paths={request_paths:?})",
-        deliveries.load(Ordering::Acquire)
-    );
-    assert!(
-        event_types.iter().any(|event| event == "codex_turn_event"),
-        "no completed event was delivered; request paths: {request_paths:?}"
-    );
-    assert!(
-        event_types
-            .iter()
-            .any(|event| event == "codex_accepted_line_fingerprints"),
-        "no accepted-line event was delivered; request paths: {request_paths:?}"
-    );
 
     Ok(())
 }

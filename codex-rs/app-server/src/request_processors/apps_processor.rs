@@ -5,7 +5,14 @@ use codex_connectors::AppToolPolicyEvaluator;
 mod installed;
 mod read;
 
-pub(super) use read::APP_READ_MAX_IDS;
+pub(super) const WHISPLY_MANAGED_APPS_UNAVAILABLE_ERROR: &str =
+    "Whisply connected apps are managed by the installed app and are unavailable in this runtime.";
+
+// Keep this ahead of all config and auth resolution until the installed app
+// provides a native broker snapshot for connected apps.
+pub(super) fn reject_direct_apps_authority() -> Result<(), JSONRPCErrorError> {
+    Err(invalid_request(WHISPLY_MANAGED_APPS_UNAVAILABLE_ERROR))
+}
 
 pub(crate) struct AppsRequestProcessor {
     auth_manager: Arc<AuthManager>,
@@ -53,6 +60,8 @@ impl AppsRequestProcessor {
         request_id: &ConnectionRequestId,
         params: AppsListParams,
     ) -> Result<Option<AppsListResponse>, JSONRPCErrorError> {
+        reject_direct_apps_authority()?;
+
         let installed_start = Instant::now();
         let reload = params.force_refetch;
         let thread = if let Some(thread_id) = params.thread_id.as_deref() {

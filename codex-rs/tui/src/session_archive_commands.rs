@@ -13,25 +13,19 @@ use crate::Cli;
 use crate::app_server_session::AppServerSession;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
-use crate::legacy_core::config::bootstrap_auth_config;
-use crate::legacy_core::config::load_config_toml_with_layer_stack;
-use crate::legacy_core::config::resolve_oss_provider;
 use crate::legacy_core::config::resolve_profile_v2_config_path;
 use crate::named_session_lookup::NamedSessionCandidates;
 use crate::named_session_lookup::SessionCollection;
 use crate::named_session_lookup::SessionNameLookupMode;
 use codex_app_server_protocol::Thread as AppServerThread;
 use codex_arg0::Arg0DispatchPaths;
-use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
-use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_protocol::ThreadId;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_home_dir::find_codex_home;
-use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::eyre;
@@ -73,9 +67,9 @@ fn success_message(
     }
 }
 
-struct ResolvedSessionTarget {
-    session_id: ThreadId,
-    session_name: Option<String>,
+pub(crate) struct ResolvedSessionTarget {
+    pub(crate) session_id: ThreadId,
+    pub(crate) session_name: Option<String>,
 }
 
 pub async fn run_session_archive_command(
@@ -83,16 +77,41 @@ pub async fn run_session_archive_command(
     target: String,
     options: SessionArchiveCommandOptions,
 ) -> Result<String> {
-    let codex_home = find_codex_home().wrap_err("failed to find Codex home")?;
-    let mut app_server =
-        start_app_server_for_archive_command(options, codex_home.to_path_buf()).await?;
-    run_session_archive_action_with_app_server(
+    let codex_home = managed_runtime_home()?;
+    let mut app_server = start_app_server_for_archive_command(options, codex_home.clone()).await?;
+    let result = run_session_archive_action_with_app_server(
         &mut app_server,
         codex_home.as_path(),
         action,
         &target,
     )
-    .await
+    .await;
+    let shutdown_result = app_server.shutdown().await;
+    let output = result?;
+    shutdown_result.wrap_err("failed to close the managed session service")?;
+    Ok(output)
+}
+
+/// Returns only the account-scoped home injected by the verified Whisply
+/// launcher. Session commands must not recreate an upstream home fallback.
+pub(crate) fn managed_runtime_home() -> Result<PathBuf> {
+    let configured = std::env::var_os("WHISPLY_HOME")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| eyre!("WHISPLY_HOME is required; start Whisply from the installed app."))?;
+    let configured = PathBuf::from(configured);
+    if !configured.is_absolute() {
+        return Err(eyre!("WHISPLY_HOME must be an absolute managed runtime path."));
+    }
+    let metadata = std::fs::symlink_metadata(&configured)
+        .wrap_err("managed Whisply home is unavailable")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(eyre!("managed Whisply home must be a real directory."));
+    }
+    let resolved = find_codex_home().wrap_err("failed to resolve managed Whisply home")?;
+    if resolved.as_path() != configured.as_path() {
+        return Err(eyre!("managed Whisply home does not match the launcher contract."));
+    }
+    Ok(configured)
 }
 
 async fn run_session_archive_action_with_app_server(
@@ -128,7 +147,7 @@ async fn run_session_archive_action_with_app_server(
     ))
 }
 
-async fn resolve_session_target(
+pub(crate) async fn resolve_session_target(
     app_server: &mut AppServerSession,
     codex_home: &Path,
     action: SessionArchiveAction,
@@ -253,7 +272,7 @@ fn confirm_session_delete(target: &ResolvedSessionTarget) -> Result<bool> {
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
-async fn start_app_server_for_archive_command(
+pub(crate) async fn start_app_server_for_archive_command(
     options: SessionArchiveCommandOptions,
     codex_home: PathBuf,
 ) -> Result<AppServerSession> {
@@ -262,6 +281,11 @@ async fn start_app_server_for_archive_command(
         arg0_paths,
         explicit_remote_endpoint,
     } = options;
+    if cli.oss || cli.oss_provider.is_some() {
+        return Err(eyre!(
+            "saved-session commands use the managed Whisply gateway and do not support local providers"
+        ));
+    }
     let loader_overrides = LoaderOverrides::default();
     let strict_config = cli.strict_config;
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
@@ -269,26 +293,12 @@ async fn start_app_server_for_archive_command(
     let cli_kv_overrides = overrides_cli
         .parse_overrides()
         .map_err(|err| eyre!("failed to parse -c overrides: {err}"))?;
-    let mut launch_loader_overrides = loader_overrides.clone();
-    if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
-        launch_loader_overrides.user_config_path = Some(resolve_profile_v2_config_path(
-            codex_home.as_path(),
-            profile_v2,
-        ));
-        launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
-    }
-
-    let reuse_implicit_local_daemon = super::can_reuse_implicit_local_daemon(
-        &cli_kv_overrides,
-        &launch_loader_overrides,
-        strict_config,
-        cli.bypass_hook_trust || cli.psp,
-    );
-    let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
-        super::maybe_probe_default_daemon_socket(codex_home.as_path()).await
-    } else {
-        None
-    };
+    // Saved-session operations use an embedded managed app server. Never
+    // attach to an implicitly discovered daemon, because a stale or
+    // independently started local socket has not proved this launch's
+    // manifest, account-home generation, or brokered provider boundary.
+    let reuse_implicit_local_daemon = false;
+    let default_daemon = None;
     let app_server_target = super::app_server_target_for_launch(
         explicit_remote_endpoint,
         default_daemon,
@@ -307,12 +317,6 @@ async fn start_app_server_for_archive_command(
     let prepared_environment_manager = EnvironmentManager::prepare_from_env()
         .await
         .wrap_err("failed to discover execution environments")?;
-    let config_cwd = super::config_cwd_for_app_server_target(
-        cli.cwd.as_deref(),
-        &app_server_target,
-        prepared_environment_manager.default_environment_is_remote(),
-    )
-    .wrap_err("failed to resolve config cwd")?;
 
     let mut loader_overrides = loader_overrides;
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
@@ -324,39 +328,17 @@ async fn start_app_server_for_archive_command(
     }
     loader_overrides.ignore_login_requirements = app_server_target.uses_remote_workspace();
 
-    let bootstrap_config = load_config_toml_with_layer_stack(
-        codex_home.as_path(),
-        config_cwd.as_ref(),
-        cli_kv_overrides.clone(),
-        ConfigLoadOptions {
-            loader_overrides: loader_overrides.clone(),
-            strict_config,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
-        },
-    )
-    .await
-    .wrap_err("failed to load config.toml")?;
-    let config_toml = &bootstrap_config.config_toml;
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        app_server_target.auth_config_for_cloud_loader(bootstrap_auth_config(
-            codex_home.as_path(),
-            &bootstrap_config,
-        )?),
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await;
+    // Session lifecycle commands use only local configuration layers. This
+    // deliberately does not construct a cloud config loader from legacy auth.
+    let cloud_config_bundle = CloudConfigBundleLoader::default();
 
-    let model_provider = if cli.oss {
-        resolve_oss_provider(cli.oss_provider.as_deref(), config_toml)
-    } else {
-        None
-    };
-    let model = cli.model.clone().or_else(|| {
-        model_provider
-            .as_deref()
-            .and_then(get_default_model_for_oss_provider)
-            .map(ToOwned::to_owned)
-    });
+    // Session lifecycle requests must run in the same managed app-server
+    // boundary as normal Whisply turns. Do not let an OSS preference or a
+    // profile's historical provider choice make this command a local-provider
+    // bypass. The Whisply provider obtains all live authority through the
+    // inherited descriptor pair and native broker when a turn needs it.
+    let model_provider = Some("whisply".to_string());
+    let model = cli.model.clone();
     let cwd = cli.cwd.clone();
     let config = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides.clone())

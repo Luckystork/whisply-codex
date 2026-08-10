@@ -8,6 +8,7 @@ use codex_features::FeatureConfigSource;
 use codex_features::FeatureOverrides;
 use codex_features::Features;
 use codex_login::AuthConfig;
+use codex_login::AuthSourceMode;
 use std::path::Path;
 
 impl Config {
@@ -22,6 +23,10 @@ impl Config {
             codex_home: self.codex_home.to_path_buf(),
             auth_credentials_store_mode: self.cli_auth_credentials_store_mode,
             keyring_backend_kind: self.auth_keyring_backend_kind(),
+            // Whisply's brokered gateway session is not a CodexAuth. Legacy
+            // auth.json data is retained but never materialized by this
+            // runtime.
+            source_mode: AuthSourceMode::BrokerOnly,
             forced_login_method: self.forced_login_method,
             chatgpt_base_url: Some(self.chatgpt_base_url.clone()),
             forced_chatgpt_workspace_id: self.forced_chatgpt_workspace_id.clone(),
@@ -58,6 +63,10 @@ pub fn bootstrap_auth_config(
         codex_home: codex_home.to_path_buf(),
         auth_credentials_store_mode: config.cli_auth_credentials_store.unwrap_or_default(),
         keyring_backend_kind: resolve_bootstrap_auth_keyring_backend_kind(bootstrap_config)?,
+        // Bootstrap must observe the same managed-only boundary as the final
+        // runtime so a stale auth.json cannot fetch or configure a direct
+        // provider before Whisply starts.
+        source_mode: AuthSourceMode::BrokerOnly,
         forced_login_method: config.forced_login_method,
         chatgpt_base_url: config.chatgpt_base_url.clone(),
         forced_chatgpt_workspace_id,

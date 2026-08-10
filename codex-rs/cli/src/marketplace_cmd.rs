@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use crate::plugin_cmd::JsonMarketplaceSource;
 use crate::plugin_cmd::configured_marketplace_snapshot_issues;
 use crate::plugin_cmd::configured_marketplace_sources;
-use crate::plugin_cmd::load_cli_auth_mode;
 
 #[derive(Debug, Parser)]
 #[command(bin_name = "codex plugin marketplace")]
@@ -96,7 +95,7 @@ struct ListMarketplaceArgs {
     after_help = "Examples:\n  codex plugin marketplace upgrade\n  codex plugin marketplace upgrade debug"
 )]
 struct UpgradeMarketplaceArgs {
-    /// Optional configured marketplace name to upgrade. Omit to upgrade all Git marketplaces.
+    /// Optional configured marketplace name to upgrade. Omit to upgrade all configured Git marketplaces.
     #[arg(value_name = "MARKETPLACE_NAME")]
     marketplace_name: Option<String>,
 
@@ -212,7 +211,7 @@ async fn run_list(overrides: Vec<(String, toml::Value)>, args: ListMarketplaceAr
         .await
         .context("failed to load configuration")?;
     let manager = PluginsManager::new(config.codex_home.to_path_buf());
-    manager.set_auth_mode(load_cli_auth_mode(&config).await);
+    manager.set_auth_mode(None);
     let plugins_input = config.plugins_config_input();
     let marketplace_listing = manager
         .discover_marketplaces_for_config(&plugins_input, &[])

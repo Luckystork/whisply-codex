@@ -81,6 +81,7 @@ codex-utils-plugins = { workspace = true }
 codex-utils-pty = { workspace = true }
 codex-utils-string = { workspace = true }
 codex-utils-stream-parser = { workspace = true }
+codex-whisply = { workspace = true }
 codex-windows-sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
 dirs = { workspace = true }
 dunce = { workspace = true }
@@ -136,6 +137,7 @@ openssl-sys = { workspace = true, features = ["vendored"] }
 codex-shell-escalation = { workspace = true }
 
 [dev-dependencies]
+app_test_support = { workspace = true }
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
 codex-exec-server-test-support = { workspace = true }

@@ -201,6 +201,15 @@ mod reload {
             config_layer_stack,
         )
         .await?;
+        if preserve_current_provider {
+            // Roles that do not name a provider inherit the caller's complete
+            // runtime provider selection, not just its identifier. In
+            // particular, the managed route may carry release-owned runtime
+            // endpoint state that cannot be reconstructed from a role TOML.
+            next_config
+                .model_provider
+                .clone_from(&config.model_provider);
+        }
         if preserve_current_reasoning_effort {
             next_config
                 .model_reasoning_effort

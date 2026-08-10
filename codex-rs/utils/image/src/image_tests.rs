@@ -303,6 +303,19 @@ async fn resize_with_limits_respects_dimension_and_patch_budgets() {
     );
 }
 
+#[test]
+fn output_dimensions_respect_original_detail_patch_budget() {
+    let limits = PromptImageResizeLimits {
+        max_dimension: 6000,
+        max_patches: 10_000,
+    };
+
+    assert_eq!(
+        prompt_image_output_dimensions_for_limits(3201, 3201, limits),
+        (3200, 3200)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn fails_cleanly_for_invalid_images() {
     let err = load_for_prompt_bytes(

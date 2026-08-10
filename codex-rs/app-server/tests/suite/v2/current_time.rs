@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use chrono::DateTime;
@@ -39,8 +42,8 @@ async fn current_time_read_round_trip_adds_reminder_to_model_input() -> Result<(
     )
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_extra_config(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
             r#"[features.current_time_reminder]
 enabled = true
 reminder_interval_seconds = 1
@@ -49,8 +52,10 @@ clock_source = "external"
         )
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 

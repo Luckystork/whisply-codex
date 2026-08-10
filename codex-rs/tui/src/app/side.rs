@@ -100,6 +100,8 @@ impl SideParentStatus {
             | ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => Some(SideParentStatus::NeedsApproval),
             ServerRequest::DynamicToolCall { .. }
+            | ServerRequest::WhisplyToolExecute { .. }
+            | ServerRequest::WhisplyToolCancel { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. } => None,

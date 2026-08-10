@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
@@ -35,13 +38,15 @@ async fn request_permissions_round_trip() -> Result<()> {
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .enable_feature(Feature::RequestPermissionsTool)
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 

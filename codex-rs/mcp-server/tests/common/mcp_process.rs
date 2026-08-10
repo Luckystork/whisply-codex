@@ -10,8 +10,10 @@ use tokio::process::ChildStdin;
 use tokio::process::ChildStdout;
 
 use anyhow::Context;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
 use codex_mcp_server::CodexToolCallParam;
-use codex_terminal_detection::user_agent;
+use codex_secrets::redact_mcp_stderr;
 
 use pretty_assertions::assert_eq;
 use rmcp::model::CallToolRequestParams;
@@ -57,6 +59,42 @@ impl McpProcess {
         codex_home: &Path,
         env_overrides: &[(&str, Option<&str>)],
     ) -> anyhow::Result<Self> {
+        Self::spawn(Self::command(codex_home, env_overrides)?).await
+    }
+
+    /// Starts an MCP child using the test-owned managed gateway transport.
+    ///
+    /// The fixture keeps launch descriptors close-on-exec in the parent and
+    /// makes only its three descriptors inheritable in this child immediately
+    /// before `exec`.
+    #[cfg(target_os = "macos")]
+    pub async fn new_with_managed_gateway(
+        codex_home: &Path,
+        gateway: &ManagedWhisplyGatewayFixture,
+        env_overrides: &[(&str, Option<&str>)],
+    ) -> anyhow::Result<Self> {
+        let mut cmd = Self::command(codex_home, env_overrides)?;
+        for (key, value) in gateway.environment_overrides() {
+            match value {
+                Some(value) => {
+                    cmd.env(key, value);
+                }
+                None => {
+                    cmd.env_remove(key);
+                }
+            }
+        }
+        ManagedWhisplyGatewayFixture::configure_child_command(
+            &mut cmd,
+            gateway.inherited_descriptor_fds(),
+        )?;
+        Self::spawn(cmd).await
+    }
+
+    fn command(
+        codex_home: &Path,
+        env_overrides: &[(&str, Option<&str>)],
+    ) -> anyhow::Result<Command> {
         let program = codex_utils_cargo_bin::cargo_bin("codex-mcp-server")
             .context("should find binary for codex-mcp-server")?;
         let mut cmd = Command::new(program);
@@ -64,6 +102,7 @@ impl McpProcess {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.env("WHISPLY_HOME", codex_home);
         cmd.env("CODEX_HOME", codex_home);
         cmd.env("RUST_LOG", "debug");
 
@@ -78,6 +117,10 @@ impl McpProcess {
             }
         }
 
+        Ok(cmd)
+    }
+
+    async fn spawn(mut cmd: Command) -> anyhow::Result<Self> {
         let mut process = cmd
             .kill_on_drop(true)
             .spawn()
@@ -98,7 +141,8 @@ impl McpProcess {
             let mut stderr_reader = BufReader::new(stderr).lines();
             tokio::spawn(async move {
                 while let Ok(Some(line)) = stderr_reader.next_line().await {
-                    eprintln!("[mcp stderr] {line}");
+                    let redacted_line = redact_mcp_stderr(&line);
+                    eprintln!("[mcp stderr] {redacted_line}");
                 }
             });
         }
@@ -132,16 +176,7 @@ impl McpProcess {
         .await?;
 
         let initialized = self.read_jsonrpc_message().await?;
-        let os_info = os_info::get();
         let build_version = env!("CARGO_PKG_VERSION");
-        let originator = codex_login::default_client::originator().value;
-        let user_agent = format!(
-            "{originator}/{build_version} ({} {}; {}) {} (elicitation test; 0.0.0)",
-            os_info.os_type(),
-            os_info.version(),
-            os_info.architecture().unwrap_or("unknown"),
-            user_agent()
-        );
         let JsonRpcMessage::Response(JsonRpcResponse {
             jsonrpc,
             id,
@@ -152,8 +187,22 @@ impl McpProcess {
         };
         assert_eq!(jsonrpc, JsonRpcVersion2_0);
         assert_eq!(id, RequestId::Number(request_id));
+        let user_agent = result
+            .pointer("/serverInfo/user_agent")
+            .and_then(serde_json::Value::as_str)
+            .context("initialize response must include serverInfo.user_agent")?;
+        assert!(
+            user_agent.starts_with("Whisply/"),
+            "MCP child must advertise the Whisply runtime, got {user_agent:?}"
+        );
+        assert!(
+            user_agent.ends_with(" (elicitation test; 0.0.0)"),
+            "MCP child must retain the initialize-client suffix, got {user_agent:?}"
+        );
+        let mut normalized_result = result;
+        normalized_result["serverInfo"]["user_agent"] = json!("<whisply-user-agent>");
         assert_eq!(
-            result,
+            normalized_result,
             json!({
                 "capabilities": {
                     "tools": {
@@ -163,8 +212,8 @@ impl McpProcess {
                 "serverInfo": {
                     "name": "codex-mcp-server",
                     "title": "Codex",
-                    "version": "0.0.0",
-                    "user_agent": user_agent
+                    "version": build_version,
+                    "user_agent": "<whisply-user-agent>"
                 },
                 "protocolVersion": ProtocolVersion::V_2025_03_26
             })

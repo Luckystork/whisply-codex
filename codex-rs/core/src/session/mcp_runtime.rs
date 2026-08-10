@@ -169,10 +169,6 @@ impl Session {
             self.services.turn_environments.environment_manager(),
             local_stdio_fallback_cwd,
         );
-        let codex_apps_auth_manager =
-            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-                .then(|| Arc::clone(&self.services.auth_manager));
-
         McpRuntimeInput {
             config: mcp_config,
             plugins_available,
@@ -187,7 +183,11 @@ impl Session {
             codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
             client_mcp_extensions: self.services.client_mcp_extensions.clone(),
             auth,
-            codex_apps_auth_manager,
+            // The host-owned ChatGPT Apps MCP is not part of Whisply's
+            // runtime authority. Do not attach persisted ChatGPT auth to a
+            // session MCP runtime even when legacy config or environment
+            // state is present.
+            codex_apps_auth_manager: None,
             elicitation_reviewer,
             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
         }

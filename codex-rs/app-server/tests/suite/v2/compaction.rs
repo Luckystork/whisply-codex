@@ -1,37 +1,45 @@
 //! End-to-end compaction flow tests.
 //!
 //! Phases:
-//! 1) Arrange: mock responses/compact endpoints + config.
+//! 1) Arrange: a managed broker fixture and mock Responses endpoint.
 //! 2) Act: start a thread and submit multiple turns to trigger auto-compaction.
 //! 3) Assert: verify item/started + item/completed notifications for context compaction.
 
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::MockResponsesConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
-use app_test_support::write_chatgpt_auth;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ItemCompletedNotification;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadCompactStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadCompactStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadItem;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TokenUsageBreakdown;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnCompletedNotification;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::UserInput as V2UserInput;
-use codex_config::types::AuthCredentialsStoreMode;
-use codex_features::Feature;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
-use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
+use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -45,10 +53,9 @@ const AUTO_COMPACT_LIMIT: i64 = 1_000;
 const COMPACT_PROMPT: &str = "Summarize the conversation.";
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
     let server = responses::start_mock_server().await;
     let sse1 = responses::sse(vec![
         responses::ev_assistant_message("m1", "FIRST_REPLY"),
@@ -69,92 +76,13 @@ async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()>
     responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-
-    let thread_id = start_thread(&mut mcp).await?;
-    for message in ["first", "second", "third"] {
-        send_turn_and_wait(&mut mcp, &thread_id, message).await?;
-    }
-
-    let started = wait_for_context_compaction_started(&mut mcp).await?;
-    let completed = wait_for_context_compaction_completed(&mut mcp).await?;
-
-    let ThreadItem::ContextCompaction { id: started_id } = started.item else {
-        unreachable!("started item should be context compaction");
-    };
-    let ThreadItem::ContextCompaction { id: completed_id } = completed.item else {
-        unreachable!("completed item should be context compaction");
-    };
-
-    assert_eq!(started.thread_id, thread_id);
-    assert_eq!(completed.thread_id, thread_id);
-    assert_eq!(started_id, completed_id);
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-    const REMOTE_AUTO_COMPACT_LIMIT: i64 = 200_000;
-
-    let server = responses::start_mock_server().await;
-    let sse1 = responses::sse(vec![
-        responses::ev_assistant_message("m1", "FIRST_REPLY"),
-        responses::ev_completed_with_tokens("r1", /*total_tokens*/ 70_000),
-    ]);
-    let sse2 = responses::sse(vec![
-        responses::ev_assistant_message("m2", "SECOND_REPLY"),
-        responses::ev_completed_with_tokens("r2", /*total_tokens*/ 330_000),
-    ]);
-    let sse3 = responses::sse(vec![
-        responses::ev_assistant_message("m3", "FINAL_REPLY"),
-        responses::ev_completed_with_tokens("r3", /*total_tokens*/ 120),
-    ]);
-    let responses_log = responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
-
-    let compacted_history = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: "REMOTE_COMPACT_SUMMARY".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "ENCRYPTED_COMPACTION_SUMMARY".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let compact_mock = responses::mount_compact_json_once(
-        &server,
-        serde_json::json!({ "output": compacted_history }),
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), REMOTE_AUTO_COMPACT_LIMIT)
-        .disable_feature(Feature::RemoteCompactionV2)
-        .with_provider_name("OpenAI")
-        .with_provider_config("requires_openai_auth = true")
-        .write(codex_home.path())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
-        AuthCredentialsStoreMode::File,
-    )?;
+    write_managed_compaction_config(codex_home.path(), AUTO_COMPACT_LIMIT)?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -176,73 +104,14 @@ async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()
     assert_eq!(started.thread_id, thread_id);
     assert_eq!(completed.thread_id, thread_id);
     assert_eq!(started_id, completed_id);
-
-    let compact_requests = compact_mock.requests();
-    assert_eq!(compact_requests.len(), 1);
-    assert_eq!(compact_requests[0].path(), "/v1/responses/compact");
-
-    let response_requests = responses_log.requests();
-    assert_eq!(response_requests.len(), 3);
-    let turn_metadata = response_requests
-        .iter()
-        .map(|request| {
-            request
-                .header("x-codex-turn-metadata")
-                .as_deref()
-                .map(parse_json_header)
-                .expect("turn request should include turn metadata")
-        })
-        .collect::<Vec<_>>();
-    for (request, metadata) in response_requests.iter().zip(&turn_metadata) {
-        assert_eq!(metadata["request_kind"].as_str(), Some("turn"));
-        assert!(
-            metadata["turn_id"]
-                .as_str()
-                .is_some_and(|turn_id| !turn_id.is_empty()),
-            "turn request should carry a non-empty turn id"
-        );
-        assert_eq!(
-            metadata["window_id"].as_str(),
-            request.header("x-codex-window-id").as_deref()
-        );
-        assert!(metadata.get("compaction").is_none());
-    }
-
-    let compact_metadata = compact_requests[0]
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("compact request should include turn metadata");
-    assert_eq!(
-        compact_metadata["request_kind"].as_str(),
-        Some("compaction")
-    );
-    assert_eq!(
-        compact_metadata["compaction"],
-        serde_json::json!({
-            "trigger": "auto",
-            "reason": "context_limit",
-            "implementation": "responses_compact",
-            "phase": "pre_turn",
-            "strategy": "memento",
-        })
-    );
-    assert_eq!(
-        compact_metadata["turn_id"], turn_metadata[2]["turn_id"],
-        "pre-turn compaction should carry the current turn id"
-    );
-    assert_eq!(
-        compact_metadata["window_id"].as_str(),
-        compact_requests[0].header("x-codex-window-id").as_deref()
-    );
+    mcp.assert_managed_whisply_gateway_healthy()?;
 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
     let server = responses::start_mock_server().await;
     let sse = responses::sse(vec![
         responses::ev_assistant_message("m1", "MANUAL_COMPACT_SUMMARY"),
@@ -251,10 +120,13 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     responses::mount_sse_sequence(&server, vec![sse]).await;
 
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
+    write_managed_compaction_config(codex_home.path(), AUTO_COMPACT_LIMIT)?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -310,17 +182,15 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
             }),
         }
     );
+    mcp.assert_managed_whisply_gateway_healthy()?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_compact_start_rejects_invalid_thread_id() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
+    write_managed_compaction_config(codex_home.path(), AUTO_COMPACT_LIMIT)?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -346,11 +216,8 @@ async fn thread_compact_start_rejects_invalid_thread_id() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_compact_start_rejects_unknown_thread_id() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
+    write_managed_compaction_config(codex_home.path(), AUTO_COMPACT_LIMIT)?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -374,6 +241,7 @@ async fn thread_compact_start_rejects_unknown_thread_id() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 async fn start_thread(mcp: &mut TestAppServer) -> Result<String> {
     let thread_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -386,6 +254,7 @@ async fn start_thread(mcp: &mut TestAppServer) -> Result<String> {
     Ok(thread.id)
 }
 
+#[cfg(target_os = "macos")]
 async fn send_turn_and_wait(
     mcp: &mut TestAppServer,
     thread_id: &str,
@@ -408,6 +277,7 @@ async fn send_turn_and_wait(
     Ok(turn.id)
 }
 
+#[cfg(target_os = "macos")]
 async fn wait_for_turn_completed(mcp: &mut TestAppServer, turn_id: &str) -> Result<()> {
     loop {
         let completed: TurnCompletedNotification = timeout(
@@ -421,6 +291,7 @@ async fn wait_for_turn_completed(mcp: &mut TestAppServer, turn_id: &str) -> Resu
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn wait_for_context_compaction_started(
     mcp: &mut TestAppServer,
 ) -> Result<ItemStartedNotification> {
@@ -433,6 +304,7 @@ async fn wait_for_context_compaction_started(
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn wait_for_context_compaction_completed(
     mcp: &mut TestAppServer,
 ) -> Result<ItemCompletedNotification> {
@@ -448,14 +320,21 @@ async fn wait_for_context_compaction_completed(
     }
 }
 
-fn parse_json_header(value: &str) -> serde_json::Value {
-    serde_json::from_str(value).expect("turn metadata should be JSON")
-}
-
-fn compaction_config(server_uri: &str, auto_compact_limit: i64) -> MockResponsesConfig {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config(&format!(
-            "compact_prompt = \"{COMPACT_PROMPT}\"\nmodel_auto_compact_token_limit = {auto_compact_limit}"
-        ))
-        .with_provider_config("supports_websockets = false")
+fn write_managed_compaction_config(
+    codex_home: &Path,
+    auto_compact_limit: i64,
+) -> std::io::Result<()> {
+    std::fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            r#"
+model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "read-only"
+compact_prompt = "{COMPACT_PROMPT}"
+model_auto_compact_token_limit = {auto_compact_limit}
+model_provider = "whisply"
+"#
+        ),
+    )
 }

@@ -1271,6 +1271,66 @@ pub async fn start_mock_server() -> MockServer {
     // Provide a default `/models` response so tests remain hermetic when the client queries it.
     let _ = mount_models_once(&server, ModelsResponse { models: Vec::new() }).await;
 
+    // Exec's loopback-only OSS harness performs an Ollama readiness preflight
+    // before every command, including resume commands that start more than one
+    // child. Keep a lower-priority fallback for repeated OpenAI-compatible
+    // probes without shadowing test-specific model mocks.
+    Mock::given(method("GET"))
+        .and(path_regex("^/v1/models$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(ModelsResponse { models: Vec::new() }),
+        )
+        .with_priority(10)
+        .mount(&server)
+        .await;
+
+    // Match the fixed built-in Ollama OSS route used by TestCodexExecBuilder.
+    // These are local test-server responses only; no provider credentials or
+    // remote endpoint configuration are involved.
+    Mock::given(method("GET"))
+        .and(path_regex("^/api/tags$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(serde_json::json!({
+                    "models": [
+                        { "name": "gpt-oss:20b" },
+                        { "name": "gpt-5.2" },
+                        { "name": "gpt-5.1" },
+                        { "name": "gpt-5.1-high" },
+                        { "name": "gpt-5.2-codex" }
+                    ]
+                })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/api/version$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(serde_json::json!({ "version": "0.14.1" })),
+        )
+        .mount(&server)
+        .await;
+
+    // Managed app-server response tests use the exact descriptor-gated native
+    // broker fixture. Mount a current signed catalog alongside the normal
+    // response mock so those tests exercise the production catalog verifier
+    // rather than a generic local models cache or provider table.
+    let catalog = codex_whisply::test_signed_catalog_envelope().unwrap();
+    Mock::given(method("GET"))
+        .and(path_regex(".*/model-catalog$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(catalog),
+        )
+        .mount(&server)
+        .await;
+
     server
 }
 

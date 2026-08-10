@@ -158,6 +158,7 @@ use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
+use codex_whisply::NativeBrokerClient;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::resume_hint;
 use codex_utils_path_uri::PathUri;
@@ -648,8 +649,6 @@ pub(crate) struct ChatWidget {
     review: ReviewState,
     // Active hook runs render in a dedicated live cell so they can run alongside tools.
     active_hook_cell: Option<HookCell>,
-    // Reused for built-in pet CDN requests so redirects remain route-aware.
-    pub(crate) pet_http_client: codex_http_client::RouteAwareClientPool,
     // Ambient companion rendered over the transcript area, never inside the footer rows.
     ambient_pet: Option<crate::pets::AmbientPet>,
     pet_picker_preview_state: crate::pets::PetPickerPreviewState,
@@ -659,6 +658,9 @@ pub(crate) struct ChatWidget {
     pet_selection_load_request_id: u64,
     #[cfg(test)]
     pet_image_support_override: Option<crate::pets::PetImageSupport>,
+    /// Lazily initialized from the one-shot inherited capability descriptor
+    /// and retained for every `/controls` command in this TUI process.
+    host_controls_broker: Option<Arc<NativeBrokerClient>>,
     thread_id: Option<ThreadId>,
     /// Nudge dismissals that should survive draft edits within the current thread scope.
     ///

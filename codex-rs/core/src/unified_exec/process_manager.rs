@@ -441,7 +441,7 @@ impl UnifiedExecProcessManager {
             )
         });
 
-        let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+        let terminal_output = process.terminal_output_buffer();
         let event_ctx = ToolEventCtx::new(
             context.session.as_ref(),
             context.turn.as_ref(),
@@ -462,7 +462,7 @@ impl UnifiedExecProcessManager {
         );
         emitter.emit(event_ctx, ToolEventStage::Begin).await;
 
-        start_streaming_output(&process, context, Arc::clone(&transcript));
+        start_streaming_output(&process, context);
         let start = Instant::now();
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
@@ -481,7 +481,7 @@ impl UnifiedExecProcessManager {
                 request.tty,
                 deferred_network_approval.clone(),
                 network_denial_monitor,
-                Arc::clone(&transcript),
+                Arc::clone(&terminal_output),
                 Arc::clone(&initial_exec_command_active),
             )
             .await;
@@ -528,7 +528,7 @@ impl UnifiedExecProcessManager {
                 &request,
                 cwd.clone(),
                 plugin_attribution.clone(),
-                Arc::clone(&transcript),
+                Arc::clone(&terminal_output),
                 text.clone(),
                 message.clone(),
                 wall_time,
@@ -549,7 +549,7 @@ impl UnifiedExecProcessManager {
                 &request,
                 cwd.clone(),
                 plugin_attribution.clone(),
-                Arc::clone(&transcript),
+                Arc::clone(&terminal_output),
                 text.clone(),
                 message.clone(),
                 wall_time,
@@ -609,7 +609,7 @@ impl UnifiedExecProcessManager {
                     &request,
                     cwd.clone(),
                     plugin_attribution.clone(),
-                    Arc::clone(&transcript),
+                    Arc::clone(&terminal_output),
                     text.clone(),
                     message.clone(),
                     wall_time,
@@ -628,7 +628,7 @@ impl UnifiedExecProcessManager {
                 cwd.clone(),
                 Some(process_id.to_string()),
                 plugin_attribution.clone(),
-                Arc::clone(&transcript),
+                Arc::clone(&terminal_output),
                 text.clone(),
                 exit,
                 wall_time,
@@ -916,7 +916,7 @@ impl UnifiedExecProcessManager {
         tty: bool,
         network_approval: Option<DeferredNetworkApproval>,
         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
-        transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
+        terminal_output: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
     ) {
         let entry = ProcessEntry {
@@ -953,7 +953,7 @@ impl UnifiedExecProcessManager {
             cwd,
             process_id,
             plugin_attribution,
-            transcript,
+            terminal_output,
             started_at,
             network_denial_monitor,
         );
@@ -1237,6 +1237,7 @@ impl UnifiedExecProcessManager {
             output_closed,
             output_closed_notify,
             cancellation_token,
+            ..
         } = output;
         let mut collected = HeadTailBuffer::default();
         let mut exit_signal_received = cancellation_token.is_cancelled();

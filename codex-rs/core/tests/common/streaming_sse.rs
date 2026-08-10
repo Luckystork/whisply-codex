@@ -59,6 +59,26 @@ impl StreamingSseServer {
 pub async fn start_streaming_sse_server(
     responses: Vec<Vec<StreamingSseChunk>>,
 ) -> (StreamingSseServer, Vec<oneshot::Receiver<i64>>) {
+    start_streaming_sse_server_with_catalog(responses, /*catalog*/ None).await
+}
+
+/// Starts a managed Whisply streaming server that additionally serves the
+/// current signed model catalog at the managed gateway's `/v1/model-catalog`
+/// endpoint.
+pub async fn start_managed_streaming_sse_server(
+    responses: Vec<Vec<StreamingSseChunk>>,
+) -> (StreamingSseServer, Vec<oneshot::Receiver<i64>>) {
+    let catalog = serde_json::to_string(
+        &codex_whisply::test_signed_catalog_envelope().expect("build signed test model catalog"),
+    )
+    .expect("serialize signed test model catalog");
+    start_streaming_sse_server_with_catalog(responses, Some(catalog)).await
+}
+
+async fn start_streaming_sse_server_with_catalog(
+    responses: Vec<Vec<StreamingSseChunk>>,
+    catalog: Option<String>,
+) -> (StreamingSseServer, Vec<oneshot::Receiver<i64>>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind streaming SSE server");
@@ -92,12 +112,29 @@ pub async fn start_streaming_sse_server(
                     let state = Arc::clone(&state);
                     let requests = Arc::clone(&requests_for_task);
                     let request_notify = Arc::clone(&request_notify_for_task);
+                    let catalog = catalog.clone();
                     tokio::spawn(async move {
                         let (request, body_prefix) = read_http_request(&mut stream).await;
                         let Some((method, path)) = parse_request_line(&request) else {
                             let _ = write_http_response(&mut stream, /*status*/ 400, "bad request", "text/plain").await;
                             return;
                         };
+
+                        if method == "GET" && path == "/v1/model-catalog" {
+                            if read_request_body(&mut stream, &request, body_prefix)
+                                .await
+                                .is_err()
+                            {
+                                let _ = write_http_response(&mut stream, /*status*/ 400, "bad request", "text/plain").await;
+                                return;
+                            }
+                            let Some(catalog) = catalog else {
+                                let _ = write_http_response(&mut stream, /*status*/ 404, "not found", "text/plain").await;
+                                return;
+                            };
+                            let _ = write_http_response(&mut stream, /*status*/ 200, &catalog, "application/json").await;
+                            return;
+                        }
 
                         if method == "GET" && path == "/v1/models" {
                             if read_request_body(&mut stream, &request, body_prefix)

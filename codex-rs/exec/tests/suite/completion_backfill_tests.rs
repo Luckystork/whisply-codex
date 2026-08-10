@@ -80,23 +80,15 @@ async fn ignores_unrelated_turn_completion_before_backfilling_primary_turn() -> 
     .await;
 
     let test = test_codex_exec();
-    let mock_provider = format!(
-        "model_providers.mock_provider={{name=\"Mock provider for test\",base_url=\"{}/v1\",wire_api=\"responses\",supports_websockets=false}}",
-        server.uri()
-    );
     let output = test
-        .cmd()
+        .cmd_with_server(&server)
         .env(
             "RUST_LOG",
             "codex_app_server::message_processor=trace,codex_app_server::outgoing_message=trace",
         )
         .arg("--skip-git-repo-check")
         .arg("--json")
-        .arg("-c")
-        .arg(mock_provider)
         .args([
-            "-c",
-            "model_provider=\"mock_provider\"",
             "-c",
             "features.multi_agent=true",
             "-c",

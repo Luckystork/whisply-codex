@@ -48,6 +48,7 @@ pub enum SlashCommand {
     Diff,
     Mention,
     Status,
+    Controls,
     Usage,
     DebugConfig,
     Title,
@@ -103,6 +104,7 @@ impl SlashCommand {
             SlashCommand::Import => "import setup, this project, and recent chats from Claude Code",
             SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Controls => "read or change ordinary Whisply app controls",
             SlashCommand::Usage => "view account usage or use a usage limit reset",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
@@ -165,6 +167,7 @@ impl SlashCommand {
                 | SlashCommand::Mcp
                 | SlashCommand::Raw
                 | SlashCommand::Usage
+                | SlashCommand::Controls
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
@@ -221,6 +224,7 @@ impl SlashCommand {
             | SlashCommand::Skills
             | SlashCommand::Hooks
             | SlashCommand::Status
+            | SlashCommand::Controls
             | SlashCommand::Usage
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
@@ -298,6 +302,17 @@ mod tests {
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::App.available_during_task());
+    }
+
+    #[test]
+    fn controls_command_is_reachable_but_not_available_in_side_conversations() {
+        assert_eq!(
+            SlashCommand::from_str("controls"),
+            Ok(SlashCommand::Controls)
+        );
+        assert!(SlashCommand::Controls.supports_inline_args());
+        assert!(SlashCommand::Controls.available_during_task());
+        assert!(!SlashCommand::Controls.available_in_side_conversation());
     }
 
     #[test]

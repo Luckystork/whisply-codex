@@ -1,10 +1,11 @@
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_final_assistant_message_sse_response;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence_unchecked;
-use app_test_support::write_models_cache;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
@@ -15,11 +16,14 @@ use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::UserInput as V2UserInput;
-use codex_core::test_support::all_model_presets;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -29,6 +33,7 @@ use tokio::time::timeout;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_settings_update_emits_notification_and_updates_future_turns() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(vec![
@@ -37,10 +42,10 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     .await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
-    write_models_cache(codex_home.path())?;
-    let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
+    let model_id = "gpt-5.6-terra".to_string();
+    let service_tier_id = "priority".to_string();
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -84,14 +89,16 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
     assert!(
         request_bodies.iter().any(|body| {
             body.get("model").and_then(Value::as_str) == Some(model_id.as_str())
-                && body.get("service_tier").and_then(Value::as_str)
-                    == Some(service_tier_id.as_str())
+                && body
+                    .as_object()
+                    .is_some_and(|object| !object.contains_key("service_tier"))
         }),
-        "future turn did not use updated model/service tier: {request_bodies:#?}"
+        "future turn did not omit its unadvertised service tier: {request_bodies:#?}"
     );
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -106,7 +113,7 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
     let workspace = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -163,6 +170,7 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_settings_update_while_turn_is_active_emits_notification() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -173,7 +181,7 @@ async fn thread_settings_update_while_turn_is_active_emits_notification() -> Res
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -207,6 +215,7 @@ async fn thread_settings_update_while_turn_is_active_emits_notification() -> Res
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_settings_update_null_service_tier_uses_default() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(vec![
@@ -215,10 +224,10 @@ async fn thread_settings_update_null_service_tier_uses_default() -> Result<()> {
     .await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
-    write_models_cache(codex_home.path())?;
-    let (model_id, service_tier_id) = service_tier_model_and_tier_id()?;
+    let model_id = "gpt-5.6-terra".to_string();
+    let service_tier_id = "priority".to_string();
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -282,9 +291,8 @@ async fn thread_settings_update_null_service_tier_uses_default() -> Result<()> {
 
 #[tokio::test]
 async fn thread_settings_update_rejects_sandbox_policy_with_permissions() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri())?;
+    create_config_toml(codex_home.path(), "")?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -313,6 +321,7 @@ async fn thread_settings_update_rejects_sandbox_policy_with_permissions() -> Res
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(vec![
@@ -322,7 +331,7 @@ async fn turn_start_settings_override_emits_thread_settings_updated() -> Result<
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -371,6 +380,7 @@ async fn send_thread_settings_update(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 async fn start_text_turn(mcp: &mut TestAppServer, thread_id: String) -> Result<()> {
     let turn_request_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -435,17 +445,10 @@ async fn received_response_bodies(server: &wiremock::MockServer) -> Result<Vec<V
     Ok(bodies)
 }
 
-fn service_tier_model_and_tier_id() -> Result<(String, String)> {
-    let model = all_model_presets()
-        .iter()
-        .find(|preset| preset.show_in_picker && !preset.service_tiers.is_empty())
-        .context("bundled model catalog should include a picker model with service tiers")?;
-    Ok((model.id.clone(), model.service_tiers[0].id.clone()))
-}
-
-fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 200000")
-        .with_provider_config("supports_websockets = false")
+fn create_config_toml(codex_home: &std::path::Path, _server_uri: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
+            "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 200000",
+        )
         .write(codex_home)
 }

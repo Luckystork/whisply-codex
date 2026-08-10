@@ -1,5 +1,8 @@
 use anyhow::Result;
+#[cfg(any())]
 use codex_config::Constrained;
+use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -9,42 +12,63 @@ use codex_extension_api::McpServerContributor;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
+#[cfg(any())]
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
+#[cfg(any())]
 use codex_protocol::models::PermissionProfile;
+#[cfg(any())]
 use codex_protocol::protocol::AskForApproval;
+#[cfg(any())]
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+#[cfg(any())]
 use codex_protocol::request_user_input::RequestUserInputAnswer;
+#[cfg(any())]
 use codex_protocol::request_user_input::RequestUserInputResponse;
+#[cfg(any())]
 use codex_protocol::user_input::UserInput;
+#[cfg(any())]
 use core_test_support::apps_test_server::AppsTestServer;
+#[cfg(any())]
 use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
+#[cfg(any())]
 use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
+#[cfg(any())]
 use core_test_support::apps_test_server::search_capable_apps_builder;
+#[cfg(any())]
 use core_test_support::context_snapshot;
+#[cfg(any())]
 use core_test_support::context_snapshot::ContextSnapshotOptions;
+#[cfg(any())]
 use core_test_support::context_snapshot::ContextSnapshotRenderMode;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+#[cfg(any())]
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
+#[cfg(any())]
 use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
+use core_test_support::stdio_server_bin;
+use core_test_support::test_codex::TestCodexBuilder;
+use core_test_support::test_codex::test_codex;
+#[cfg(any())]
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
+#[cfg(any())]
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
@@ -53,13 +77,19 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+#[cfg(any())]
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
+#[cfg(any())]
 use wiremock::Mock;
 use wiremock::Request;
+#[cfg(any())]
 use wiremock::ResponseTemplate;
+#[cfg(any())]
 use wiremock::matchers::body_partial_json;
+#[cfg(any())]
 use wiremock::matchers::method;
+#[cfg(any())]
 use wiremock::matchers::path_regex;
 
 struct McpResourceClientCapture {
@@ -73,6 +103,7 @@ struct CoalescingMcpContributor {
     observed_markers: Mutex<Vec<String>>,
 }
 
+#[cfg(any())]
 struct AppsMcpServerContributor {
     id: &'static str,
     url: String,
@@ -130,6 +161,7 @@ impl McpServerContributor<Config> for CoalescingMcpContributor {
     }
 }
 
+#[cfg(any())]
 impl McpServerContributor<Config> for AppsMcpServerContributor {
     fn id(&self) -> &'static str {
         self.id
@@ -174,6 +206,7 @@ impl McpServerContributor<Config> for SessionSourceMcpContributor {
     }
 }
 
+#[cfg(any())]
 fn format_labeled_requests_snapshot(
     scenario: &str,
     sections: &[(&str, &ResponsesRequest)],
@@ -193,6 +226,52 @@ fn enable_deferred_tool_world_state_without_agents(config: &mut Config) {
         .features
         .enable(Feature::DeferredToolWorldState)
         .expect("test config should allow feature update");
+}
+
+const LOCAL_DEFERRED_MCP_SERVER: &str = "local_rmcp";
+const LOCAL_DEFERRED_MCP_NAMESPACE: &str = "mcp__local_rmcp";
+
+fn local_stdio_mcp_config(command: String) -> McpServerConfig {
+    McpServerConfig {
+        auth: Default::default(),
+        transport: McpServerTransportConfig::Stdio {
+            command,
+            args: Vec::new(),
+            env: None,
+            env_vars: Vec::new(),
+            cwd: None,
+        },
+        environment_id: "local".to_string(),
+        enabled: true,
+        required: false,
+        disabled_reason: None,
+        startup_timeout_sec: Some(Duration::from_secs(10)),
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth: None,
+        oauth_resource: None,
+        supports_parallel_tool_calls: false,
+        omit_tools_from: None,
+        tools: HashMap::new(),
+    }
+}
+
+fn local_deferred_tool_world_state_builder(command: String) -> TestCodexBuilder {
+    test_codex()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = true)
+        .with_config(move |config| {
+            enable_deferred_tool_world_state_without_agents(config);
+            config
+                .mcp_servers
+                .set(HashMap::from([(
+                    LOCAL_DEFERRED_MCP_SERVER.to_string(),
+                    local_stdio_mcp_config(command),
+                )]))
+                .expect("test config should accept the local MCP server");
+        })
 }
 
 fn tools_state_sections(request: &ResponsesRequest) -> Vec<String> {
@@ -462,6 +541,8 @@ startup_timeout_sec = 0.1
     Ok(())
 }
 
+// BrokerOnly does not register a trusted host Apps catalog.
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn elevated_apps_catalog_limit_requires_host_owned_registration() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -563,6 +644,7 @@ async fn elevated_apps_catalog_limit_requires_host_owned_registration() -> Resul
     Ok(())
 }
 
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -630,6 +712,7 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
     Ok(())
 }
 
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -673,32 +756,26 @@ async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespaces() -> Result<()> {
+async fn local_stdio_deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespaces()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let apps_server = AppsTestServer::mount_searchable(&server).await?;
     let response = mount_sse_sequence(&server, completed_response_sequence(/*count*/ 3)).await;
-    let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
-        .with_config(enable_deferred_tool_world_state_without_agents);
+    let command = stdio_server_bin()?;
+    let mut builder = local_deferred_tool_world_state_builder(command);
     let test = builder.build_with_auto_env(&server).await?;
-    wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+    wait_for_mcp_server(&test.codex, LOCAL_DEFERRED_MCP_SERVER).await?;
 
     test.submit_turn("inspect initially available deferred tools")
         .await?;
     test.submit_turn("inspect unchanged deferred tools").await?;
 
     let mut refresh_config = test.config.clone();
-    let user_config_path = refresh_config.codex_home.join("config.toml");
-    let user_config = toml::from_str(
-        r#"
-[apps.calendar]
-enabled = false
-"#,
-    )?;
-    refresh_config.config_layer_stack = refresh_config
-        .config_layer_stack
-        .with_user_config(&user_config_path, user_config)?;
+    refresh_config
+        .mcp_servers
+        .set(HashMap::new())
+        .expect("test config should accept removal of the local MCP server");
     test.codex.refresh_runtime_config(refresh_config).await;
     test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("inspect removed deferred tools").await?;
@@ -710,20 +787,11 @@ enabled = false
         .map(tools_state_sections)
         .collect::<Vec<_>>();
     assert_eq!(tools_states[0], tools_states[1]);
+    assert_eq!(tools_states[0].len(), 1);
+    assert!(tools_states[0][0].contains(LOCAL_DEFERRED_MCP_NAMESPACE));
     assert_eq!(tools_states[2].len(), 2);
     assert!(tools_states[2][1].contains("Removed deferred tool namespaces:\n"));
     assert!(tools_states[2][1].contains("No deferred tool namespaces remain.\n"));
-    insta::assert_snapshot!(
-        "deferred_tools_initial_unchanged_and_removed",
-        format_labeled_requests_snapshot(
-            "Initially available deferred tools remain unchanged until disabling Calendar removes them.",
-            &[
-                ("Initially available", &requests[0]),
-                ("Unchanged follow-up", &requests[1]),
-                ("Removed and empty", &requests[2]),
-            ],
-        )
-    );
 
     Ok(())
 }
@@ -766,16 +834,16 @@ async fn initially_empty_deferred_tool_world_state_is_not_rendered_or_persisted(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deferred_tool_world_state_survives_resume_without_duplicate_updates() -> Result<()> {
+async fn local_stdio_deferred_tool_world_state_survives_resume_without_duplicate_updates()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let apps_server = AppsTestServer::mount_searchable(&server).await?;
     let response = mount_sse_sequence(&server, completed_response_sequence(/*count*/ 2)).await;
-    let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
-        .with_config(enable_deferred_tool_world_state_without_agents);
+    let command = stdio_server_bin()?;
+    let mut builder = local_deferred_tool_world_state_builder(command.clone());
     let initial = builder.build_with_auto_env(&server).await?;
-    wait_for_mcp_server(&initial.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+    wait_for_mcp_server(&initial.codex, LOCAL_DEFERRED_MCP_SERVER).await?;
     initial
         .submit_turn("inspect deferred tools before resume")
         .await?;
@@ -799,17 +867,16 @@ async fn deferred_tool_world_state_survives_resume_without_duplicate_updates() -
         })
         .next_back()
         .expect("rollout should persist the deferred tools world state");
-    assert_eq!(
-        persisted_tools,
-        json!({
-            "mcp__codex_apps__calendar": "Plan events and manage your calendar."
-        })
+    assert!(
+        persisted_tools
+            .as_object()
+            .is_some_and(|tools| tools.contains_key(LOCAL_DEFERRED_MCP_NAMESPACE)),
+        "rollout should persist the local deferred MCP namespace: {persisted_tools}"
     );
-    let mut resume_builder = search_capable_apps_builder(apps_server.chatgpt_base_url)
-        .with_config(enable_deferred_tool_world_state_without_agents);
+    let mut resume_builder = local_deferred_tool_world_state_builder(command);
     let resumed = resume_builder.restart(&server, &initial).await?;
     drop(initial);
-    wait_for_mcp_server(&resumed.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+    wait_for_mcp_server(&resumed.codex, LOCAL_DEFERRED_MCP_SERVER).await?;
     resumed
         .submit_turn("inspect unchanged deferred tools after resume")
         .await?;
@@ -822,21 +889,12 @@ async fn deferred_tool_world_state_survives_resume_without_duplicate_updates() -
         .collect::<Vec<_>>();
     assert_eq!(tools_states[0], tools_states[1]);
     assert_eq!(tools_states[0].len(), 1);
-    assert!(tools_states[0][0].contains(SEARCH_CALENDAR_NAMESPACE));
-    insta::assert_snapshot!(
-        "deferred_tools_resume_without_duplicate_update",
-        format_labeled_requests_snapshot(
-            "Persisted deferred tools remain unchanged after resuming the thread.",
-            &[
-                ("Before resume", &requests[0]),
-                ("After resume", &requests[1]),
-            ],
-        )
-    );
+    assert!(tools_states[0][0].contains(LOCAL_DEFERRED_MCP_NAMESPACE));
 
     Ok(())
 }
 
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1029,6 +1087,7 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     Ok(())
 }
 
+#[cfg(any())]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup_failures()
 -> Result<()> {

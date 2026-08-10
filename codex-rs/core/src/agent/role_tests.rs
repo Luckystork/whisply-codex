@@ -200,6 +200,34 @@ async fn apply_role_preserves_unspecified_keys() {
 }
 
 #[tokio::test]
+async fn apply_role_preserves_the_complete_unspecified_provider() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.model_provider.name = "runtime-test-provider".to_string();
+    config.model_provider.base_url = Some("http://127.0.0.1:4317/v1".to_string());
+    let provider_before = config.model_provider.clone();
+    let role_path = write_role_config(
+        &home,
+        "inherit-provider.toml",
+        "developer_instructions = \"Stay focused\"",
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("role should preserve its caller provider");
+
+    assert_eq!(config.model_provider, provider_before);
+}
+
+#[tokio::test]
 async fn apply_role_reports_explicit_service_tier() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let role_path = write_role_config(

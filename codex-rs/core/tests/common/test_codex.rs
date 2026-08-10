@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use codex_config::CONFIG_TOML_FILE;
 use codex_config::CloudConfigBundleLoader;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
@@ -56,6 +57,7 @@ use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
+use codex_whisply::ManagedGatewayClient;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -64,7 +66,9 @@ use wiremock::MockServer;
 use crate::TempDirExt;
 use crate::TestEnvironment;
 use crate::load_default_config_for_test;
+use crate::load_default_config_for_test_at_cwd;
 use crate::load_default_config_for_test_with_cloud_config_bundle;
+use crate::load_default_config_for_test_with_cloud_config_bundle_at_cwd;
 use crate::responses::WebSocketTestServer;
 use crate::responses::output_value_to_text;
 use crate::responses::start_mock_server;
@@ -310,6 +314,8 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
+    trusted_workspace: bool,
 }
 
 impl TestCodexBuilder {
@@ -328,6 +334,19 @@ impl TestCodexBuilder {
 
     pub fn with_models_manager(mut self, models_manager: SharedModelsManager) -> Self {
         self.models_manager = Some(models_manager);
+        self
+    }
+
+    /// Routes a test-owned Whisply provider through the supplied typed gateway.
+    ///
+    /// This is deliberately explicit: ordinary core tests retain their configured
+    /// local/mock provider, while managed-provider tests cannot fall back to an
+    /// ambient launch descriptor.
+    pub fn with_managed_gateway_client(
+        mut self,
+        managed_gateway_client: Arc<ManagedGatewayClient>,
+    ) -> Self {
+        self.managed_gateway_client = Some(managed_gateway_client);
         self
     }
 
@@ -377,6 +396,17 @@ impl TestCodexBuilder {
     {
         self.workspace_setups
             .push(Box::new(move |cwd, fs| Box::pin(setup(cwd, fs))));
+        self
+    }
+
+    /// Enables the real project-trust path for a test-owned workspace.
+    ///
+    /// Repository-local skills remain unavailable by default so generic tests
+    /// cannot accidentally inherit capability instructions. Tests that need
+    /// them must opt in through the same trusted-project configuration used by
+    /// the product.
+    pub fn with_trusted_workspace(mut self) -> Self {
+        self.trusted_workspace = true;
         self
     }
 
@@ -650,11 +680,15 @@ impl TestCodexBuilder {
                 ))
             });
         let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
-        let models_manager = self
-            .models_manager
-            .clone()
-            .unwrap_or_else(|| codex_core::build_models_manager(&config, auth_manager.clone()));
-        let thread_manager = ThreadManager::new(
+        let managed_gateway_client = self.managed_gateway_client.clone();
+        let models_manager = self.models_manager.clone().unwrap_or_else(|| {
+            codex_core::build_models_manager_with_managed_gateway(
+                &config,
+                auth_manager.clone(),
+                managed_gateway_client.clone(),
+            )
+        });
+        let mut thread_manager = ThreadManager::new(
             &config,
             auth_manager.clone(),
             models_manager,
@@ -670,6 +704,9 @@ impl TestCodexBuilder {
             /*attestation_provider*/ None,
             /*external_time_provider*/ self.external_time_provider.clone(),
         );
+        if let Some(managed_gateway_client) = managed_gateway_client {
+            thread_manager = thread_manager.with_managed_gateway_client(managed_gateway_client);
+        }
         let code_mode_host_program = self
             .code_mode_host_program
             .take()
@@ -769,8 +806,37 @@ impl TestCodexBuilder {
         for hook in self.pre_build_hooks.drain(..) {
             hook(home.path());
         }
+        if self.trusted_workspace {
+            let config_path = home.path().join(CONFIG_TOML_FILE);
+            let mut contents = std::fs::read_to_string(&config_path).unwrap_or_default();
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            let workspace_key = cwd_override
+                .as_path()
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            contents.push_str(&format!(
+                "\n[projects.\"{workspace_key}\"]\ntrust_level = \"trusted\"\n"
+            ));
+            std::fs::write(config_path, contents)?;
+        }
+
         let mut config = if let Some(cloud_config_bundle) = self.cloud_config_bundle.take() {
-            load_default_config_for_test_with_cloud_config_bundle(home, cloud_config_bundle).await
+            if self.trusted_workspace {
+                load_default_config_for_test_with_cloud_config_bundle_at_cwd(
+                    home,
+                    &cwd_override,
+                    cloud_config_bundle,
+                )
+                .await
+            } else {
+                load_default_config_for_test_with_cloud_config_bundle(home, cloud_config_bundle)
+                    .await
+            }
+        } else if self.trusted_workspace {
+            load_default_config_for_test_at_cwd(home, &cwd_override).await
         } else {
             load_default_config_for_test(home).await
         };
@@ -779,7 +845,7 @@ impl TestCodexBuilder {
         config.model = Some("gpt-5.5".to_string());
         config.cwd = cwd_override;
         config.model_provider = model_provider;
-        if let Ok(path) = codex_utils_cargo_bin::cargo_bin("codex") {
+        if let Ok(path) = codex_utils_cargo_bin::cargo_bin("whisply") {
             config.codex_self_exe = Some(path);
         } else if let Ok(path) = codex_utils_cargo_bin::cargo_bin("codex-exec") {
             // `codex-exec` also supports `--codex-run-as-apply-patch`, so use it
@@ -1293,6 +1359,8 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         models_manager: None,
+        managed_gateway_client: None,
+        trusted_workspace: false,
     }
 }
 

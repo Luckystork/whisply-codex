@@ -23,6 +23,7 @@ use crate::client::X_CODEX_PARENT_THREAD_ID_HEADER;
 use crate::client::X_CODEX_TURN_METADATA_HEADER;
 use crate::client::X_CODEX_WINDOW_ID_HEADER;
 use crate::client::X_OPENAI_SUBAGENT_HEADER;
+use crate::client::X_WHISPLY_TURN_METADATA_HEADER;
 
 pub(crate) const INSTALLATION_ID_KEY: &str = "installation_id";
 pub(crate) const SESSION_ID_KEY: &str = "session_id";
@@ -33,6 +34,12 @@ pub(crate) const REQUEST_KIND_KEY: &str = "request_kind";
 pub(crate) const COMPACTION_KEY: &str = "compaction";
 pub(crate) const CODE_MODE_TOOL_NAMES_KEY: &str = "code_mode_tool_names";
 pub(crate) const TURN_STARTED_AT_UNIX_MS_KEY: &str = "turn_started_at_unix_ms";
+
+/// Maximum UTF-8 byte length of the one direct-gateway metadata envelope.
+/// Every included field is additionally ASCII/token bounded so this is a
+/// defense-in-depth transport ceiling rather than a way to carry opaque data.
+pub(crate) const WHISPLY_TURN_METADATA_MAX_BYTES: usize = 4 * 1024;
+pub(crate) const WHISPLY_TURN_METADATA_SCHEMA_VERSION: u8 = 1;
 
 pub(crate) const FORKED_FROM_THREAD_ID_KEY: &str = "forked_from_thread_id";
 pub(crate) const PARENT_THREAD_ID_KEY: &str = "parent_thread_id";
@@ -151,10 +158,11 @@ pub(crate) struct TurnMetadataWorkspace {
 
 /// Caller-owned snapshot of Codex metadata sent to ResponsesAPI.
 ///
-/// The full Codex turn metadata blob is transported canonically as
-/// `client_metadata["x-codex-turn-metadata"]`. Flat `client_metadata` keys and direct HTTP/ws
-/// headers are generated compatibility projections of this snapshot, not separate sources of
-/// truth.
+/// Standard upstream-compatible routes transport the full metadata blob as
+/// `client_metadata["x-codex-turn-metadata"]`. The direct Whisply route emits
+/// its separate bounded `x-whisply-turn-metadata` envelope. Flat metadata
+/// keys and compatibility headers are generated projections of this snapshot,
+/// not separate sources of truth.
 #[derive(Clone, Debug)]
 pub struct CodexResponsesMetadata {
     pub(crate) installation_id: String,
@@ -252,11 +260,22 @@ impl CodexResponsesMetadata {
         client_metadata
     }
 
+    /// The Whisply gateway receives one bounded, allowlisted metadata envelope
+    /// rather than upstream's flat client-metadata compatibility projection.
+    /// The envelope is intentionally the only top-level `client_metadata`
+    /// value on the direct route; gateway-owned identity remains in
+    /// authenticated headers.
+    pub(crate) fn whisply_client_metadata(&self) -> Option<HashMap<String, String>> {
+        self.whisply_turn_metadata_json()
+            .map(|metadata| HashMap::from([(X_WHISPLY_TURN_METADATA_HEADER.to_string(), metadata)]))
+    }
+
     pub(crate) fn compatibility_headers(&self) -> ApiHeaderMap {
         let mut headers = ApiHeaderMap::new();
         insert_header(&mut headers, X_CODEX_WINDOW_ID_HEADER, &self.window_id);
-        // Direct x-codex-turn-metadata is compatibility output. Keep the unbounded Code Mode
-        // mapping in client_metadata only so HTTP and WebSocket headers remain bounded.
+        // Standard-route x-codex-turn-metadata is compatibility output. Keep
+        // the unbounded Code Mode mapping in client_metadata only so HTTP and
+        // WebSocket headers remain bounded.
         if self.has_turn_metadata()
             && let Ok(turn_metadata_json) = to_ascii_json_string(&CodexTurnMetadataPayload {
                 code_mode_tool_names: None,
@@ -317,6 +336,53 @@ impl CodexResponsesMetadata {
             extra: &self.extra,
         }
     }
+
+    fn whisply_turn_metadata_json(&self) -> Option<String> {
+        let request_kind = self.request_kind;
+        let (request_kind_value, _) = request_kind.map_or((None, None), |request_kind| {
+            let (request_kind, compaction) = request_kind.metadata();
+            (Some(request_kind), compaction)
+        });
+        let has_turn_identity =
+            request_kind.is_none_or(CodexResponsesRequestKind::has_turn_identity);
+        let has_request_identity =
+            request_kind.is_some_and(CodexResponsesRequestKind::has_turn_identity);
+        let metadata = WhisplyTurnMetadataPayload {
+            schema_version: WHISPLY_TURN_METADATA_SCHEMA_VERSION,
+            session_id: has_turn_identity
+                .then(|| bounded_ascii_token(&self.session_id, 128))
+                .flatten(),
+            thread_id: has_turn_identity
+                .then(|| bounded_ascii_token(&self.thread_id, 128))
+                .flatten(),
+            turn_id: has_turn_identity
+                .then(|| {
+                    self.turn_id
+                        .as_deref()
+                        .and_then(|value| bounded_ascii_token(value, 128))
+                })
+                .flatten(),
+            window_id: has_request_identity
+                .then(|| bounded_ascii_token(&self.window_id, 128))
+                .flatten(),
+            request_kind: request_kind_value,
+            parent_thread_id: self
+                .parent_thread_id
+                .map(|thread_id| thread_id.to_string())
+                .filter(|thread_id| bounded_ascii_token(thread_id, 128).is_some()),
+            parent_turn_id: self
+                .parent_turn_id
+                .as_deref()
+                .and_then(|value| bounded_ascii_token(value, 128)),
+            subagent_kind: self
+                .subagent_kind
+                .as_deref()
+                .map(canonical_whisply_subagent_kind),
+            turn_started_at_unix_ms: self.turn_started_at_unix_ms,
+        };
+        let serialized = to_ascii_json_string(&metadata).ok()?;
+        (serialized.len() <= WHISPLY_TURN_METADATA_MAX_BYTES).then_some(serialized)
+    }
 }
 
 pub(crate) fn subagent_header_value(session_source: &SessionSource) -> Option<String> {
@@ -372,6 +438,23 @@ fn non_empty_workspaces(
     (!workspaces.is_empty()).then_some(workspaces)
 }
 
+fn bounded_ascii_token(value: &str, max_bytes: usize) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= max_bytes
+        && value.bytes().all(|byte| byte.is_ascii_graphic()))
+    .then_some(value)
+}
+
+fn canonical_whisply_subagent_kind(value: &str) -> &'static str {
+    match value {
+        "review" => "review",
+        "compact" => "compact",
+        "thread_spawn" => "thread_spawn",
+        "memory_consolidation" => "memory_consolidation",
+        _ => "other",
+    }
+}
+
 #[derive(Serialize)]
 struct CodexTurnMetadataPayload<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -408,4 +491,71 @@ struct CodexTurnMetadataPayload<'a> {
     compaction: Option<CompactionTurnMetadata>,
     #[serde(flatten)]
     extra: &'a BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct WhisplyTurnMetadataPayload<'a> {
+    schema_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_id: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_id: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_id: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_kind: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_turn_id: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent_kind: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_started_at_unix_ms: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whisply_metadata_has_only_the_canonical_envelope() {
+        let mut metadata = CodexResponsesMetadata::new(
+            "installation-a".to_string(),
+            "session-a".to_string(),
+            "thread-a".to_string(),
+            "window-a".to_string(),
+        );
+        metadata.turn_id = Some("turn-a".to_string());
+        metadata.request_kind = Some(CodexResponsesRequestKind::Turn);
+        metadata.parent_turn_id = Some("parent-turn-a".to_string());
+        metadata
+            .extra
+            .insert("untrusted".to_string(), "must-not-leak".to_string());
+        metadata.sandbox = Some("workspace-write".to_string());
+
+        let client_metadata = metadata
+            .whisply_client_metadata()
+            .expect("canonical metadata envelope");
+
+        assert_eq!(client_metadata.len(), 1);
+        let envelope = client_metadata
+            .get(X_WHISPLY_TURN_METADATA_HEADER)
+            .expect("canonical metadata envelope");
+        assert!(envelope.len() <= WHISPLY_TURN_METADATA_MAX_BYTES);
+        let envelope: Value = serde_json::from_str(envelope).expect("valid JSON envelope");
+        assert_eq!(
+            envelope["schema_version"],
+            WHISPLY_TURN_METADATA_SCHEMA_VERSION
+        );
+        assert_eq!(envelope["session_id"], "session-a");
+        assert_eq!(envelope["thread_id"], "thread-a");
+        assert_eq!(envelope["turn_id"], "turn-a");
+        assert_eq!(envelope["parent_turn_id"], "parent-turn-a");
+        assert!(envelope.get("installation_id").is_none());
+        assert!(envelope.get("sandbox").is_none());
+        assert!(envelope.get("untrusted").is_none());
+    }
 }

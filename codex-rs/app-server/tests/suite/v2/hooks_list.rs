@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
@@ -24,12 +25,12 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::config::set_project_trust_level;
 use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use core_test_support::skip_if_host_windows;
 use core_test_support::skip_if_remote;
 use pretty_assertions::assert_eq;
 use serde::Serialize;
 use tempfile::TempDir;
 use tokio::time::timeout;
+use wiremock::MockServer;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -109,10 +110,10 @@ enabled = true
     Ok(())
 }
 
-fn write_project_hook_config(dot_codex_folder: &std::path::Path, command: &str) -> Result<()> {
-    std::fs::create_dir_all(dot_codex_folder)?;
+fn write_project_hook_config(project_config_folder: &std::path::Path, command: &str) -> Result<()> {
+    std::fs::create_dir_all(project_config_folder)?;
     std::fs::write(
-        dot_codex_folder.join("config.toml"),
+        project_config_folder.join("config.toml"),
         format!(
             r#"[features]
 hooks = true
@@ -127,6 +128,33 @@ type = "command"
 command = "{command}"
 timeout = 5
 "#
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn write_managed_user_prompt_submit_hook_config(
+    codex_home: &std::path::Path,
+    hook_script_path: &std::path::Path,
+) -> Result<()> {
+    std::fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            r#"model = "mock-model"
+approval_policy = "never"
+sandbox_mode = "read-only"
+model_provider = "whisply"
+
+[hooks]
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "python3 {}"
+"#,
+            hook_script_path.display()
         ),
     )?;
     Ok(())
@@ -193,6 +221,8 @@ async fn hooks_list_shows_discovered_hook() -> Result<()> {
 async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
+    let outbound_probe = MockServer::start().await;
+    let proxy_uri = outbound_probe.uri();
     write_plugin_hook_config(
         codex_home.path(),
         r#"{
@@ -217,6 +247,16 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
+        .with_env_overrides(&[
+            ("HTTP_PROXY", Some(proxy_uri.as_str())),
+            ("http_proxy", Some(proxy_uri.as_str())),
+            ("HTTPS_PROXY", Some(proxy_uri.as_str())),
+            ("https_proxy", Some(proxy_uri.as_str())),
+            ("ALL_PROXY", None),
+            ("all_proxy", None),
+            ("NO_PROXY", None),
+            ("no_proxy", None),
+        ])
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
@@ -265,8 +305,17 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
             errors: Vec::new(),
         }]
     );
+    assert!(
+        outbound_probe
+            .received_requests()
+            .await
+            .expect("probe should record requests")
+            .is_empty(),
+        "hooks/list must not fetch persisted-auth workspace settings"
+    );
     Ok(())
 }
+
 
 #[tokio::test]
 async fn hooks_list_warms_plugin_capabilities_for_thread_start() -> Result<()> {
@@ -381,9 +430,9 @@ hooks = false
 "#,
     )?;
     std::fs::create_dir_all(workspace.path().join(".git"))?;
-    std::fs::create_dir_all(workspace.path().join(".codex"))?;
+    std::fs::create_dir_all(workspace.path().join(".whisply"))?;
     std::fs::write(
-        workspace.path().join(".codex/config.toml"),
+        workspace.path().join(".whisply/config.toml"),
         r#"[features]
 hooks = true
 
@@ -417,7 +466,7 @@ timeout = 5
     let HooksListResponse { data } =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     let project_config_path =
-        AbsolutePathBuf::try_from(workspace.path().join(".codex/config.toml"))?;
+        AbsolutePathBuf::try_from(workspace.path().join(".whisply/config.toml"))?;
     assert_eq!(
         data,
         vec![
@@ -479,8 +528,8 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
         worktree_root.join(".git"),
         format!("gitdir: {}\n", worktree_git_dir.display()),
     )?;
-    write_project_hook_config(&repo_root.join(".codex"), "echo root hook")?;
-    write_project_hook_config(&worktree_root.join(".codex"), "echo worktree hook")?;
+    write_project_hook_config(&repo_root.join(".whisply"), "echo root hook")?;
+    write_project_hook_config(&worktree_root.join(".whisply"), "echo worktree hook")?;
     set_project_trust_level(codex_home.path(), &repo_root, TrustLevel::Trusted)?;
 
     let mut mcp = TestAppServer::builder()
@@ -498,7 +547,7 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
     let repo_hook = data[0].hooks[0].clone();
     let worktree_hook = data[1].hooks[0].clone();
     let repo_config_path =
-        AbsolutePathBuf::from_absolute_path(repo_root.join(".codex/config.toml"))?;
+        AbsolutePathBuf::from_absolute_path(repo_root.join(".whisply/config.toml"))?;
 
     assert_eq!(repo_hook.command.as_deref(), Some("echo root hook"));
     assert_eq!(worktree_hook.command.as_deref(), Some("echo root hook"));
@@ -618,9 +667,9 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn config_batch_write_updates_hook_trust_for_loaded_session() -> Result<()> {
-    skip_if_host_windows!(Ok(()));
     // TODO(anp): Teach command-hook fixtures to run in selected remote environments.
     skip_if_remote!(Ok(()), "command hooks use host-local script and log paths");
 
@@ -632,6 +681,7 @@ async fn config_batch_write_updates_hook_trust_for_loaded_session() -> Result<()
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let hook_script_path = codex_home.path().join("user_prompt_submit_hook.py");
     let hook_log_path = codex_home.path().join("user_prompt_submit_hook_log.jsonl");
     std::fs::write(
@@ -648,22 +698,11 @@ with Path(r"{hook_log_path}").open("a", encoding="utf-8") as handle:
             hook_log_path = hook_log_path.display(),
         ),
     )?;
-    MockResponsesConfig::new(&server.uri())
-        .with_extra_config(&format!(
-            r#"[hooks]
-
-[[hooks.UserPromptSubmit]]
-
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = "python3 {}"
-"#,
-            hook_script_path.display()
-        ))
-        .write(codex_home.path())?;
+    write_managed_user_prompt_submit_hook_config(codex_home.path(), &hook_script_path)?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 
@@ -822,9 +861,9 @@ command = "python3 {}"
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn config_batch_write_disables_hook_for_loaded_session() -> Result<()> {
-    skip_if_host_windows!(Ok(()));
     // TODO(anp): Teach command-hook fixtures to run in selected remote environments.
     skip_if_remote!(Ok(()), "command hooks use host-local script and log paths");
 
@@ -835,6 +874,7 @@ async fn config_batch_write_disables_hook_for_loaded_session() -> Result<()> {
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let hook_script_path = codex_home.path().join("user_prompt_submit_hook.py");
     let hook_log_path = codex_home.path().join("user_prompt_submit_hook_log.jsonl");
     std::fs::write(
@@ -851,22 +891,11 @@ with Path(r"{hook_log_path}").open("a", encoding="utf-8") as handle:
             hook_log_path = hook_log_path.display(),
         ),
     )?;
-    MockResponsesConfig::new(&server.uri())
-        .with_extra_config(&format!(
-            r#"[hooks]
-
-[[hooks.UserPromptSubmit]]
-
-[[hooks.UserPromptSubmit.hooks]]
-type = "command"
-command = "python3 {}"
-"#,
-            hook_script_path.display()
-        ))
-        .write(codex_home.path())?;
+    write_managed_user_prompt_submit_hook_config(codex_home.path(), &hook_script_path)?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
 

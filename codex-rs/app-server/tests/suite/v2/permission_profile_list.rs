@@ -5,6 +5,7 @@ use app_test_support::TestAppServer;
 use codex_app_server_protocol::PermissionProfileListParams;
 use codex_app_server_protocol::PermissionProfileListResponse;
 use codex_app_server_protocol::PermissionProfileSummary;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_core::config::set_project_trust_level;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
@@ -93,7 +94,7 @@ description = "Inspect without writes."
 async fn permission_profile_list_resolves_project_profiles_and_paginates() -> Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         codex_home.path().join("config.toml"),
@@ -179,7 +180,7 @@ async fn permission_profile_list_discovers_project_profiles_without_default_sele
 {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),

@@ -23,6 +23,7 @@ use codex_config::LoaderOverrides;
 use codex_config::NetworkConstraints;
 use codex_config::NetworkDomainPermissionToml;
 use codex_config::NetworkDomainPermissionsToml;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_config::loader::project_trust_key;
@@ -1504,6 +1505,165 @@ async fn reload_user_config_layer_updates_effective_apps_config() {
 
     assert!(!app.enabled);
     assert_eq!(app.destructive_enabled, Some(false));
+}
+
+async fn configure_session_with_trusted_project_skills(
+    session: &Session,
+) -> anyhow::Result<tempfile::TempDir> {
+    let codex_home = session.codex_home().await;
+    std::fs::create_dir_all(&codex_home)?;
+    let workspace = tempfile::tempdir()?;
+    let workspace_root = workspace.path();
+    std::fs::create_dir_all(workspace_root.join(".git"))?;
+    std::fs::create_dir_all(workspace_root.join(".whisply/skills/project"))?;
+    std::fs::create_dir_all(workspace_root.join(".agents/skills/compatibility"))?;
+    std::fs::write(
+        workspace_root.join(".whisply/skills/project/SKILL.md"),
+        "---\nname: project-skill\ndescription: project skill\n---\n",
+    )?;
+    std::fs::write(
+        workspace_root.join(".agents/skills/compatibility/SKILL.md"),
+        "---\nname: compatibility-skill\ndescription: compatibility skill\n---\n",
+    )?;
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            workspace_root.display()
+        ),
+    )?;
+    let trusted_config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.to_path_buf())
+        .fallback_cwd(Some(workspace_root.to_path_buf()))
+        .build()
+        .await?;
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.original_config_do_not_use = Arc::new(trusted_config);
+    }
+    Ok(workspace)
+}
+
+async fn session_has_skill(session: &Session, skill_name: &str) -> bool {
+    let config = session.get_config().await;
+    session
+        .services
+        .skills_service
+        .snapshot_for_cwd(
+            &crate::skills_load_input_from_config(&config, Vec::new()),
+            /*force_reload*/ true,
+            Some(Arc::clone(&codex_exec_server::LOCAL_FS)),
+        )
+        .await
+        .outcome()
+        .skills
+        .iter()
+        .any(|skill| skill.name == skill_name)
+}
+
+#[tokio::test]
+async fn reload_user_config_layer_revokes_project_skill_roots() -> anyhow::Result<()> {
+    let (session, _turn_context) = make_session_and_context().await;
+    let workspace = configure_session_with_trusted_project_skills(&session).await?;
+    let workspace_root = workspace.path();
+
+    assert!(session_has_skill(&session, "project-skill").await);
+    assert!(session_has_skill(&session, "compatibility-skill").await);
+
+    let codex_home = session.codex_home().await;
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            workspace_root.display()
+        ),
+    )?;
+    session.reload_user_config_layer().await;
+
+    let reloaded_config = session.get_config().await;
+    assert!(
+        reloaded_config
+            .config_layer_stack
+            .trusted_project_root()
+            .is_none()
+    );
+    assert!(
+        reloaded_config
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .all(|layer| !matches!(layer.name, codex_config::ConfigLayerSource::Project { .. }))
+    );
+    assert!(!session_has_skill(&session, "project-skill").await);
+    assert!(!session_has_skill(&session, "compatibility-skill").await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_user_config_layer_keeps_project_skill_roots_for_unrelated_edits()
+-> anyhow::Result<()> {
+    let (session, _turn_context) = make_session_and_context().await;
+    let workspace = configure_session_with_trusted_project_skills(&session).await?;
+    let codex_home = session.codex_home().await;
+
+    std::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n\n[apps.calendar]\nenabled = false\n",
+            workspace.path().display()
+        ),
+    )?;
+    session.reload_user_config_layer().await;
+
+    let config = session.get_config().await;
+    assert_eq!(
+        config
+            .config_layer_stack
+            .trusted_project_root()
+            .map(|root| root.as_path()),
+        Some(workspace.path())
+    );
+    assert!(
+        config
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .any(|layer| matches!(layer.name, codex_config::ConfigLayerSource::Project { .. }))
+    );
+    assert!(session_has_skill(&session, "project-skill").await);
+    assert!(session_has_skill(&session, "compatibility-skill").await);
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_mcp_config_keeps_project_skill_roots_when_trust_is_unchanged() -> anyhow::Result<()>
+{
+    let (session, _turn_context) = make_session_and_context().await;
+    let workspace = configure_session_with_trusted_project_skills(&session).await?;
+    let codex_home = session.codex_home().await;
+    let next_config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.to_path_buf())
+        .fallback_cwd(Some(workspace.path().to_path_buf()))
+        .build()
+        .await?;
+
+    session.refresh_mcp_config(next_config).await;
+
+    let config = session.get_config().await;
+    assert_eq!(
+        config
+            .config_layer_stack
+            .trusted_project_root()
+            .map(|root| root.as_path()),
+        Some(workspace.path())
+    );
+    assert!(
+        config
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .any(|layer| matches!(layer.name, codex_config::ConfigLayerSource::Project { .. }))
+    );
+    assert!(session_has_skill(&session, "project-skill").await);
+    assert!(session_has_skill(&session, "compatibility-skill").await);
+    Ok(())
 }
 
 #[tokio::test]
@@ -4082,6 +4242,7 @@ async fn set_rate_limits_retains_previous_credits() {
     };
     let session_configuration = SessionConfiguration {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4191,6 +4352,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
     };
     let session_configuration = SessionConfiguration {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4348,18 +4510,9 @@ async fn turn_context_with_model_updates_model_fields() {
     assert_eq!(updated.config.model.as_deref(), Some("gpt-5.4"));
     assert_eq!(updated.collaboration_mode().model(), "gpt-5.4");
     assert_eq!(updated.model_info, expected_model_info);
-    assert_eq!(
-        updated.reasoning_effort,
-        Some(ReasoningEffortConfig::Medium)
-    );
-    assert_eq!(
-        updated.collaboration_mode().reasoning_effort(),
-        Some(ReasoningEffortConfig::Medium)
-    );
-    assert_eq!(
-        updated.config.model_reasoning_effort,
-        Some(ReasoningEffortConfig::Medium)
-    );
+    assert_eq!(updated.reasoning_effort, None);
+    assert_eq!(updated.collaboration_mode().reasoning_effort(), None);
+    assert_eq!(updated.config.model_reasoning_effort, None);
 }
 
 #[test]
@@ -4737,6 +4890,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
 
     SessionConfiguration {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5532,6 +5686,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5672,6 +5827,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5767,6 +5923,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: auth_manager.clone(),
+        managed_gateway_client: None,
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -5945,6 +6102,7 @@ async fn make_session_with_config_and_rx(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -6058,6 +6216,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -7889,6 +8048,7 @@ where
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        managed_gateway_client: None,
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -7983,6 +8143,7 @@ where
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: Arc::clone(&auth_manager),
+        managed_gateway_client: None,
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -11489,6 +11650,13 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
 #[tokio::test]
 async fn shell_tool_cancellation_waits_for_runtime_cleanup() -> anyhow::Result<()> {
     let session = make_session_with_config(|config| {
+        // This fixture validates shell-process cancellation. Its temporary config home is not
+        // retained for the optional asynchronous shell snapshot, so keep that unrelated feature
+        // out of the cancellation lifecycle.
+        config
+            .features
+            .disable(Feature::ShellSnapshot)
+            .expect("disable shell snapshots for cancellation fixture");
         let cwd = config.cwd.clone();
         config
             .permissions
@@ -11506,7 +11674,7 @@ async fn shell_tool_cancellation_waits_for_runtime_cleanup() -> anyhow::Result<(
     let command = format!(
         r#"trap 'printf cleaned > "{}"; exit 0' TERM
 printf ready > "{}"
-while :; do sleep 1; done"#,
+while :; do :; done"#,
         cleanup_marker.display(),
         ready_marker.display(),
     );
@@ -11613,8 +11781,8 @@ async fn session_start_hooks_only_load_from_trusted_project_layers() -> std::io:
     let codex_home = temp.path().join("home");
     let project_root = temp.path().join("project");
     let nested = project_root.join("nested");
-    let root_dot_codex = project_root.join(".codex");
-    let nested_dot_codex = nested.join(".codex");
+    let root_dot_codex = project_root.join(PROJECT_CONFIG_DIRECTORY);
+    let nested_dot_codex = nested.join(PROJECT_CONFIG_DIRECTORY);
 
     std::fs::create_dir_all(&codex_home)?;
     std::fs::create_dir_all(&nested_dot_codex)?;
@@ -11659,7 +11827,7 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
     let temp = tempfile::tempdir()?;
     let project_root = temp.path().join("project");
     let nested = project_root.join("nested");
-    let dot_codex = project_root.join(".codex");
+    let dot_codex = project_root.join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&nested)?;
     std::fs::write(project_root.join(".git"), "gitdir: here")?;
     write_project_hooks(&dot_codex)?;

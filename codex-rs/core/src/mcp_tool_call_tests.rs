@@ -13,6 +13,7 @@ use crate::test_support::models_manager_with_provider;
 use crate::tools::hook_names::HookToolName;
 use crate::turn_metadata::McpTurnMetadataContext;
 use codex_config::CONFIG_TOML_FILE;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_config::config_toml::ConfigToml;
 use codex_config::types::AppConfig;
 use codex_config::types::AppToolConfig;
@@ -25,6 +26,8 @@ use codex_features::Features;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_model_provider::create_model_provider;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -2275,8 +2278,8 @@ async fn maybe_persist_mcp_tool_approval_writes_project_config_for_project_serve
     let codex_home = session.codex_home().await;
     let project_dir = tempdir().expect("tempdir");
     std::fs::write(project_dir.path().join(".git"), "gitdir: nowhere").expect("seed git marker");
-    let project_codex_dir = project_dir.path().join(".codex");
-    std::fs::create_dir_all(&project_codex_dir).expect("create project .codex dir");
+    let project_codex_dir = project_dir.path().join(PROJECT_CONFIG_DIRECTORY);
+    std::fs::create_dir_all(&project_codex_dir).expect("create project config directory");
     std::fs::write(
         project_codex_dir.join(CONFIG_TOML_FILE),
         "[mcp_servers.docs]\ncommand = \"docs-server\"\n",
@@ -2390,7 +2393,9 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         .set(AskForApproval::OnRequest)
         .expect("test setup should allow updating approval policy");
     let mut config = (*turn_context.config).clone();
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
@@ -2690,7 +2695,9 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
         .set(AskForApproval::OnRequest)
         .expect("test setup should allow updating approval policy");
     let mut config = (*turn_context.config).clone();
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
@@ -2925,7 +2932,9 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
             .expect("test setup should allow updating approval policy");
         let mut config = (*turn_context.config).clone();
         config.chatgpt_base_url = server.uri();
-        config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+        config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+        config.model_provider =
+            ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
         config.approvals_reviewer = ApprovalsReviewer::User;
         let config = Arc::new(config);
         let models_manager = models_manager_with_provider(

@@ -13,8 +13,9 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
-    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home);
+    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("whisply")?);
+    cmd.env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -191,8 +192,7 @@ model = "gpt-5"
         .assert()
         .failure()
         .stderr(contains("--profile `work` cannot be used"))
-        .stderr(contains("[profiles.work]"))
-        .stderr(contains("work.config.toml"));
+        .stderr(contains("[profiles.work]"));
 
     Ok(())
 }

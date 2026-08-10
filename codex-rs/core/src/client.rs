@@ -64,6 +64,7 @@ use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
 use codex_api::response_create_client_metadata;
 use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -127,7 +128,9 @@ use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::AgentIdentitySessionFallback;
 use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::SharedModelProvider;
+use codex_model_provider::WHISPLY_GATEWAY_CONNECT_TIMEOUT;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::is_whisply_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
@@ -145,6 +148,8 @@ pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 pub const X_CODEX_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
 pub const X_CODEX_PARENT_THREAD_ID_HEADER: &str = "x-codex-parent-thread-id";
 pub const X_CODEX_WINDOW_ID_HEADER: &str = "x-codex-window-id";
+pub const X_WHISPLY_INSTALLATION_ID_HEADER: &str = "x-whisply-install-id";
+pub const X_WHISPLY_TURN_METADATA_HEADER: &str = "x-whisply-turn-metadata";
 pub const X_OPENAI_MEMGEN_REQUEST_HEADER: &str = "x-openai-memgen-request";
 pub const X_OPENAI_SUBAGENT_HEADER: &str = "x-openai-subagent";
 pub const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER: &str =
@@ -441,6 +446,41 @@ impl ModelClient {
         http_client_factory: HttpClientFactory,
     ) -> Self {
         let model_provider = create_model_provider(provider_info, auth_manager);
+        Self::new_with_model_provider(
+            model_provider,
+            agent_identity_policy,
+            thread_id,
+            session_source,
+            originator,
+            model_verbosity,
+            enable_request_compression,
+            include_timing_metrics,
+            beta_features_header,
+            concurrent_reasoning_summaries_enabled,
+            attestation_provider,
+            http_client_factory,
+        )
+    }
+
+    /// Creates a session-scoped client from an already-resolved provider.
+    ///
+    /// Sessions that receive a typed managed gateway must retain that provider
+    /// instance; reconstructing it from [`ModelProviderInfo`] would discard the
+    /// embedded gateway and incorrectly fall back to ambient launch state.
+    pub fn new_with_model_provider(
+        model_provider: SharedModelProvider,
+        agent_identity_policy: AgentIdentityAuthPolicy,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        originator: String,
+        model_verbosity: Option<VerbosityConfig>,
+        enable_request_compression: bool,
+        include_timing_metrics: bool,
+        beta_features_header: Option<String>,
+        concurrent_reasoning_summaries_enabled: bool,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
         let codex_api_key_env_enabled = model_provider
             .auth_manager()
             .as_ref()
@@ -561,6 +601,11 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
+        if self.is_whisply_direct_provider() {
+            return Err(CodexErr::InvalidRequest(
+                "Whisply compaction uses the standard /v1/responses stream.".to_string(),
+            ));
+        }
         let client_setup = self.current_client_setup().await?;
         let transport =
             self.build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)?;
@@ -655,6 +700,11 @@ impl ModelClient {
         mut extra_headers: ApiHeaderMap,
         api_provider_override: Option<ApiProvider>,
     ) -> Result<RealtimeWebrtcCallStart> {
+        if self.is_whisply_direct_provider() {
+            return Err(CodexErr::InvalidRequest(
+                "Whisply does not expose the upstream realtime endpoint.".to_string(),
+            ));
+        }
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
         let client_setup = self.current_client_setup().await?;
@@ -694,6 +744,11 @@ impl ModelClient {
         if raw_memories.is_empty() {
             return Ok(Vec::new());
         }
+        if self.is_whisply_direct_provider() {
+            return Err(CodexErr::InvalidRequest(
+                "Whisply memory summarization uses the standard /v1/responses stream.".to_string(),
+            ));
+        }
 
         let client_setup = self.current_client_setup().await?;
         let transport =
@@ -732,6 +787,9 @@ impl ModelClient {
     }
 
     fn build_subagent_headers(&self) -> ApiHeaderMap {
+        if self.is_whisply_direct_provider() {
+            return ApiHeaderMap::new();
+        }
         let mut extra_headers = ApiHeaderMap::new();
         add_originator_header(&mut extra_headers, self.state.originator.as_str());
         if let Some(subagent) = subagent_header_value(&self.state.session_source)
@@ -755,6 +813,11 @@ impl ModelClient {
         &self,
         responses_metadata: &CodexResponsesMetadata,
     ) -> ApiHeaderMap {
+        if self.is_whisply_direct_provider() {
+            // The direct gateway accepts the canonical metadata envelope in
+            // the JSON request body, not legacy flat or duplicated headers.
+            return ApiHeaderMap::new();
+        }
         let mut extra_headers = responses_metadata.compatibility_headers();
         if matches!(
             self.state.session_source,
@@ -773,6 +836,11 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
         use_responses_lite: bool,
     ) -> HashMap<String, String> {
+        if self.is_whisply_direct_provider() {
+            return responses_metadata
+                .whisply_client_metadata()
+                .unwrap_or_default();
+        }
         let mut client_metadata = responses_metadata.client_metadata();
         if use_responses_lite {
             client_metadata.insert(
@@ -795,6 +863,10 @@ impl ModelClient {
                 thread_id: self.state.thread_id,
             })
             .await
+    }
+
+    fn is_whisply_direct_provider(&self) -> bool {
+        is_whisply_provider(self.state.provider.info())
     }
 
     /// Builds request telemetry for unary API calls (e.g., Compact endpoint).
@@ -847,6 +919,7 @@ impl ModelClient {
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
         let is_openai = self.state.provider.info().is_openai();
+        let is_whisply_direct = self.is_whisply_direct_provider();
         if !is_openai {
             for item in &mut input {
                 item.clear_internal_chat_message_metadata_passthrough();
@@ -891,7 +964,7 @@ impl ModelClient {
         };
         let reasoning = Self::build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
-            && is_openai
+            && (is_openai || is_whisply_direct)
             && reasoning.summary.is_some())
         .then_some(StreamOptions {
             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
@@ -930,7 +1003,11 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
-            client_metadata: Some(responses_metadata.client_metadata()),
+            client_metadata: if is_whisply_direct {
+                responses_metadata.whisply_client_metadata()
+            } else {
+                Some(responses_metadata.client_metadata())
+            },
         };
         Ok(request)
     }
@@ -986,12 +1063,31 @@ impl ModelClient {
         endpoint: &str,
     ) -> Result<ReqwestTransport> {
         let request_url = api_provider.url_for_path(endpoint);
-        let client = create_client_for_route(
-            &self.http_client_factory,
-            &request_url,
-            ClientRouteClass::Api,
-        )
-        .map_err(std::io::Error::from)?;
+        let client = if self.is_whisply_direct_provider() {
+            // The direct gateway has a bounded connect phase, never follows a
+            // redirect away from the release-owned origin, and avoids request
+            // diagnostics that could include broker-authenticated headers.
+            HttpClientBuilder::new()
+                .without_redirects()
+                .without_request_logging()
+                .connect_timeout(WHISPLY_GATEWAY_CONNECT_TIMEOUT)
+                // Reqwest 0.12 has no whole-request timeout by default; the
+                // managed SSE path owns its liveness policy so heartbeat
+                // comments can keep a long provider turn healthy.
+                .build_respecting_outbound_proxy_policy(
+                    &self.http_client_factory,
+                    &request_url,
+                    ClientRouteClass::Api,
+                )
+                .map_err(std::io::Error::from)?
+        } else {
+            create_client_for_route(
+                &self.http_client_factory,
+                &request_url,
+                ClientRouteClass::Api,
+            )
+            .map_err(std::io::Error::from)?
+        };
         Ok(ReqwestTransport::from_http_client(client))
     }
 
@@ -1156,25 +1252,37 @@ impl ModelClientSession {
         compression: Compression,
         use_responses_lite: bool,
     ) -> ApiResponsesOptions {
+        let is_whisply_direct = self.client.is_whisply_direct_provider();
         ApiResponsesOptions {
             session_id: Some(responses_metadata.session_id.to_string()),
             thread_id: Some(responses_metadata.thread_id.to_string()),
             session_source: Some(self.client.state.session_source.clone()),
             extra_headers: {
-                let mut headers = build_responses_headers(
-                    self.client.state.beta_features_header.as_deref(),
-                    Some(&self.turn_state),
-                );
-                add_originator_header(&mut headers, self.client.state.originator.as_str());
-                headers.extend(
-                    self.client
-                        .build_responses_compatibility_headers(responses_metadata),
-                );
-                if let Some(header_value) = self.client.generate_attestation_header_for().await {
-                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+                if is_whisply_direct {
+                    let mut headers = ApiHeaderMap::new();
+                    if let Ok(installation_id) =
+                        HeaderValue::from_str(&responses_metadata.installation_id)
+                    {
+                        headers.insert(X_WHISPLY_INSTALLATION_ID_HEADER, installation_id);
+                    }
+                    headers
+                } else {
+                    let mut headers = build_responses_headers(
+                        self.client.state.beta_features_header.as_deref(),
+                        Some(&self.turn_state),
+                    );
+                    add_originator_header(&mut headers, self.client.state.originator.as_str());
+                    headers.extend(
+                        self.client
+                            .build_responses_compatibility_headers(responses_metadata),
+                    );
+                    if let Some(header_value) = self.client.generate_attestation_header_for().await
+                    {
+                        headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+                    }
+                    add_responses_lite_header(&mut headers, use_responses_lite);
+                    headers
                 }
-                add_responses_lite_header(&mut headers, use_responses_lite);
-                headers
             },
             compression,
             turn_state: Some(Arc::clone(&self.turn_state)),
@@ -1489,12 +1597,14 @@ impl ModelClientSession {
                         response_debug_context.request_id.as_deref(),
                         /*output_items*/ &[],
                     );
+                    let allow_provider_refresh = !pending_retry.retry_after_unauthorized;
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
                             &mut auth_recovery,
                             session_telemetry,
                             &self.client.state.provider,
+                            allow_provider_refresh,
                         )
                         .await?,
                     );
@@ -1600,12 +1710,14 @@ impl ModelClientSession {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
+                    let allow_provider_refresh = !pending_retry.retry_after_unauthorized;
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
                             &mut auth_recovery,
                             session_telemetry,
                             &self.client.state.provider,
+                            allow_provider_refresh,
                         )
                         .await?,
                     );
@@ -2181,8 +2293,34 @@ async fn handle_unauthorized(
     auth_recovery: &mut Option<UnauthorizedRecovery>,
     session_telemetry: &SessionTelemetry,
     provider: &SharedModelProvider,
+    allow_provider_refresh: bool,
 ) -> Result<UnauthorizedRecoveryExecution> {
     let debug = extract_response_debug_context(&transport);
+    if allow_provider_refresh && provider.refresh_after_unauthorized().await? {
+        let mode = "whisply_broker";
+        let phase = "descriptor_refresh";
+        session_telemetry.record_auth_recovery(
+            mode,
+            phase,
+            "recovery_succeeded",
+            debug.request_id.as_deref(),
+            debug.cf_ray.as_deref(),
+            debug.auth_error.as_deref(),
+            debug.auth_error_code.as_deref(),
+            /*recovery_reason*/ None,
+            /*auth_state_changed*/ Some(true),
+        );
+        emit_feedback_auth_recovery_tags(
+            mode,
+            phase,
+            "recovery_succeeded",
+            debug.request_id.as_deref(),
+            debug.cf_ray.as_deref(),
+            debug.auth_error.as_deref(),
+            debug.auth_error_code.as_deref(),
+        );
+        return Ok(UnauthorizedRecoveryExecution { mode, phase });
+    }
     if let Some(recovery) = auth_recovery
         && recovery.has_next()
     {

@@ -45,6 +45,13 @@ pub(crate) struct MessageProcessor {
     active_turns: Arc<ActiveTurnRegistry>,
 }
 
+fn request_id_type(id: &RequestId) -> &'static str {
+    match id {
+        RequestId::Number(_) => "number",
+        RequestId::String(_) => "string",
+    }
+}
+
 impl MessageProcessor {
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
     /// `Sender` so handlers can enqueue messages to be written to stdout.
@@ -191,8 +198,11 @@ impl MessageProcessor {
     }
 
     pub(crate) async fn process_response(&mut self, response: JsonRpcResponse<serde_json::Value>) {
-        tracing::info!("<- response: {:?}", response);
         let JsonRpcResponse { id, result, .. } = response;
+        tracing::info!(
+            request_id_type = request_id_type(&id),
+            "received client response"
+        );
         self.outgoing.notify_client_response(id, result).await
     }
 
@@ -223,7 +233,10 @@ impl MessageProcessor {
     }
 
     pub(crate) fn process_error(&mut self, err: JsonRpcError) {
-        tracing::error!("<- error: {:?}", err);
+        tracing::warn!(
+            has_request_id = err.id.is_some(),
+            "received client JSON-RPC error"
+        );
     }
 
     async fn handle_initialize(
@@ -231,7 +244,7 @@ impl MessageProcessor {
         id: RequestId,
         params: rmcp::model::InitializeRequestParams,
     ) {
-        tracing::info!("initialize -> params: {:?}", params);
+        tracing::info!(request_id_type = request_id_type(&id), "initialize request");
 
         if self.initialized {
             self.outgoing.send_error(
@@ -304,32 +317,32 @@ impl MessageProcessor {
         self.outgoing.send_response(id, json!({}));
     }
 
-    fn handle_list_resources(&self, params: Option<rmcp::model::PaginatedRequestParams>) {
-        tracing::info!("resources/list -> params: {:?}", params);
+    fn handle_list_resources(&self, _params: Option<rmcp::model::PaginatedRequestParams>) {
+        tracing::info!("resources/list request");
     }
 
-    fn handle_list_resource_templates(&self, params: Option<rmcp::model::PaginatedRequestParams>) {
-        tracing::info!("resources/templates/list -> params: {:?}", params);
+    fn handle_list_resource_templates(&self, _params: Option<rmcp::model::PaginatedRequestParams>) {
+        tracing::info!("resources/templates/list request");
     }
 
-    fn handle_read_resource(&self, params: rmcp::model::ReadResourceRequestParams) {
-        tracing::info!("resources/read -> params: {:?}", params);
+    fn handle_read_resource(&self, _params: rmcp::model::ReadResourceRequestParams) {
+        tracing::info!("resources/read request");
     }
 
-    fn handle_subscribe(&self, params: rmcp::model::SubscribeRequestParams) {
-        tracing::info!("resources/subscribe -> params: {:?}", params);
+    fn handle_subscribe(&self, _params: rmcp::model::SubscribeRequestParams) {
+        tracing::info!("resources/subscribe request");
     }
 
-    fn handle_unsubscribe(&self, params: rmcp::model::UnsubscribeRequestParams) {
-        tracing::info!("resources/unsubscribe -> params: {:?}", params);
+    fn handle_unsubscribe(&self, _params: rmcp::model::UnsubscribeRequestParams) {
+        tracing::info!("resources/unsubscribe request");
     }
 
-    fn handle_list_prompts(&self, params: Option<rmcp::model::PaginatedRequestParams>) {
-        tracing::info!("prompts/list -> params: {:?}", params);
+    fn handle_list_prompts(&self, _params: Option<rmcp::model::PaginatedRequestParams>) {
+        tracing::info!("prompts/list request");
     }
 
-    fn handle_get_prompt(&self, params: rmcp::model::GetPromptRequestParams) {
-        tracing::info!("prompts/get -> params: {:?}", params);
+    fn handle_get_prompt(&self, _params: rmcp::model::GetPromptRequestParams) {
+        tracing::info!("prompts/get request");
     }
 
     async fn handle_list_tools(
@@ -337,7 +350,8 @@ impl MessageProcessor {
         id: RequestId,
         params: Option<rmcp::model::PaginatedRequestParams>,
     ) {
-        tracing::trace!("tools/list -> {params:?}");
+        let _ = params;
+        tracing::trace!(request_id_type = request_id_type(&id), "tools/list request");
         let result = rmcp::model::ListToolsResult::with_all_items(vec![
             create_tool_for_codex_tool_call_param(),
             create_tool_for_codex_tool_call_reply_param(),
@@ -347,7 +361,7 @@ impl MessageProcessor {
     }
 
     async fn handle_call_tool(&self, id: RequestId, params: CallToolRequestParams) {
-        tracing::info!("tools/call -> params: {:?}", params);
+        tracing::info!(request_id_type = request_id_type(&id), "tools/call request");
         let CallToolRequestParams {
             name, arguments, ..
         } = params;
@@ -429,14 +443,17 @@ impl MessageProcessor {
         arguments: Option<rmcp::model::JsonObject>,
     ) {
         let arguments = arguments.map(serde_json::Value::Object);
-        tracing::info!("tools/call -> params: {:?}", arguments);
+        tracing::info!(
+            request_id_type = request_id_type(&request_id),
+            "tools/call codex-reply request"
+        );
 
         // parse arguments
         let codex_tool_call_reply_param: CodexToolCallReplyParam = match arguments {
             Some(json_val) => match serde_json::from_value::<CodexToolCallReplyParam>(json_val) {
                 Ok(params) => params,
                 Err(e) => {
-                    tracing::error!("Failed to parse Codex tool call reply parameters: {e}");
+                    tracing::error!("failed to parse codex-reply parameters");
                     let result = CallToolResult::error(vec![rmcp::model::ContentBlock::text(
                         format!("Failed to parse configuration for Codex tool: {e}"),
                     )]);
@@ -459,7 +476,7 @@ impl MessageProcessor {
         let thread_id = match codex_tool_call_reply_param.get_thread_id() {
             Ok(id) => id,
             Err(e) => {
-                tracing::error!("Failed to parse thread_id: {e}");
+                tracing::error!("failed to parse codex-reply thread id");
                 let result = CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
                     "Failed to parse thread_id: {e}"
                 ))]);
@@ -475,7 +492,7 @@ impl MessageProcessor {
         let codex = match self.thread_manager.get_thread(thread_id).await {
             Ok(c) => c,
             Err(_) => {
-                tracing::warn!("Session not found for thread_id: {thread_id}");
+                tracing::warn!("session not found for codex-reply request");
                 let result = crate::codex_tool_runner::create_call_tool_result_with_thread_id(
                     thread_id,
                     format!("Session not found for thread_id: {thread_id}"),
@@ -507,12 +524,12 @@ impl MessageProcessor {
     }
 
     #[allow(deprecated)]
-    fn handle_set_level(&self, params: rmcp::model::SetLevelRequestParams) {
-        tracing::info!("logging/setLevel -> params: {:?}", params);
+    fn handle_set_level(&self, _params: rmcp::model::SetLevelRequestParams) {
+        tracing::info!("logging/setLevel request");
     }
 
-    fn handle_complete(&self, params: rmcp::model::CompleteRequestParams) {
-        tracing::info!("completion/complete -> params: {:?}", params);
+    fn handle_complete(&self, _params: rmcp::model::CompleteRequestParams) {
+        tracing::info!("completion/complete request");
     }
 
     async fn handle_unsupported_request(&self, id: RequestId, method: &str) {
@@ -542,23 +559,22 @@ impl MessageProcessor {
         let thread_id = match self.active_turns.thread_id(&request_id) {
             Some(id) => id,
             None => {
-                tracing::warn!("Session not found for request_id: {request_id_string}");
+                tracing::warn!("session not found for cancellation request");
                 return;
             }
         };
-        tracing::info!("thread_id: {thread_id}");
 
         // Obtain the Codex thread from the server.
         let codex_arc = match self.thread_manager.get_thread(thread_id).await {
             Ok(c) => c,
             Err(_) => {
-                tracing::warn!("Session not found for thread_id: {thread_id}");
+                tracing::warn!("session not found while cancelling active turn");
                 return;
             }
         };
 
         // Submit interrupt to Codex.
-        if let Err(e) = codex_arc
+        if codex_arc
             .submit_with_id(Submission {
                 id: request_id_string,
                 op: codex_protocol::protocol::Op::Interrupt,
@@ -567,16 +583,17 @@ impl MessageProcessor {
                 parent_turn_id: None,
             })
             .await
+            .is_err()
         {
-            tracing::error!("Failed to submit interrupt to Codex: {e}");
+            tracing::error!("failed to submit codex interrupt");
             return;
         }
         // Stop routing extension events to the cancelled turn.
         self.active_turns.unregister(&request_id);
     }
 
-    fn handle_progress_notification(&self, params: rmcp::model::ProgressNotificationParam) {
-        tracing::info!("notifications/progress -> params: {:?}", params);
+    fn handle_progress_notification(&self, _params: rmcp::model::ProgressNotificationParam) {
+        tracing::info!("notifications/progress received");
     }
 
     fn handle_roots_list_changed(&self) {

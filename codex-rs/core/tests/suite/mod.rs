@@ -76,7 +76,6 @@ mod injected_models_cache;
 mod items;
 mod json_result;
 mod live_cli;
-mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
@@ -95,7 +94,6 @@ mod multi_agent_resume;
 #[cfg(unix)]
 mod multi_exec_server_sandbox;
 mod network_approval;
-mod openai_file_mcp;
 mod otel;
 mod override_updates;
 mod pending_input;
@@ -106,8 +104,10 @@ mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
 mod quota_exceeded;
-mod realtime_conversation;
-mod realtime_initial_items;
+// Direct realtime transport is retired in Whisply's BrokerOnly runtime. The
+// historical provider-transport suites remain in the source tree, but must not
+// be compiled into the Whisply core test target.
+mod realtime_broker_only;
 mod remote_env;
 mod remote_models;
 mod request_compression;

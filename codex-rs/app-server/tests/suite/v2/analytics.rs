@@ -1,8 +1,5 @@
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
 use app_test_support::DEFAULT_CLIENT_NAME;
-use app_test_support::write_chatgpt_auth;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::OtelExporterKind;
 use codex_config::types::OtelHttpProtocol;
 use codex_core::config::ConfigBuilder;
@@ -56,7 +53,7 @@ async fn app_server_default_analytics_disabled_without_flag() -> Result<()> {
 }
 
 #[tokio::test]
-async fn app_server_default_analytics_enabled_with_flag() -> Result<()> {
+async fn app_server_otel_entrypoint_cannot_restore_configured_exporter() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
@@ -73,27 +70,19 @@ async fn app_server_default_analytics_enabled_with_flag() -> Result<()> {
     )
     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    // With analytics unset in the config and the default flag is true, metrics are enabled.
+    // Even a programmatically-mutated config and an enabled default cannot
+    // restore direct OTLP metrics authority.
     let has_metrics = provider.as_ref().and_then(|otel| otel.metrics()).is_some();
-    assert_eq!(has_metrics, true);
+    assert_eq!(has_metrics, false);
     Ok(())
 }
 
-pub(crate) async fn mount_analytics_capture(server: &MockServer, codex_home: &Path) -> Result<()> {
+pub(crate) async fn mount_analytics_capture(server: &MockServer, _codex_home: &Path) -> Result<()> {
     Mock::given(method("POST"))
         .and(path("/codex/analytics-events/events"))
         .respond_with(ResponseTemplate::new(200))
         .mount(server)
         .await;
-
-    write_chatgpt_auth(
-        codex_home,
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
 
     Ok(())
 }

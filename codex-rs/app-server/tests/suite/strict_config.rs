@@ -14,7 +14,8 @@ foo = "bar"
     )?;
 
     let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-        .env("CODEX_HOME", codex_home.path())
+        .env("WHISPLY_HOME", codex_home.path())
+        .env_remove("CODEX_HOME")
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.path().join("managed_config.toml"),
@@ -33,7 +34,7 @@ foo = "bar"
 }
 
 #[test]
-fn managed_auth_requirements_fail_closed_for_standalone_app_server() -> Result<()> {
+fn broker_only_standalone_app_server_ignores_legacy_auth_requirements() -> Result<()> {
     for requirements in [
         "allowed_login_methods = []\n",
         "allowed_login_methods = [\"chatgpt\"]\nallowed_chatgpt_workspaces = []\n",
@@ -42,23 +43,23 @@ fn managed_auth_requirements_fail_closed_for_standalone_app_server() -> Result<(
         std::fs::write(codex_home.path().join("requirements.toml"), requirements)?;
 
         let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-            .env("CODEX_HOME", codex_home.path())
+            .env("WHISPLY_HOME", codex_home.path())
+            .env_remove("CODEX_HOME")
             .env(
                 "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
                 codex_home.path().join("managed_config.toml"),
             )
-            .args(["--listen", "off"])
+            // BrokerOnly deliberately does not materialize legacy direct
+            // credentials, so legacy login requirements must not make the
+            // standalone managed runtime unavailable.
+            .args(["--listen", "stdio://"])
             .output()?;
 
-        assert!(!output.status.success());
+        assert!(output.status.success());
         let stderr = String::from_utf8(output.stderr)?;
         assert!(
-            stderr.contains("authentication requirements do not permit any usable login method"),
-            "expected managed authentication error in stderr, got: {stderr}"
-        );
-        assert!(
-            !stderr.contains("using defaults"),
-            "managed authentication requirements must not fall back to defaults"
+            !stderr.contains("authentication requirements do not permit any usable login method"),
+            "BrokerOnly must not re-enable legacy auth validation: {stderr}"
         );
     }
 

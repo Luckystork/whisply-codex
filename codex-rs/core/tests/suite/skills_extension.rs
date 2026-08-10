@@ -13,7 +13,6 @@ use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_features::Feature;
-use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -43,8 +42,6 @@ use codex_skills_extension::provider::SkillSearchRequest;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::approx_token_count;
-use core_test_support::apps_test_server::AppsTestServer;
-use core_test_support::apps_test_server::apps_enabled_builder;
 use core_test_support::responses;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -53,19 +50,9 @@ use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
-use serde_json::Value;
-use serde_json::json;
 use tempfile::TempDir;
-use tokio::time::Duration;
-use tokio::time::Instant;
 use toml::toml;
-use wiremock::Mock;
-use wiremock::Request;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path_regex;
 
 struct StaticSkillProvider {
     catalog: SkillCatalog,
@@ -464,7 +451,6 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
     const PLUGIN_SKILL_BODY: &str = "Use the legacy plugin skill instructions.";
 
     let server = responses::start_mock_server().await;
-    let apps_server = AppsTestServer::mount_with_connector_name(&server, "Google Calendar").await?;
     let response = mount_sse_once(
         &server,
         sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
@@ -497,10 +483,6 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
     )?;
     let plugin_skill_path = dunce::canonicalize(plugin_skill_path)?;
     std::fs::write(
-        plugin_root.join(".app.json"),
-        r#"{"apps":{"sample":{"id":"calendar"}}}"#,
-    )?;
-    std::fs::write(
         codex_home.path().join("config.toml"),
         "[features]\nplugins = true\n\n[plugins.\"sample@test\"]\nenabled = true\n",
     )?;
@@ -513,9 +495,9 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
     });
     let mut builder = test_codex()
+        .with_trusted_workspace()
         .with_home(Arc::clone(&codex_home))
         .with_extensions(Arc::new(extensions.build()))
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_workspace_setup(|cwd, fs| async move {
             let skill_dir = cwd.join(".agents/skills/repo-search");
             fs.create_directory(
@@ -534,13 +516,6 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
             )
             .await?;
             Ok(())
-        })
-        .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::Apps)
-                .expect("test config should allow feature update");
-            config.chatgpt_base_url = apps_server.chatgpt_base_url;
         });
     let test = builder.build_with_auto_env(&server).await?;
     let repo_skill_path = test
@@ -588,9 +563,6 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
     let request = response.single_request();
     let developer_messages = request.message_input_texts("developer");
     let developer_text = developer_messages.join("\n\n");
-    let apps_pos = developer_text
-        .find("## Apps")
-        .expect("expected apps section in developer message");
     let skills_pos = developer_text
         .find("## Skills")
         .expect("expected skills section in developer message");
@@ -598,8 +570,8 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
         .find("## Plugins")
         .expect("expected plugins section in developer message");
     assert!(
-        skills_pos < apps_pos && apps_pos < plugins_pos,
-        "expected Skills -> Apps -> Plugins order: {developer_messages:?}"
+        skills_pos < plugins_pos,
+        "expected Skills -> Plugins order: {developer_messages:?}"
     );
     assert!(
         !developer_text.contains("`sample`: inspect sample data"),
@@ -650,188 +622,23 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_only_orchestrator_skill_is_hidden_but_can_be_invoked() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    const SKILL_PACKAGE: &str = "skill://demo/explicit-only";
-    const MAIN_RESOURCE: &str = "skill://demo/explicit-only/SKILL.md";
-    const REFERENCED_RESOURCE: &str = "skill://demo/explicit-only/references/guide.md";
-    const REFERENCED_CONTENTS: &str = "# Referenced guide";
-    const READ_CALL_ID: &str = "read-explicit-only-resource";
-
-    let server = responses::start_mock_server().await;
-    let apps_server = AppsTestServer::mount(&server).await?;
-    let response = responses::mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                responses::ev_function_call_with_namespace(
-                    READ_CALL_ID,
-                    "skills",
-                    "read",
-                    &json!({
-                        "authority": { "kind": "orchestrator" },
-                        "package": SKILL_PACKAGE,
-                        "resource": REFERENCED_RESOURCE,
-                    })
-                    .to_string(),
-                ),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
-        ],
-    )
-    .await;
-
-    Mock::given(method("POST"))
-        .and(path_regex("^/api/codex/ps/mcp/?$"))
-        .and(|request: &Request| {
-            serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
-                matches!(
-                    body["method"].as_str(),
-                    Some("resources/list" | "resources/read")
-                )
-            })
+async fn orchestrator_skills_are_unavailable_without_a_managed_resource_provider() -> Result<()> {
+    let catalog = OrchestratorSkillProvider::new()
+        .list(SkillListQuery {
+            turn_id: "broker-only-test".to_string(),
+            executor_roots: Vec::new(),
+            resolved_executor_roots: Vec::new(),
+            host_snapshot: None,
+            include_host_skills: false,
+            include_bundled_skills: false,
+            include_orchestrator_skills: true,
+            mcp_resources: None,
+            executor_capability_discovery: None,
         })
-        .respond_with(|request: &Request| {
-            let body: Value = serde_json::from_slice(&request.body)
-                .expect("MCP resource request should be valid JSON");
-            let result = match body["method"].as_str() {
-                Some("resources/list") => {
-                    let resources = [
-                        ("visible", Some(json!(true))),
-                        ("explicit-only", Some(json!(false))),
-                        ("missing-policy", None),
-                        ("non-boolean-policy", Some(json!("false"))),
-                    ]
-                    .map(|(name, allow_implicit_invocation)| {
-                        let mut metadata = json!({
-                            "plugin_name": "demo",
-                            "skill_name": name,
-                        });
-                        if let Some(allow_implicit_invocation) = allow_implicit_invocation {
-                            metadata["allow_implicit_invocation"] = allow_implicit_invocation;
-                        }
-                        json!({
-                            "name": name,
-                            "uri": format!("skill://demo/{name}"),
-                            "mimeType": "mcp/skill",
-                            "_meta": metadata,
-                        })
-                    });
-                    json!({ "resources": resources })
-                }
-                Some("resources/read") => {
-                    let uri = body["params"]["uri"]
-                        .as_str()
-                        .expect("MCP resource read should include a resource URI");
-                    let contents = match uri {
-                        MAIN_RESOURCE => {
-                            format!("# Explicit-only instructions\nRead {REFERENCED_RESOURCE}.")
-                        }
-                        REFERENCED_RESOURCE => REFERENCED_CONTENTS.to_string(),
-                        _ => unreachable!("unexpected MCP resource URI: {uri}"),
-                    };
-                    json!({
-                        "contents": [{
-                            "uri": uri,
-                            "mimeType": "text/markdown",
-                            "text": contents,
-                        }],
-                    })
-                }
-                method => unreachable!("unexpected MCP resource method: {method:?}"),
-            };
-            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
-                "jsonrpc": "2.0",
-                "id": body["id"],
-                "result": result,
-            }))
-        })
-        .with_priority(/*p*/ 1)
-        .mount(&server)
-        .await;
+        .await?;
 
-    let mut extensions = ExtensionRegistryBuilder::new();
-    install_with_providers(
-        &mut extensions,
-        SkillProviders::new()
-            .with_orchestrator_provider(Arc::new(OrchestratorSkillProvider::new())),
-        |config: &Config| SkillsExtensionConfig {
-            include_instructions: config.include_skill_instructions,
-            bundled_skills_enabled: false,
-            orchestrator_skills_enabled: true,
-            shadow_selection_enabled: false,
-        },
-    );
-    let mut builder = apps_enabled_builder(apps_server.chatgpt_base_url)
-        // Local executors disable orchestrator skill discovery.
-        .with_exec_server_url("none")
-        .with_extensions(Arc::new(extensions.build()))
-        .with_config(|config| {
-            config.include_skill_instructions = true;
-            config.orchestrator_skills_enabled = true;
-        });
-    let test = builder.build_with_auto_env(&server).await?;
-    wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
-
-    test.submit_turn("Use $demo:explicit-only.").await?;
-
-    let requests = response.requests();
-    assert_eq!(requests.len(), 2);
-    let request = &requests[0];
-    let developer_messages = request.message_input_texts("developer");
-    for name in ["visible", "missing-policy", "non-boolean-policy"] {
-        let catalog_entry = format!("- demo:{name}:");
-        assert!(
-            developer_messages
-                .iter()
-                .any(|message| message.contains(&catalog_entry)),
-            "model-visible skills should include `{name}`: {developer_messages:?}"
-        );
-    }
-    assert!(
-        developer_messages
-            .iter()
-            .all(|message| !message.contains("- demo:explicit-only:")),
-        "model-visible skills should omit the explicit-only skill: {developer_messages:?}"
-    );
-    let user_messages = request.message_input_texts("user");
-    let skill_instructions = user_messages
-        .iter()
-        .find(|message| {
-            message.contains("<name>demo:explicit-only</name>")
-                && message.contains("# Explicit-only instructions")
-                && message.contains(REFERENCED_RESOURCE)
-        })
-        .expect("explicit invocation should inject the hidden skill instructions and reference");
-    let resource_access = skill_instructions
-        .split_once("<resource_access>")
-        .and_then(|(_, remainder)| remainder.split_once("</resource_access>"))
-        .map(|(metadata, _)| metadata)
-        .expect("hidden orchestrator skills should include resource-access metadata");
-    assert_eq!(
-        serde_json::from_str::<Value>(resource_access)?,
-        json!({
-            "authority": { "kind": "orchestrator" },
-            "package": SKILL_PACKAGE,
-            "main_resource": MAIN_RESOURCE,
-        })
-    );
-    assert_eq!(
-        serde_json::from_str::<Value>(
-            &requests[1]
-                .function_call_output_text(READ_CALL_ID)
-                .expect("skills.read should return the referenced resource"),
-        )?,
-        json!({
-            "resource": REFERENCED_RESOURCE,
-            "contents": REFERENCED_CONTENTS,
-            "next_cursor": null,
-        })
-    );
-
+    assert!(catalog.entries.is_empty());
+    assert!(catalog.warnings.is_empty());
     Ok(())
 }
 
@@ -1110,7 +917,6 @@ async fn production_turn_preserves_host_alias_root_order_across_turns() -> Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_turn_uses_provider_host_catalog_and_core_snapshot_injection() -> Result<()> {
     let server = responses::start_mock_server().await;
-    let apps_server = AppsTestServer::mount(&server).await?;
     let response = mount_sse_once(
         &server,
         sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
@@ -1159,12 +965,11 @@ async fn production_turn_uses_provider_host_catalog_and_core_snapshot_injection(
             shadow_selection_enabled: false,
         },
     );
-    let mut builder = apps_enabled_builder(apps_server.chatgpt_base_url)
+    let mut builder = test_codex()
         .with_home(Arc::clone(&codex_home))
         .with_extensions(Arc::new(extensions.build()))
         .with_config(configure_catalog_test);
     let test = builder.build_with_auto_env(&server).await?;
-    wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
 
     test.submit_turn(&format!("Use ${skill_name}.")).await?;
     let request = response.single_request();
@@ -1185,37 +990,6 @@ async fn production_turn_uses_provider_host_catalog_and_core_snapshot_injection(
     let user_text = request.message_input_texts("user").join("\n");
     assert!(user_text.contains(&snapshot_contents));
     assert!(!user_text.contains(provider_contents));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let app_mentioned_event = loop {
-        let requests = server.received_requests().await.unwrap_or_default();
-        if let Some(event) = requests
-            .into_iter()
-            .filter(|request| request.url.path() == "/codex/analytics-events/events")
-            .find_map(|request| {
-                let payload: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
-                payload["events"].as_array().and_then(|events| {
-                    events
-                        .iter()
-                        .find(|event| event["event_type"] == "codex_app_mentioned")
-                        .cloned()
-                })
-            })
-        {
-            break event;
-        }
-        if Instant::now() >= deadline {
-            panic!("timed out waiting for app mentioned analytics");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    assert_eq!(
-        app_mentioned_event["event_params"]["connector_id"],
-        "calendar"
-    );
-    assert_eq!(
-        app_mentioned_event["event_params"]["invoke_type"],
-        "explicit"
-    );
     Ok(())
 }
 

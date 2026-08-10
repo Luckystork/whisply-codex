@@ -1,9 +1,10 @@
 ---
-source: tui/src/history_cell.rs
+source: tui/src/history_cell/tests.rs
+assertion_line: 1652
 expression: rendered
 ---
 ╭───────────────────────────────────────╮
-│ >_ OpenAI Codex (vtest)               │
+│ >_ Whisply (vtest)                    │
 │                                       │
 │ model:       gpt-5   /model to change │
 │ directory:   /tmp/project             │

@@ -1,7 +1,7 @@
 //! Ambient terminal pets configured from the /pets slash command.
 //!
 //! The TUI treats built-in and custom pets differently on purpose:
-//! built-in pets are versioned application assets fetched on demand into a
+//! built-in pets are versioned application assets materialized on demand into a
 //! managed CODEX_HOME cache, while custom pets remain entirely user-owned data
 //! under `$CODEX_HOME/pets/<pet-id>/pet.json` or legacy avatar directories.
 //!
@@ -27,7 +27,6 @@ mod sixel;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_http_client::RouteAwareClientPool;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::tui::FrameRequester;
@@ -54,19 +53,15 @@ pub(crate) use preview::PetPickerPreviewState;
 pub(crate) const DEFAULT_PET_ID: &str = "codex";
 pub(crate) const DISABLED_PET_ID: &str = "disabled";
 
-/// Ensure that a selected built-in pet has a locally cached spritesheet.
+/// Ensure that a selected built-in pet has a locally cached bundled spritesheet.
 ///
 /// Custom pets are intentionally a no-op here because their source of truth is
 /// already local. Preparing this before loading keeps first-use preview and
 /// persistence failures at the asset-fetch boundary rather than surfacing as
 /// deeper image-loading errors.
-async fn ensure_builtin_pack_for_pet(
-    pet_id: &str,
-    codex_home: &std::path::Path,
-    http_client: &RouteAwareClientPool,
-) -> Result<()> {
+async fn ensure_builtin_pack_for_pet(pet_id: &str, codex_home: &std::path::Path) -> Result<()> {
     if let Some(pet) = catalog::builtin_pet(pet_id) {
-        asset_pack::ensure_builtin_pet(codex_home, pet, http_client).await?;
+        asset_pack::ensure_builtin_pet(codex_home, pet).await?;
     }
     Ok(())
 }
@@ -77,9 +72,8 @@ pub(crate) async fn load_pet_with_assets(
     codex_home: AbsolutePathBuf,
     frame_requester: FrameRequester,
     animations_enabled: bool,
-    http_client: &RouteAwareClientPool,
 ) -> Result<AmbientPet> {
-    ensure_builtin_pack_for_pet(&pet_id, &codex_home, http_client).await?;
+    ensure_builtin_pack_for_pet(&pet_id, &codex_home).await?;
     tokio::task::spawn_blocking(move || {
         AmbientPet::load(
             Some(&pet_id),

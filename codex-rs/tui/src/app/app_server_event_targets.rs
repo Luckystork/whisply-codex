@@ -27,6 +27,12 @@ pub(super) fn server_request_thread_id(request: &ServerRequest) -> Option<Thread
         ServerRequest::CurrentTimeRead { params, .. } => {
             ThreadId::from_string(&params.thread_id).ok()
         }
+        ServerRequest::WhisplyToolExecute { params, .. } => {
+            ThreadId::from_string(&params.envelope.thread_id).ok()
+        }
+        ServerRequest::WhisplyToolCancel { params, .. } => {
+            ThreadId::from_string(&params.envelope.thread_id).ok()
+        }
         ServerRequest::ChatgptAuthTokensRefresh { .. }
         | ServerRequest::AttestationGenerate { .. }
         | ServerRequest::ApplyPatchApproval { .. }
@@ -46,6 +52,13 @@ pub(super) fn server_notification_thread_target(
     notification: &ServerNotification,
 ) -> ServerNotificationThreadTarget {
     let thread_id = match notification {
+        // These bare telemetry notifications intentionally lack thread and
+        // turn ids. User-visible activity must travel on scoped item events;
+        // treating bare execution ids as routing authority would permit a
+        // cross-thread projection.
+        ServerNotification::WhisplyToolProgress(_) | ServerNotification::WhisplyToolResult(_) => {
+            return ServerNotificationThreadTarget::AppScoped;
+        }
         ServerNotification::Error(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::ThreadStarted(notification) => Some(notification.thread.id.as_str()),
         ServerNotification::ThreadStatusChanged(notification) => {

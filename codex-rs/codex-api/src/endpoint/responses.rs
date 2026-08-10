@@ -8,6 +8,7 @@ use crate::requests::Compression;
 use crate::requests::headers::build_session_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
+use crate::requests::headers::whisply_subagent_header;
 use crate::sse::spawn_response_stream;
 use crate::telemetry::SseTelemetry;
 use codex_client::EncodedJsonBody;
@@ -22,6 +23,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
+use uuid::Uuid;
 
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
@@ -85,11 +87,27 @@ impl<T: HttpTransport> ResponsesClient<T> {
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
         let mut headers = extra_headers;
-        if let Some(ref thread_id) = thread_id {
+        let is_whisply_direct = is_whisply_direct_provider(self.session.provider());
+        if is_whisply_direct {
+            // A request identifier is created once before retry handling so
+            // gateway Usage reservation and receipt settlement remain
+            // idempotent across transport attempts.
+            insert_header(
+                &mut headers,
+                "x-whisply-request-id",
+                &Uuid::new_v4().to_string(),
+            );
+        } else if let Some(ref thread_id) = thread_id {
             insert_header(&mut headers, "x-client-request-id", thread_id);
         }
-        headers.extend(build_session_headers(session_id, thread_id));
-        if let Some(subagent) = subagent_header(&session_source) {
+        if !is_whisply_direct {
+            headers.extend(build_session_headers(session_id, thread_id));
+        }
+        if is_whisply_direct {
+            if let Some(subagent) = whisply_subagent_header(&session_source) {
+                insert_header(&mut headers, "x-whisply-subagent", subagent);
+            }
+        } else if let Some(subagent) = subagent_header(&session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
 
@@ -132,6 +150,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         compression: Compression,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
+        let is_whisply_direct = is_whisply_direct_provider(self.session.provider());
         let request_compression = match compression {
             Compression::None => RequestCompression::None,
             Compression::Zstd => RequestCompression::Zstd,
@@ -159,6 +178,16 @@ impl<T: HttpTransport> ResponsesClient<T> {
             self.session.provider().stream_idle_timeout,
             self.sse_telemetry.clone(),
             turn_state,
+            is_whisply_direct,
         ))
     }
+}
+
+fn is_whisply_direct_provider(provider: &Provider) -> bool {
+    provider.name == "Whisply"
+        && provider
+            .headers
+            .get("x-whisply-runtime")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "direct")
 }

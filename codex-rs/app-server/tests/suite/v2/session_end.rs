@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
@@ -13,8 +14,11 @@ use codex_app_server_protocol::ThreadDeleteParams;
 use codex_app_server_protocol::ThreadDeleteResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::UserInput;
 use codex_features::Feature;
 use pretty_assertions::assert_eq;
@@ -25,21 +29,24 @@ use tokio::time::timeout;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn archive_runs_session_end_before_moving_transcript() -> Result<()> {
     run_removal_session_end_test("archive").await
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn delete_runs_session_end_before_removing_transcript() -> Result<()> {
     run_removal_session_end_test("delete").await
 }
 
+#[cfg(target_os = "macos")]
 async fn run_removal_session_end_test(operation: &str) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("persisted answer").await;
     let codex_home = TempDir::new()?;
-    let log_path = write_config_and_hook(codex_home.path(), &server.uri())?;
-    let mut app_server = TestAppServer::builder()
+    let log_path = write_config_and_hook(codex_home.path())?;
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(READ_TIMEOUT)
         .await?;
@@ -96,9 +103,8 @@ async fn run_removal_session_end_test(operation: &str) -> Result<()> {
 
 #[tokio::test]
 async fn app_server_shutdown_runs_session_end_for_all_loaded_threads() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    let log_path = write_config_and_hook(codex_home.path(), &server.uri())?;
+    let log_path = write_config_and_hook(codex_home.path())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(READ_TIMEOUT)
@@ -141,7 +147,7 @@ async fn start_thread(app_server: &mut TestAppServer) -> Result<String> {
     Ok(response.thread.id)
 }
 
-fn write_config_and_hook(codex_home: &Path, server_uri: &str) -> Result<std::path::PathBuf> {
+fn write_config_and_hook(codex_home: &Path) -> Result<std::path::PathBuf> {
     let log_path = codex_home.join("session-end.jsonl");
     let script_path = codex_home.join("session-end.py");
     std::fs::write(
@@ -162,10 +168,10 @@ with Path(r"{}").open("a", encoding="utf-8") as handle:
             log_path.display()
         ),
     )?;
-    MockResponsesConfig::new(server_uri)
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::CodexHooks)
-        .with_extra_config(&format!(
+        .with_additional_config(&format!(
             r#"[[hooks.SessionEnd]]
 matcher = "other"
 

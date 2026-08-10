@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -6,13 +7,14 @@ use std::sync::PoisonError;
 
 use tempfile::tempdir;
 
-/// Serializes tests that mutate process-wide CODEX_HOME.
+/// Serializes tests that mutate process-wide WHISPLY_HOME.
 ///
 /// Keep OAuth tests on this one guard instead of defining per-module helpers; otherwise
 /// concurrently running test modules can point File/Secrets storage at different homes.
 pub(super) struct TempCodexHome {
     _guard: MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
+    previous_whisply_home: Option<OsString>,
 }
 
 impl TempCodexHome {
@@ -22,13 +24,15 @@ impl TempCodexHome {
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let dir = tempdir().expect("create CODEX_HOME temp dir");
+        let dir = tempdir().expect("create WHISPLY_HOME temp dir");
+        let previous_whisply_home = std::env::var_os("WHISPLY_HOME");
         unsafe {
-            std::env::set_var("CODEX_HOME", dir.path());
+            std::env::set_var("WHISPLY_HOME", dir.path());
         }
         Self {
             _guard: guard,
             _dir: dir,
+            previous_whisply_home,
         }
     }
 
@@ -40,7 +44,11 @@ impl TempCodexHome {
 impl Drop for TempCodexHome {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var("CODEX_HOME");
+            if let Some(previous_whisply_home) = &self.previous_whisply_home {
+                std::env::set_var("WHISPLY_HOME", previous_whisply_home);
+            } else {
+                std::env::remove_var("WHISPLY_HOME");
+            }
         }
     }
 }

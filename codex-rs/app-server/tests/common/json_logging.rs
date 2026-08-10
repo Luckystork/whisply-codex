@@ -18,12 +18,17 @@ pub(crate) struct JsonLogCapture {
 }
 
 impl JsonLogCapture {
-    pub(crate) fn record(&self, line: String) {
+    /// Redacts an MCP child stderr line before retaining it for assertions or
+    /// forwarding it to the test harness. Child stderr is untrusted diagnostic
+    /// input and can contain credentials or private request material.
+    pub(crate) fn record_mcp_child_stderr(&self, line: &str) -> String {
+        let redacted = redact_mcp_child_stderr(line);
         self.lines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(line);
+            .push(redacted.clone());
         self.updated.notify_one();
+        redacted
     }
 
     pub(crate) async fn wait_for_event(&self, event_name: &str) -> Result<Value> {
@@ -75,6 +80,68 @@ impl JsonLogCapture {
     }
 }
 
+const REDACTED_MCP_STDERR_VALUE: &str = "[redacted]";
+
+fn redact_mcp_child_stderr(line: &str) -> String {
+    codex_secrets::redact_mcp_stderr(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_child_stderr_redacts_structured_credentials_and_payloads() {
+        let line = r#"{
+            "level":"WARN",
+            "fields":{
+                "message":"MCP child exited unexpectedly",
+                "headers":{"Authorization":"Bearer unit-test-bearer-token-0123456789","x-trace":"kept"},
+                "callback_url":"whisply://auth-callback?code=unit-test-code&state=unit-test-state",
+                "payload":{"email":"private@example.test"},
+                "environment":{"WHISPLY_PROXY_TOKEN":"unit-test-proxy-token","RUST_LOG":"warn"}
+            },
+            "target":"mcp.child"
+        }"#;
+
+        let redacted = redact_mcp_child_stderr(line);
+        for secret in [
+            "unit-test-bearer-token-0123456789",
+            "unit-test-code",
+            "unit-test-state",
+            "private@example.test",
+            "unit-test-proxy-token",
+        ] {
+            assert!(!redacted.contains(secret), "leaked {secret}: {redacted}");
+        }
+        assert!(redacted.contains("MCP child exited unexpectedly"));
+        assert!(redacted.contains("x-trace"));
+        assert!(redacted.contains("RUST_LOG"));
+        assert!(redacted.contains(REDACTED_MCP_STDERR_VALUE));
+        assert!(serde_json::from_str::<Value>(&redacted).is_ok());
+    }
+
+    #[test]
+    fn mcp_child_stderr_redacts_unstructured_headers_and_callback_parameters() {
+        let line = "MCP child failed before callback at https://example.test/callback?code=unit-test-code&state=unit-test-state Bearer unit-test-bearer-token-0123456789";
+
+        let redacted = redact_mcp_child_stderr(line);
+
+        assert!(
+            redacted
+                .starts_with("MCP child failed before callback at https://example.test/callback?")
+        );
+        for secret in [
+            "unit-test-code",
+            "unit-test-state",
+            "unit-test-bearer-token-0123456789",
+        ] {
+            assert!(!redacted.contains(secret), "leaked {secret}: {redacted}");
+        }
+        assert!(redacted.contains(REDACTED_MCP_STDERR_VALUE));
+    }
+}
+
 pub fn app_server_json_shutdown_event(
     binary: &str,
     args: &[&str],
@@ -86,7 +153,11 @@ pub fn app_server_json_shutdown_event(
     )?;
     let output = Command::new(codex_utils_cargo_bin::cargo_bin(binary)?)
         .stdin(Stdio::null())
-        .env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home)
+        .env_remove("CODEX_HOME")
+        // Do not inherit a debug-only test override that would replace the
+        // temporary config written above.
+        .env_remove("CODEX_APP_SERVER_TEST_USER_CONFIG_FILE")
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.join("managed_config.toml"),
@@ -134,4 +205,29 @@ fn json_log_events<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Vec<V
             Ok(event)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_child_stderr_is_redacted_before_capture() {
+        let capture = JsonLogCapture::default();
+        let raw = r#"{"level":"WARN","fields":{"message":"MCP child failed","authorization":"Bearer unit-test-bearer-token-0123456789","payload":{"email":"private@example.test"}},"target":"mcp.child"}"#;
+
+        let emitted = capture.record_mcp_child_stderr(raw);
+        let captured = capture
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .join("\n");
+
+        for secret in ["unit-test-bearer-token-0123456789", "private@example.test"] {
+            assert!(!emitted.contains(secret), "emitted {secret}: {emitted}");
+            assert!(!captured.contains(secret), "captured {secret}: {captured}");
+        }
+        assert_eq!(emitted, captured);
+        assert!(captured.contains(REDACTED_MCP_STDERR_VALUE));
+    }
 }

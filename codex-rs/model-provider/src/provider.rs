@@ -18,6 +18,7 @@ use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
 use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_whisply::ManagedGatewayClient;
 
 use crate::amazon_bedrock::AmazonBedrockModelProvider;
 use crate::auth::ProviderAuthScope;
@@ -26,6 +27,8 @@ use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
 use crate::models_endpoint::OpenAiModelsEndpoint;
+use crate::whisply::WhisplyModelProvider;
+use crate::whisply::is_whisply_provider;
 
 /// Remote context-compaction protocols supported by a model provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +215,19 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         })
     }
 
+    /// Refreshes provider-owned credentials after one gateway 401. This is
+    /// separate from user-configured API-key and ChatGPT refresh paths: managed
+    /// providers can replace an inherited descriptor generation without ever
+    /// exposing a bearer literal to config, argv, or the process environment.
+    ///
+    /// Returning `true` authorizes exactly one retry by the caller. Returning
+    /// `false` leaves normal auth recovery behavior unchanged.
+    fn refresh_after_unauthorized(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+
     /// Creates the model manager implementation appropriate for this provider.
     fn models_manager(
         &self,
@@ -267,7 +283,32 @@ pub fn create_model_provider(
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> SharedModelProvider {
-    if provider_info.is_amazon_bedrock() {
+    if is_whisply_provider(&provider_info) {
+        Arc::new(WhisplyModelProvider::new(provider_info))
+    } else if provider_info.is_amazon_bedrock() {
+        Arc::new(AmazonBedrockModelProvider::new(provider_info, auth_manager))
+    } else {
+        Arc::new(ConfiguredModelProvider::new(provider_info, auth_manager))
+    }
+}
+
+/// Creates a provider while allowing an embedded host to supply its own
+/// already-validated managed gateway client. A missing override preserves the
+/// production launch-descriptor path.
+pub fn create_model_provider_with_managed_gateway(
+    provider_info: ModelProviderInfo,
+    auth_manager: Option<Arc<AuthManager>>,
+    managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
+) -> SharedModelProvider {
+    if is_whisply_provider(&provider_info) {
+        match managed_gateway_client {
+            Some(gateway) => Arc::new(WhisplyModelProvider::with_managed_gateway(
+                provider_info,
+                gateway,
+            )),
+            None => Arc::new(WhisplyModelProvider::new(provider_info)),
+        }
+    } else if provider_info.is_amazon_bedrock() {
         Arc::new(AmazonBedrockModelProvider::new(provider_info, auth_manager))
     } else {
         Arc::new(ConfiguredModelProvider::new(provider_info, auth_manager))

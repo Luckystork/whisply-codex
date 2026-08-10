@@ -3,23 +3,25 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 pub struct AppCommand {
-    /// Workspace path to open in the Desktop app.
+    /// Workspace path to open after launching the managed Whisply app.
     #[arg(value_name = "PATH", default_value = ".")]
     pub path: PathBuf,
 
-    /// Override the app installer download URL (advanced).
-    #[arg(long = "download-url")]
+    /// Former installer override retained only to return a safe migration error.
+    #[arg(long = "download-url", hide = true)]
     pub download_url_override: Option<String>,
 }
 
 pub async fn run_app(cmd: AppCommand) -> anyhow::Result<()> {
     let workspace = std::fs::canonicalize(&cmd.path).unwrap_or(cmd.path);
-    #[cfg(target_os = "macos")]
-    {
-        crate::desktop_app::run_app_open_or_install(workspace, cmd.download_url_override).await
+    if cmd.download_url_override.is_some() {
+        anyhow::bail!(
+            "Whisply does not download or install app bundles from the runtime. Update or install Whisply through its managed distribution."
+        );
     }
-    #[cfg(target_os = "windows")]
-    {
-        crate::desktop_app::run_app_open_or_install(workspace, cmd.download_url_override).await
-    }
+    println!(
+        "Open the installed Whisply app, then choose this workspace: {}",
+        workspace.display()
+    );
+    Ok(())
 }

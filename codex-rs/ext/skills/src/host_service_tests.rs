@@ -26,6 +26,13 @@ fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &s
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
 }
 
+fn write_cross_tool_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
+    let skill_dir = codex_home.path().join(".agents/skills").join(dir);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+    fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
 fn write_plugin_skill(
     codex_home: &TempDir,
     marketplace: &str,
@@ -541,11 +548,17 @@ async fn skills_for_config_disables_plugin_skills_by_name() {
 async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
-    let repo_dot_codex = cwd.path().join(".codex");
-    fs::create_dir_all(&repo_dot_codex).expect("create repo config dir");
+    let repo_whisply = cwd.path().join(".whisply");
+    fs::create_dir_all(&repo_whisply).expect("create repo config dir");
 
     write_user_skill(&codex_home, "user", "user-skill", "from local user root");
-    let repo_skill_dir = repo_dot_codex.join("skills/repo");
+    write_cross_tool_skill(
+        &codex_home,
+        "cross-tool",
+        "cross-tool-skill",
+        "from the Claude/Cursor-compatible user root",
+    );
+    let repo_skill_dir = repo_whisply.join("skills/repo");
     fs::create_dir_all(&repo_skill_dir).expect("create repo skill dir");
     fs::write(
         repo_skill_dir.join("SKILL.md"),
@@ -558,7 +571,7 @@ async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
             user_config_layer(&codex_home, ""),
             ConfigLayerEntry::new(
                 ConfigLayerSource::Project {
-                    dot_codex_folder: repo_dot_codex.abs(),
+                    dot_codex_folder: repo_whisply.abs(),
                 },
                 toml::Value::Table(toml::map::Map::new()),
             ),
@@ -598,6 +611,7 @@ async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
         .map(|skill| skill.name.as_str())
         .collect::<HashSet<_>>();
     assert!(loaded_names.contains("user-skill"));
+    assert!(loaded_names.contains("cross-tool-skill"));
     assert!(loaded_names.contains("repo-skill"));
     let other_file_system: Arc<dyn codex_exec_server::ExecutorFileSystem> =
         Arc::new(codex_exec_server::LocalFileSystem::unsandboxed());
@@ -611,11 +625,17 @@ async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
 async fn skills_for_cwd_without_fs_skips_repo_roots() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
-    let repo_dot_codex = cwd.path().join(".codex");
-    fs::create_dir_all(&repo_dot_codex).expect("create repo config dir");
+    let repo_whisply = cwd.path().join(".whisply");
+    fs::create_dir_all(&repo_whisply).expect("create repo config dir");
 
     write_user_skill(&codex_home, "user", "user-skill", "from local user root");
-    let repo_skill_dir = repo_dot_codex.join("skills/repo");
+    write_cross_tool_skill(
+        &codex_home,
+        "cross-tool",
+        "cross-tool-skill",
+        "from the Claude/Cursor-compatible user root",
+    );
+    let repo_skill_dir = repo_whisply.join("skills/repo");
     fs::create_dir_all(&repo_skill_dir).expect("create repo skill dir");
     fs::write(
         repo_skill_dir.join("SKILL.md"),
@@ -628,7 +648,7 @@ async fn skills_for_cwd_without_fs_skips_repo_roots() {
             user_config_layer(&codex_home, ""),
             ConfigLayerEntry::new(
                 ConfigLayerSource::Project {
-                    dot_codex_folder: repo_dot_codex.abs(),
+                    dot_codex_folder: repo_whisply.abs(),
                 },
                 toml::Value::Table(toml::map::Map::new()),
             ),
@@ -664,6 +684,7 @@ async fn skills_for_cwd_without_fs_skips_repo_roots() {
         .map(|skill| skill.name.as_str())
         .collect::<HashSet<_>>();
     assert!(loaded_names.contains("user-skill"));
+    assert!(loaded_names.contains("cross-tool-skill"));
     assert!(!loaded_names.contains("repo-skill"));
 }
 

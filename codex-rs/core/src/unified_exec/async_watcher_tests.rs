@@ -7,7 +7,6 @@ use super::split_valid_utf8_prefix_with_max;
 use super::start_streaming_output;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::unified_exec::UnifiedExecContext;
-use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use crate::unified_exec::process::NoopSpawnLifecycle;
 use crate::unified_exec::process::UnifiedExecProcess;
 use codex_protocol::items::CommandExecutionStatus;
@@ -24,7 +23,6 @@ struct StreamingOutputHarness {
     process: Arc<UnifiedExecProcess>,
     stdout_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     exit_tx: tokio::sync::oneshot::Sender<i32>,
-    transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
     context: UnifiedExecContext,
     rx_event: async_channel::Receiver<Event>,
 }
@@ -50,14 +48,12 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
     );
     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
     let context = UnifiedExecContext::new(session, turn, "streaming-output-test".to_string());
-    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
-    start_streaming_output(&process, &context, Arc::clone(&transcript));
+    start_streaming_output(&process, &context);
 
     Ok(StreamingOutputHarness {
         process,
         stdout_tx,
         exit_tx,
-        transcript,
         context,
         rx_event,
     })
@@ -69,7 +65,6 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
         process,
         stdout_tx,
         exit_tx,
-        transcript,
         ..
     } = streaming_output_harness().await?;
     let output_drained = process.output_drained_notify();
@@ -95,7 +90,11 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
         "output close should finish before the grace fallback: {elapsed:?}"
     );
     assert_eq!(
-        transcript.lock().await.to_bytes_with_omission_marker(),
+        process
+            .terminal_output_buffer()
+            .lock()
+            .await
+            .to_bytes_with_omission_marker(),
         b"LATE-OUTPUT-MARKER"
     );
 
@@ -136,7 +135,6 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         process,
         stdout_tx,
         exit_tx,
-        transcript,
         context,
         rx_event,
     } = streaming_output_harness().await?;
@@ -164,7 +162,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         cwd,
         /*process_id*/ 123,
         /*plugin_attribution*/ None,
-        transcript,
+        process.terminal_output_buffer(),
         Instant::now(),
         Some(network_denial_monitor),
     );
@@ -198,6 +196,74 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         elapsed >= Duration::from_millis(10) && elapsed < TRAILING_OUTPUT_GRACE,
         "completion should wait for denial without falling back to the output grace: {elapsed:?}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_watcher_uses_canonical_output_when_live_deltas_lag() -> anyhow::Result<()> {
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        context,
+        rx_event,
+    } = streaming_output_harness().await?;
+
+    {
+        let terminal_output = process.terminal_output_buffer();
+        let mut output = terminal_output.lock().await;
+        output.push_chunk(b"CANONICAL-HEAD\n".to_vec());
+        output.push_chunk(vec![
+            b'x';
+            crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES
+        ]);
+        output.push_chunk(b"CANONICAL-TAIL\n".to_vec());
+    }
+
+    // This channel has a fixed capacity of 64. Sending 65 chunks without an
+    // await deterministically puts the live subscriber behind before it can
+    // poll, while the canonical output remains producer-owned.
+    let live_output = process.output_sender_for_test();
+    for index in 0..65 {
+        live_output
+            .send(format!("LIVE-{index}\n").into_bytes())
+            .expect("live output receiver should be subscribed");
+    }
+
+    #[allow(deprecated)]
+    let cwd = context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&context.session),
+        Arc::clone(&context.turn),
+        context.call_id,
+        vec!["proof".to_string()],
+        cwd,
+        /*process_id*/ 123,
+        /*plugin_attribution*/ None,
+        process.terminal_output_buffer(),
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+    );
+
+    exit_tx.send(0).expect("send exit");
+    drop(stdout_tx);
+
+    let completed = loop {
+        let event = rx_event.recv().await.expect("command event");
+        if let EventMsg::ItemCompleted(completed) = event.msg {
+            break completed;
+        }
+    };
+    let TurnItem::CommandExecution(item) = completed.item else {
+        panic!("expected CommandExecution");
+    };
+    let output = item.aggregated_output.expect("terminal output");
+    assert!(output.contains("CANONICAL-HEAD\n"));
+    assert!(output.contains("CANONICAL-TAIL\n"));
+    assert!(output.contains("bytes omitted"));
+    assert!(!output.contains("LIVE-"));
 
     Ok(())
 }

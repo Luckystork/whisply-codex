@@ -38,6 +38,17 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
 
+    /// Returns whether this endpoint is the only authoritative source for its
+    /// catalog and must be contacted when no current catalog is available.
+    ///
+    /// Most OpenAI-compatible providers use command or account auth to make
+    /// this decision. First-party brokered providers can instead implement
+    /// this without pretending that their broker token is user-configured
+    /// command auth.
+    fn requires_authoritative_catalog_refresh(&self) -> bool {
+        false
+    }
+
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool>;
 
@@ -221,6 +232,10 @@ pub struct OpenAiModelsManager {
     cache: Option<Arc<dyn ModelsCache>>,
     endpoint_client: SharedModelsEndpointClient,
     auth_manager: Option<Arc<AuthManager>>,
+    /// A first-party owner may supply a signed catalog that is authoritative
+    /// for this manager. In that mode it must never be merged with the
+    /// upstream bundled catalog or persisted through this generic cache.
+    authoritative_remote_catalog: bool,
 }
 
 /// Static model manager backed by an authoritative in-process catalog.
@@ -256,6 +271,20 @@ impl OpenAiModelsManager {
         Self::new_with_optional_cache(/*cache*/ None, endpoint_client, auth_manager)
     }
 
+    /// Constructs an empty manager whose endpoint supplies the complete signed
+    /// source of truth. A missing or invalid catalog intentionally yields no
+    /// models; bundled upstream presets are never a fallback in this mode.
+    pub fn new_authoritative_without_cache(endpoint_client: Arc<dyn ModelsEndpointClient>) -> Self {
+        Self {
+            remote_models: RwLock::new(Vec::new()),
+            etag: RwLock::new(None),
+            cache: None,
+            endpoint_client,
+            auth_manager: None,
+            authoritative_remote_catalog: true,
+        }
+    }
+
     /// Constructs an OpenAI-compatible model manager with a caller-provided cache.
     ///
     /// The cache is consulted by cache-aware refresh strategies. Cache misses and backend errors
@@ -280,6 +309,7 @@ impl OpenAiModelsManager {
             cache,
             endpoint_client,
             auth_manager,
+            authoritative_remote_catalog: false,
         }
     }
 }
@@ -435,7 +465,11 @@ impl OpenAiModelsManager {
     }
 
     async fn should_refresh_models(&self) -> bool {
-        self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+        self.endpoint_client.uses_codex_backend().await
+            || self.endpoint_client.has_command_auth()
+            || self
+                .endpoint_client
+                .requires_authoritative_catalog_refresh()
     }
 
     async fn get_etag(&self) -> Option<String> {
@@ -444,6 +478,10 @@ impl OpenAiModelsManager {
 
     /// Replace the cached remote models and rebuild the derived presets list.
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
+        if self.authoritative_remote_catalog {
+            *self.remote_models.write().await = models;
+            return;
+        }
         // Use the remote models list as the source of truth if it contains at least one
         // non-hidden model and the user is using ChatGPT auth.
         let should_use_remote_models_only = !models.is_empty()

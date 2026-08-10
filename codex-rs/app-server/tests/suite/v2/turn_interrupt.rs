@@ -1,7 +1,10 @@
+#![cfg(target_os = "macos")]
+
 #![cfg(unix)]
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
@@ -61,13 +64,15 @@ async fn turn_interrupt_aborts_running_turn() -> Result<()> {
             "call_sleep",
         )?])
         .await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("workspace-write")
-        .with_root_config(r#"approvals_reviewer = "user""#)
+        .with_additional_config(r#"approvals_reviewer = "user""#)
         .write(&codex_home)?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(&codex_home)
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 
@@ -133,13 +138,15 @@ async fn turn_interrupt_rejects_completed_turn() -> Result<()> {
         create_final_assistant_message_sse_response("done")?,
     ])
     .await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("workspace-write")
-        .with_root_config(r#"approvals_reviewer = "user""#)
+        .with_additional_config(r#"approvals_reviewer = "user""#)
         .write(&codex_home)?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(&codex_home)
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 
@@ -225,13 +232,15 @@ async fn turn_interrupt_resolves_pending_command_approval_request() -> Result<()
         "call_sleep_approval",
     )?])
     .await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
-        .with_root_config(r#"approvals_reviewer = "user""#)
+        .with_additional_config(r#"approvals_reviewer = "user""#)
         .write(&codex_home)?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(&codex_home)
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 

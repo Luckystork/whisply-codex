@@ -34,7 +34,10 @@ use codex_core_skills::loader::load_skill_root_snapshot;
 use codex_skills::install_system_skills;
 
 use crate::HostSkillsSnapshot;
+#[cfg(not(test))]
 use crate::host_roots::resolve_skill_roots;
+#[cfg(test)]
+use crate::host_roots::resolve_skill_roots_with_home_dir;
 use crate::loader::HostSkillRoot;
 use crate::loader::load_host_skill_root;
 
@@ -78,6 +81,8 @@ impl HostSkillsLoadInput {
 /// Source-specific model exposure remains the responsibility of the skills extension.
 pub struct HostSkillsService {
     codex_home: AbsolutePathBuf,
+    #[cfg(test)]
+    test_home_dir: AbsolutePathBuf,
     restriction_product: Option<Product>,
     extra_roots: RwLock<Vec<AbsolutePathBuf>>,
     cache_by_cwd: RwLock<HashMap<AbsolutePathBuf, HostSkillsSnapshot>>,
@@ -96,8 +101,12 @@ impl HostSkillsService {
         bundled_skills_enabled: bool,
         restriction_product: Option<Product>,
     ) -> Self {
+        #[cfg(test)]
+        let test_home_dir = codex_home.clone();
         let service = Self {
             codex_home,
+            #[cfg(test)]
+            test_home_dir,
             restriction_product,
             extra_roots: RwLock::new(Vec::new()),
             cache_by_cwd: RwLock::new(HashMap::new()),
@@ -121,6 +130,48 @@ impl HostSkillsService {
             *roots = extra_roots;
         }
         self.clear_cache();
+    }
+
+    /// Replaces runtime roots supplied by an external client with account-owned
+    /// user skill roots only.
+    ///
+    /// Project roots are resolved for each request CWD after the project-trust
+    /// check. They must never be installed as process-global extra roots.
+    pub fn set_account_extra_roots(
+        &self,
+        extra_roots: Vec<AbsolutePathBuf>,
+    ) -> Vec<AbsolutePathBuf> {
+        let extra_roots = extra_roots
+            .into_iter()
+            .filter_map(|root| self.canonical_account_skill_descendant(&root))
+            .collect::<Vec<_>>();
+        self.set_extra_roots(extra_roots.clone());
+        extra_roots
+    }
+
+    fn canonical_account_skill_descendant(
+        &self,
+        root: &AbsolutePathBuf,
+    ) -> Option<AbsolutePathBuf> {
+        let canonical_home = self.codex_home.canonicalize().ok()?;
+        let account_skills_root = self.codex_home.join("skills");
+        let canonical_account_skills_root = match account_skills_root.canonicalize() {
+            Ok(root) => root,
+            Err(_) if root == &account_skills_root => return Some(root.clone()),
+            Err(_) => return None,
+        };
+        if !canonical_account_skills_root
+            .as_path()
+            .starts_with(canonical_home.as_path())
+        {
+            return None;
+        }
+
+        root.canonicalize().ok().filter(|canonical_root| {
+            canonical_root
+                .as_path()
+                .starts_with(canonical_account_skills_root.as_path())
+        })
     }
 
     /// Load skills for an already-constructed [`Config`], avoiding any additional config-layer
@@ -169,14 +220,7 @@ impl HostSkillsService {
         if input.bundled_skills_enabled {
             self.ensure_system_skills_installed();
         }
-        let mut roots = resolve_skill_roots(
-            fs,
-            &input.config_layer_stack,
-            &input.cwd,
-            input.effective_skill_roots.clone(),
-            self.extra_roots(),
-        )
-        .await;
+        let mut roots = self.resolve_roots(input, fs).await;
         if !input.bundled_skills_enabled {
             roots.retain(|root| root.scope != SkillScope::System);
         }
@@ -202,14 +246,7 @@ impl HostSkillsService {
             return snapshot;
         }
 
-        let mut roots = resolve_skill_roots(
-            fs.clone(),
-            &input.config_layer_stack,
-            &input.cwd,
-            input.effective_skill_roots.clone(),
-            self.extra_roots(),
-        )
-        .await;
+        let mut roots = self.resolve_roots(input, fs.clone()).await;
         if !bundled_skills_enabled {
             roots.retain(|root| root.scope != SkillScope::System);
         }
@@ -242,6 +279,37 @@ impl HostSkillsService {
             cache.insert(input.cwd.clone(), snapshot.clone());
         }
         snapshot
+    }
+
+    async fn resolve_roots(
+        &self,
+        input: &HostSkillsLoadInput,
+        fs: Option<Arc<dyn ExecutorFileSystem>>,
+    ) -> Vec<SkillRoot> {
+        #[cfg(test)]
+        {
+            return resolve_skill_roots_with_home_dir(
+                fs,
+                &input.config_layer_stack,
+                &input.cwd,
+                Some(&self.test_home_dir),
+                input.effective_skill_roots.clone(),
+                self.extra_roots(),
+            )
+            .await;
+        }
+
+        #[cfg(not(test))]
+        {
+            resolve_skill_roots(
+                fs,
+                &input.config_layer_stack,
+                &input.cwd,
+                input.effective_skill_roots.clone(),
+                self.extra_roots(),
+            )
+            .await
+        }
     }
 
     async fn snapshot_for_skill_roots(

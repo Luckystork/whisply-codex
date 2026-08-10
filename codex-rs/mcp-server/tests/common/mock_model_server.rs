@@ -1,6 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+use anyhow::ensure;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::Respond;
@@ -13,7 +14,6 @@ use wiremock::matchers::path;
 pub async fn create_mock_responses_server(responses: Vec<String>) -> MockServer {
     let server = MockServer::start().await;
 
-    let num_calls = responses.len();
     let seq_responder = SeqResponder {
         num_calls: AtomicUsize::new(0),
         responses,
@@ -22,11 +22,31 @@ pub async fn create_mock_responses_server(responses: Vec<String>) -> MockServer 
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(seq_responder)
-        .expect(num_calls as u64)
         .mount(&server)
         .await;
 
     server
+}
+
+/// Verifies response traffic at the successful end of a test instead of during
+/// `MockServer` drop. That preserves the original child-process error when a
+/// managed gateway launch fails before it can issue the first request.
+pub async fn assert_mock_responses_request_count(
+    server: &MockServer,
+    expected: usize,
+) -> anyhow::Result<()> {
+    let actual = server
+        .received_requests()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("mock server does not retain received requests"))?
+        .into_iter()
+        .filter(|request| request.url.path() == "/v1/responses")
+        .count();
+    ensure!(
+        actual == expected,
+        "expected {expected} managed /v1/responses request(s), received {actual}"
+    );
+    Ok(())
 }
 
 struct SeqResponder {

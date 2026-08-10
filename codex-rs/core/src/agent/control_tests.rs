@@ -113,6 +113,29 @@ fn register_session_root_skips_threads_with_explicit_parent() {
     assert_eq!(control.state.agent_id_for_path(&AgentPath::root()), None);
 }
 
+#[test]
+fn cold_reload_prefers_thread_spawn_parent_over_stale_rollout_metadata() {
+    let root_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    assert_eq!(
+        super::spawn::resumed_parent_thread_id(
+            &session_source,
+            Some(child_thread_id),
+            Some(child_thread_id),
+        ),
+        Some(root_thread_id),
+        "cold reload must retain the direct spawn parent rather than adopt stale self metadata",
+    );
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,

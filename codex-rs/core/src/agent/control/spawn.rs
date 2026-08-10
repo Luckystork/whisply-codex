@@ -123,6 +123,24 @@ async fn load_agent_model_context(
     }
 }
 
+/// Resolves the structural parent of a cold-resumed agent.
+///
+/// `SessionSource::SubAgent::ThreadSpawn` is the durable direct-parent
+/// contract. Model context may contain inherited or stale session metadata,
+/// so it must not replace that structural edge during a residency reload.
+/// Older session sources did not record the parent, in which case preserve the
+/// metadata fallbacks for backwards compatibility.
+pub(super) fn resumed_parent_thread_id(
+    session_source: &SessionSource,
+    stored_parent_thread_id: Option<ThreadId>,
+    history_parent_thread_id: Option<ThreadId>,
+) -> Option<ThreadId> {
+    session_source
+        .parent_thread_id()
+        .or(stored_parent_thread_id)
+        .or(history_parent_thread_id)
+}
+
 impl AgentControl {
     /// Restore persisted V2 agent identities without reopening their runtimes.
     pub(crate) async fn restore_v2_agent_metadata(
@@ -341,9 +359,11 @@ impl AgentControl {
             .reserve_v2_residency_slot(&state, &config, Some(thread_id))
             .await?;
 
-        let parent_thread_id = initial_history
-            .get_resumed_parent_thread_id()
-            .or(stored_parent_thread_id);
+        let parent_thread_id = resumed_parent_thread_id(
+            &session_source,
+            stored_parent_thread_id,
+            initial_history.get_resumed_parent_thread_id(),
+        );
         let inherited_environments = self
             .inherited_environments_for_source(&state, Some(&session_source))
             .await;

@@ -41,6 +41,7 @@ pub(crate) enum ExecServerListenTransport {
 pub enum ExecServerListenUrlParseError {
     UnsupportedListenUrl(String),
     InvalidWebSocketListenUrl(String),
+    NonLoopbackWebSocketListenUrl(String),
 }
 
 impl std::fmt::Display for ExecServerListenUrlParseError {
@@ -53,6 +54,10 @@ impl std::fmt::Display for ExecServerListenUrlParseError {
             ExecServerListenUrlParseError::InvalidWebSocketListenUrl(listen_url) => write!(
                 f,
                 "invalid websocket --listen URL `{listen_url}`; expected `ws://IP:PORT`"
+            ),
+            ExecServerListenUrlParseError::NonLoopbackWebSocketListenUrl(listen_url) => write!(
+                f,
+                "websocket --listen URL `{listen_url}` must use a literal loopback IPv4 or IPv6 address"
             ),
         }
     }
@@ -68,12 +73,18 @@ pub(crate) fn parse_listen_url(
     }
 
     if let Some(socket_addr) = listen_url.strip_prefix("ws://") {
-        return socket_addr
+        let socket_addr = socket_addr
             .parse::<SocketAddr>()
-            .map(ExecServerListenTransport::WebSocket)
             .map_err(|_| {
                 ExecServerListenUrlParseError::InvalidWebSocketListenUrl(listen_url.to_string())
             });
+        let socket_addr = socket_addr?;
+        if !socket_addr.ip().is_loopback() {
+            return Err(ExecServerListenUrlParseError::NonLoopbackWebSocketListenUrl(
+                listen_url.to_string(),
+            ));
+        }
+        return Ok(ExecServerListenTransport::WebSocket(socket_addr));
     }
 
     Err(ExecServerListenUrlParseError::UnsupportedListenUrl(

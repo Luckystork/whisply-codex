@@ -30,11 +30,8 @@ struct McpExtensionEventSink {
 
 impl ExtensionEventSink for McpExtensionEventSink {
     fn emit(&self, event: Event) {
-        tracing::debug!(
-            event_id = %event.id,
-            msg = ?event.msg,
-            "dropping unsupported extension event"
-        );
+        let _ = event;
+        tracing::debug!("dropping unsupported extension event");
     }
 
     fn emit_warning(&self, warning: ExtensionWarning) {
@@ -44,11 +41,11 @@ impl ExtensionEventSink for McpExtensionEventSink {
             message,
         } = warning;
         let Ok(thread_id) = ThreadId::from_string(&thread_id) else {
-            tracing::warn!(%thread_id, "dropping extension warning with invalid thread id");
+            tracing::warn!("dropping extension warning with invalid thread id");
             return;
         };
         let Some(turn_id) = turn_id else {
-            tracing::debug!(%thread_id, "dropping extension warning without a turn id");
+            tracing::debug!("dropping extension warning without a turn id");
             return;
         };
         let mut message = message;
@@ -75,11 +72,7 @@ impl ExtensionEventSink for McpExtensionEventSink {
                     );
                 });
         if !found_active_turn {
-            tracing::debug!(
-                %thread_id,
-                %turn_id,
-                "dropping extension warning without a matching active turn"
-            );
+            tracing::debug!("dropping extension warning without a matching active turn");
         }
     }
 }

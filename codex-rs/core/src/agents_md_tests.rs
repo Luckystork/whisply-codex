@@ -10,6 +10,7 @@ use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
@@ -1383,8 +1384,14 @@ async fn project_layers_do_not_override_project_root_markers() {
     };
     config.config_layer_stack = ConfigLayerStack::new(
         vec![
-            project_layer(root.path().join(".codex").abs(), ".ignored-root-marker"),
-            project_layer(config.cwd.join(".codex"), ".ignored-nested-marker"),
+            project_layer(
+                root.path().join(PROJECT_CONFIG_DIRECTORY).abs(),
+                ".ignored-root-marker",
+            ),
+            project_layer(
+                config.cwd.join(PROJECT_CONFIG_DIRECTORY),
+                ".ignored-nested-marker",
+            ),
         ],
         ConfigRequirements::default(),
         ConfigRequirementsToml::default(),

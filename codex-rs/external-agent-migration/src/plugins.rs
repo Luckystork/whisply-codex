@@ -7,7 +7,6 @@ use codex_core_plugins::marketplace::MarketplaceError;
 use codex_core_plugins::marketplace::find_marketplace_manifest_path;
 use codex_core_plugins::marketplace_add::MarketplaceAddRequest;
 use codex_core_plugins::marketplace_add::add_marketplace;
-use codex_core_plugins::marketplace_add::is_local_marketplace_source;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
@@ -38,46 +37,6 @@ impl ExternalAgentConfigService {
             source_root,
             &source_settings,
         )
-    }
-
-    pub(super) fn partition_plugin_migration_details(
-        &self,
-        cwd: Option<&Path>,
-        details: MigrationDetails,
-    ) -> io::Result<(Option<MigrationDetails>, Option<MigrationDetails>)> {
-        let import_sources = self.marketplace_import_sources(cwd)?;
-
-        let mut local_plugins = Vec::new();
-        let mut remote_plugins = Vec::new();
-        for plugin_group in details.plugins {
-            let is_local = import_sources
-                .get(&plugin_group.marketplace_name)
-                .and_then(|import_source| {
-                    is_local_marketplace_source(
-                        &import_source.source,
-                        import_source.ref_name.clone(),
-                    )
-                    .ok()
-                })
-                .unwrap_or(false);
-
-            if is_local {
-                local_plugins.push(plugin_group);
-            } else {
-                remote_plugins.push(plugin_group);
-            }
-        }
-
-        let local_details = (!local_plugins.is_empty()).then_some(MigrationDetails {
-            plugins: local_plugins,
-            ..Default::default()
-        });
-        let remote_details = (!remote_plugins.is_empty()).then_some(MigrationDetails {
-            plugins: remote_plugins,
-            ..Default::default()
-        });
-
-        Ok((local_details, remote_details))
     }
 
     pub async fn import_plugins(
@@ -217,6 +176,7 @@ impl ExternalAgentConfigService {
                 }
             };
             for plugin_name in plugin_names {
+                let plugin_id = format!("{plugin_name}@{marketplace_name}");
                 match plugins_manager
                     .install_plugin(
                         &install_config.config_layer_stack,
@@ -227,11 +187,8 @@ impl ExternalAgentConfigService {
                     )
                     .await
                 {
-                    Ok(_) => outcome
-                        .succeeded_plugin_ids
-                        .push(format!("{plugin_name}@{marketplace_name}")),
+                    Ok(_) => outcome.succeeded_plugin_ids.push(plugin_id),
                     Err(err) => {
-                        let plugin_id = format!("{plugin_name}@{marketplace_name}");
                         outcome.failed_plugin_ids.push(plugin_id.clone());
                         let sub_error_type = err.sub_error_type();
                         let mut raw_error = plugin_import_raw_error(

@@ -75,6 +75,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_whisply::ManagedGatewayClient;
 use codex_rollout::StateDbHandle;
 use codex_state::log_db::LogDbLayer;
 use tokio::sync::Mutex;
@@ -206,6 +207,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) config: Arc<Config>,
     pub(crate) config_manager: ConfigManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
+    pub(crate) managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     pub(crate) feedback: CodexFeedback,
     pub(crate) log_db: Option<LogDbLayer>,
     pub(crate) state_db: Option<StateDbHandle>,
@@ -230,6 +232,7 @@ impl MessageProcessor {
             config,
             config_manager,
             environment_manager,
+            managed_gateway_client,
             feedback,
             log_db,
             state_db,
@@ -261,7 +264,11 @@ impl MessageProcessor {
             let manager = ThreadManager::new(
                 config.as_ref(),
                 auth_manager.clone(),
-                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
+                codex_core::build_models_manager_with_managed_gateway(
+                    config.as_ref(),
+                    auth_manager.clone(),
+                    managed_gateway_client.clone(),
+                ),
                 codex_core::CodexAppsToolsCache::default(),
                 session_source,
                 environment_manager,
@@ -279,8 +286,6 @@ impl MessageProcessor {
                         goal_service: Arc::clone(&goal_service),
                         environment_manager: Arc::clone(&environment_manager_for_extensions),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
-                        git_attribution_base_url: config.chatgpt_base_url.clone(),
-                        http_client_factory: config.http_client_factory(),
                         thread_store: Arc::clone(&thread_store),
                     },
                 ),
@@ -300,8 +305,12 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
             );
-            match code_mode_session_provider {
+            let manager = match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
+                None => manager,
+            };
+            match managed_gateway_client.clone() {
+                Some(gateway) => manager.with_managed_gateway_client(gateway),
                 None => manager,
             }
         });
@@ -311,6 +320,9 @@ impl MessageProcessor {
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
+        // BrokerOnly must never let persisted direct auth activate remote plugin
+        // catalogs, installed-plugin refreshes, or bundle synchronization.
+        thread_manager.plugins_manager().set_auth_mode(None);
         let skills_watcher = SkillsWatcher::new(
             thread_manager.skills_service(),
             &config.codex_home,
@@ -357,11 +369,9 @@ impl MessageProcessor {
         let catalog_processor = CatalogRequestProcessor::new(
             outgoing.clone(),
             Arc::clone(&skills_watcher),
-            auth_manager.clone(),
             Arc::clone(&thread_manager),
             Arc::clone(&config),
             config_manager.clone(),
-            Arc::clone(&workspace_settings_cache),
         );
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
@@ -407,10 +417,10 @@ impl MessageProcessor {
             outgoing.clone(),
             analytics_events_client.clone(),
             config_manager.clone(),
-            workspace_settings_cache,
             on_effective_plugins_changed,
         );
-        let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
+        let _ = remote_control_handle;
+        let remote_control_processor = RemoteControlRequestProcessor;
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -453,16 +463,10 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
         );
         if matches!(plugin_startup_tasks, crate::PluginStartupTasks::Start) {
-            // Keep plugin startup warmups aligned at app-server startup.
-            let on_effective_plugins_changed =
-                plugin_processor.effective_plugins_changed_callback();
-            thread_manager
-                .plugins_manager()
-                .maybe_start_plugin_startup_tasks_for_config(
-                    &config.plugins_config_input(),
-                    auth_manager,
-                    Some(on_effective_plugins_changed),
-                );
+            // Do not schedule the legacy startup tasks here: they fetch remote
+            // catalogs, bundles, featured plugins, and the curated Git/HTTP
+            // repository. BrokerOnly consumes only already-local plugin state.
+            tracing::debug!("skipping direct plugin startup tasks in BrokerOnly runtime");
         }
         let external_agent_config_processor =
             ExternalAgentConfigRequestProcessor::new(ExternalAgentConfigRequestProcessorArgs {

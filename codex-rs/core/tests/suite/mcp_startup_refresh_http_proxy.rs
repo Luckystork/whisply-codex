@@ -247,6 +247,7 @@ async fn skill_mcp_dependency_oauth_uses_configured_http_client() -> Result<()> 
 
     let responses_server = responses::start_mock_server().await;
     let mut builder = test_codex()
+        .with_trusted_workspace()
         .with_config(|config| {
             config
                 .features

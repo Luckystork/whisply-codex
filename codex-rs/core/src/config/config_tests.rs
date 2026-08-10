@@ -10,6 +10,7 @@ use codex_config::McpServerCommandMatcher;
 use codex_config::McpServerIdentity;
 use codex_config::McpServerRequirement;
 use codex_config::McpServerValueMatcher;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
@@ -77,7 +78,6 @@ use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
 use codex_network_proxy::NetworkMode;
-use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::ActivePermissionProfile;
@@ -873,6 +873,136 @@ async fn load_current_time_reminder_config(config_toml: &str) -> std::io::Result
 }
 
 #[test]
+fn whisply_provider_authority_allows_only_managed_and_explicit_local_routes() {
+    for provider in [
+        WHISPLY_PROVIDER_ID,
+        LMSTUDIO_OSS_PROVIDER_ID,
+        OLLAMA_OSS_PROVIDER_ID,
+    ] {
+        let cfg = ConfigToml {
+            model_provider: Some(provider.to_string()),
+            ..Default::default()
+        };
+        assert!(validate_whisply_provider_authority(&cfg, None).is_ok());
+    }
+
+    for provider in ["openai", "amazon-bedrock", "user-remote"] {
+        let cfg = ConfigToml {
+            model_provider: Some(provider.to_string()),
+            ..Default::default()
+        };
+        let error = validate_whisply_provider_authority(&cfg, None)
+            .expect_err("hosted provider override must be rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("managed gateway"));
+    }
+}
+
+#[test]
+fn whisply_provider_authority_rejects_remote_base_urls_and_provider_maps() {
+    let remote_base_url = ConfigToml {
+        openai_base_url: Some("https://attacker.invalid/v1".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        validate_whisply_provider_authority(&remote_base_url, None)
+            .expect_err("OpenAI base URL must be rejected")
+            .to_string()
+            .contains("base URLs")
+    );
+
+    let chatgpt_base_url = ConfigToml {
+        chatgpt_base_url: Some("https://attacker.invalid/backend-api".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        validate_whisply_provider_authority(&chatgpt_base_url, None)
+            .expect_err("ChatGPT base URL must be rejected")
+            .to_string()
+            .contains("base URLs")
+    );
+
+    let provider_map = ConfigToml {
+        model_providers: HashMap::from([("custom".to_string(), ModelProviderInfo::default())]),
+        ..Default::default()
+    };
+    assert!(
+        validate_whisply_provider_authority(&provider_map, None)
+            .expect_err("custom provider map must be rejected")
+            .to_string()
+            .contains("provider credentials")
+    );
+}
+
+#[test]
+fn whisply_provider_authority_rejects_realtime_endpoint_overrides() {
+    for cfg in [
+        ConfigToml {
+            experimental_realtime_ws_base_url: Some("wss://attacker.invalid/realtime".to_string()),
+            ..Default::default()
+        },
+        ConfigToml {
+            experimental_realtime_webrtc_call_base_url: Some(
+                "https://attacker.invalid/v1".to_string(),
+            ),
+            ..Default::default()
+        },
+    ] {
+        let error = validate_whisply_provider_authority(&cfg, None)
+            .expect_err("direct realtime endpoint override must be rejected");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("realtime endpoint overrides"));
+    }
+}
+
+#[test]
+fn whisply_provider_authority_rejects_otel_exporters() {
+    for otel in [
+        OtelConfigToml {
+            exporter: Some(OtelExporterKind::Statsig),
+            ..Default::default()
+        },
+        OtelConfigToml {
+            trace_exporter: Some(OtelExporterKind::Statsig),
+            ..Default::default()
+        },
+        OtelConfigToml {
+            metrics_exporter: Some(OtelExporterKind::Statsig),
+            ..Default::default()
+        },
+    ] {
+        let error = validate_whisply_provider_authority(
+            &ConfigToml {
+                otel: Some(otel),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect_err("OTEL exporters must not receive direct authority");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("OTEL exporters"));
+    }
+}
+
+#[tokio::test]
+async fn config_load_cannot_select_a_hosted_provider_outside_the_broker() {
+    let cfg = ConfigToml {
+        model_provider: Some("openai".to_string()),
+        ..Default::default()
+    };
+    let error = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("temporary Whisply home").abs(),
+    )
+    .await
+    .expect_err("OpenAI provider selection must fail closed");
+
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("managed gateway"));
+}
+
+#[test]
 fn rejects_provider_auth_with_env_key() {
     let err = toml::from_str::<ConfigToml>(
         r#"
@@ -940,7 +1070,7 @@ region = "us-west-2"
 }
 
 #[tokio::test]
-async fn load_config_applies_amazon_bedrock_aws_profile_override() {
+async fn load_config_rejects_amazon_bedrock_aws_profile_override() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
 model_provider = "amazon-bedrock"
@@ -952,35 +1082,23 @@ region = "us-west-2"
     )
     .expect("Amazon Bedrock AWS overrides should deserialize");
 
-    let config = Config::load_from_base_config_with_overrides(
+    let err = Config::load_from_base_config_with_overrides(
         cfg,
         ConfigOverrides::default(),
         tempdir().expect("tempdir").abs(),
     )
     .await
-    .expect("load config");
+    .expect_err("BrokerOnly must reject direct Amazon Bedrock provider configuration");
 
-    assert_eq!(config.model_provider_id, "amazon-bedrock");
-    assert_eq!(
-        config
-            .model_provider
-            .aws
-            .as_ref()
-            .and_then(|aws| aws.profile.as_deref()),
-        Some("codex-bedrock")
-    );
-    assert_eq!(
-        config
-            .model_provider
-            .aws
-            .as_ref()
-            .and_then(|aws| aws.region.as_deref()),
-        Some("us-west-2")
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("Whisply does not permit configured model providers")
     );
 }
 
 #[tokio::test]
-async fn load_config_applies_amazon_bedrock_transport_overrides() {
+async fn load_config_rejects_amazon_bedrock_transport_overrides() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
 model_provider = "amazon-bedrock"
@@ -995,35 +1113,19 @@ command = "print-token"
     )
     .expect("Amazon Bedrock transport overrides should deserialize");
 
-    let config = Config::load_from_base_config_with_overrides(
+    let err = Config::load_from_base_config_with_overrides(
         cfg,
         ConfigOverrides::default(),
         tempdir().expect("tempdir").abs(),
     )
     .await
-    .expect("load config");
+    .expect_err("BrokerOnly must reject direct Amazon Bedrock transport configuration");
 
-    let mut expected_provider = built_in_model_providers(/*openai_base_url*/ None)
-        .remove("amazon-bedrock")
-        .expect("Amazon Bedrock provider should be built in");
-    expected_provider.base_url = Some("https://bedrock.example.com/v1".to_string());
-    expected_provider.auth = Some(ModelProviderAuthInfo {
-        command: "print-token".to_string(),
-        args: Vec::new(),
-        timeout_ms: std::num::NonZeroU64::new(5_000).expect("timeout should be non-zero"),
-        refresh_interval_ms: 300_000,
-        cwd: std::env::current_dir()
-            .expect("current directory should be available")
-            .try_into()
-            .expect("current directory should be absolute"),
-    });
-    expected_provider
-        .http_headers
-        .get_or_insert_default()
-        .insert("X-Custom-Header".to_string(), "value".to_string());
-
-    assert_eq!(config.model_provider_id, "amazon-bedrock");
-    assert_eq!(config.model_provider, expected_provider);
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("Whisply does not permit configured model providers")
+    );
 }
 
 #[tokio::test]
@@ -1048,10 +1150,11 @@ supports_websockets = true
     .await
     .unwrap_err();
 
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
-    ));
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("Whisply does not permit configured model providers")
+    );
 }
 
 #[test]
@@ -2766,7 +2869,7 @@ async fn workspace_profile_applies_rules_to_runtime_and_profile_workspace_roots(
     let profile_root = temp_dir.path().join("shared");
     for root in [&cwd, &runtime_root, &profile_root] {
         std::fs::create_dir_all(root.join(".git"))?;
-        std::fs::create_dir_all(root.join(".codex"))?;
+        std::fs::create_dir_all(root.join(PROJECT_CONFIG_DIRECTORY))?;
     }
 
     let config = Config::load_from_base_config_with_overrides(
@@ -2791,7 +2894,10 @@ async fn workspace_profile_applies_rules_to_runtime_and_profile_workspace_roots(
                                 FilesystemPermissionToml::Scoped(BTreeMap::from([
                                     (".".to_string(), FileSystemAccessMode::Write),
                                     (".git".to_string(), FileSystemAccessMode::Read),
-                                    (".codex".to_string(), FileSystemAccessMode::Read),
+                                    (
+                                        PROJECT_CONFIG_DIRECTORY.to_string(),
+                                        FileSystemAccessMode::Read,
+                                    ),
                                 ])),
                             )]),
                         }),
@@ -2841,8 +2947,8 @@ async fn workspace_profile_applies_rules_to_runtime_and_profile_workspace_roots(
             "expected .git carveout under {root:?}, policy: {policy:?}"
         );
         assert!(
-            !policy.can_write_path_with_cwd(&root.join(".codex"), cwd.as_path()),
-            "expected .codex carveout under {root:?}, policy: {policy:?}"
+            !policy.can_write_path_with_cwd(&root.join(PROJECT_CONFIG_DIRECTORY), cwd.as_path(),),
+            "expected project config carveout under {root:?}, policy: {policy:?}"
         );
     }
     assert_eq!(
@@ -3103,7 +3209,7 @@ async fn empty_config_defaults_to_builtin_profile_for_trusted_project() -> std::
             "expected trusted project fallback to use :workspace, policy: {policy:?}"
         );
         assert!(
-            !policy.can_write_path_with_cwd(&cwd.path().join(".codex"), cwd.path()),
+            !policy.can_write_path_with_cwd(&cwd.path().join(".codex"), cwd.path(),),
             "expected :workspace metadata carveouts, policy: {policy:?}"
         );
     }
@@ -3162,7 +3268,7 @@ async fn empty_config_defaults_to_builtin_profile_for_untrusted_project() -> std
             "expected untrusted project fallback to use :workspace, policy: {policy:?}"
         );
         assert!(
-            !policy.can_write_path_with_cwd(&cwd.path().join(".codex"), cwd.path()),
+            !policy.can_write_path_with_cwd(&cwd.path().join(".codex"), cwd.path(),),
             "expected :workspace metadata carveouts, policy: {policy:?}"
         );
     }
@@ -5088,7 +5194,7 @@ async fn rebuild_preserving_session_layers_refreshes_requirements() -> std::io::
         .await?;
 
     assert!(config.psp);
-    assert!(config.http_client_factory().has_chatgpt_cookies());
+    assert!(!config.http_client_factory().has_chatgpt_cookies());
     assert_eq!(
         config.mcp_servers.get(),
         &HashMap::from([
@@ -6006,7 +6112,7 @@ trust_level = "trusted"
 "#,
         ),
     )?;
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join(CONFIG_TOML_FILE),
@@ -7469,7 +7575,7 @@ async fn for_config_writes_selected_user_config_file() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let base_config = codex_home.path().join(CONFIG_TOML_FILE);
     let selected_config = codex_home.path().join("work.config.toml");
-    tokio::fs::write(&base_config, r#"model_provider = "openai""#).await?;
+    tokio::fs::write(&base_config, r#"model_provider = "whisply""#).await?;
     tokio::fs::write(&selected_config, r#"model = "gpt-old""#).await?;
 
     let config = ConfigBuilder::without_managed_config_for_tests()
@@ -7493,7 +7599,7 @@ async fn for_config_writes_selected_user_config_file() -> anyhow::Result<()> {
     assert_eq!(selected.model_reasoning_effort, Some(ReasoningEffort::High));
     assert_eq!(
         tokio::fs::read_to_string(&base_config).await?,
-        r#"model_provider = "openai""#
+        r#"model_provider = "whisply""#
     );
 
     Ok(())
@@ -8010,7 +8116,10 @@ trust_level = "trusted"
     )
     .await?;
 
-    let standalone_agents_dir = repo_root.path().join(".codex").join("agents");
+    let standalone_agents_dir = repo_root
+        .path()
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join("agents");
     tokio::fs::create_dir_all(&standalone_agents_dir).await?;
     tokio::fs::write(
         standalone_agents_dir.join("researcher.toml"),
@@ -8181,7 +8290,10 @@ trust_level = "trusted"
     )
     .await?;
 
-    let standalone_agents_dir = repo_root.path().join(".codex").join("agents");
+    let standalone_agents_dir = repo_root
+        .path()
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join("agents");
     tokio::fs::create_dir_all(&standalone_agents_dir).await?;
     tokio::fs::write(
         standalone_agents_dir.join("researcher.toml"),
@@ -8382,7 +8494,7 @@ trust_level = "trusted"
 
     let root_agent = repo_root
         .path()
-        .join(".codex")
+        .join(PROJECT_CONFIG_DIRECTORY)
         .join("agents")
         .join("root.toml");
     std::fs::create_dir_all(
@@ -8402,7 +8514,7 @@ developer_instructions = "Research carefully"
     let nested_agent = repo_root
         .path()
         .join("packages")
-        .join(".codex")
+        .join(PROJECT_CONFIG_DIRECTORY)
         .join("agents")
         .join("review")
         .join("nested.toml");
@@ -8424,7 +8536,7 @@ developer_instructions = "Review carefully"
     let sibling_agent = repo_root
         .path()
         .join("packages")
-        .join(".codex")
+        .join(PROJECT_CONFIG_DIRECTORY)
         .join("agents")
         .join("writer.toml");
     std::fs::create_dir_all(
@@ -8541,7 +8653,10 @@ model = "gpt-4.1"
     )
     .await?;
 
-    let standalone_agents_dir = repo_root.path().join(".codex").join("agents");
+    let standalone_agents_dir = repo_root
+        .path()
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join("agents");
     tokio::fs::create_dir_all(&standalone_agents_dir).await?;
     tokio::fs::write(
         standalone_agents_dir.join("researcher.toml"),
@@ -8673,7 +8788,10 @@ model = "gpt-5.2"
     )
     .await?;
 
-    let standalone_agents_dir = repo_root.path().join(".codex").join("agents");
+    let standalone_agents_dir = repo_root
+        .path()
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join("agents");
     tokio::fs::create_dir_all(&standalone_agents_dir).await?;
     tokio::fs::write(
         standalone_agents_dir.join("researcher.toml"),
@@ -9088,13 +9206,21 @@ model_verbosity = "high"
     })
 }
 
+fn managed_test_config() -> ConfigToml {
+    ConfigToml {
+        model_provider: Some(WHISPLY_PROVIDER_ID.to_string()),
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn legacy_profile_selection_is_rejected() -> std::io::Result<()> {
-    let mut fixture = create_test_fixture()?;
-    fixture.cfg.profile = Some("gpt3".to_string());
+    let fixture = create_test_fixture()?;
+    let mut cfg = managed_test_config();
+    cfg.profile = Some("gpt3".to_string());
 
     let err = Config::load_from_base_config_with_overrides(
-        fixture.cfg.clone(),
+        cfg,
         ConfigOverrides {
             cwd: Some(fixture.cwd_path()),
             ..Default::default()
@@ -9114,11 +9240,11 @@ async fn legacy_profile_selection_is_rejected() -> std::io::Result<()> {
 }
 
 #[tokio::test]
-async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<()> {
+async fn metrics_exporter_defaults_to_none_when_missing() -> std::io::Result<()> {
     let fixture = create_test_fixture()?;
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg.clone(),
+        managed_test_config(),
         ConfigOverrides {
             cwd: Some(fixture.cwd_path()),
             ..Default::default()
@@ -9127,40 +9253,43 @@ async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<
     )
     .await?;
 
-    assert_eq!(config.otel.metrics_exporter, OtelExporterKind::Statsig);
+    assert_eq!(config.otel.metrics_exporter, OtelExporterKind::None);
     Ok(())
 }
 
 #[tokio::test]
-async fn trace_exporter_defaults_to_none_when_log_exporter_is_set() -> std::io::Result<()> {
-    let fixture = create_test_fixture()?;
-    let mut cfg = fixture.cfg.clone();
-    cfg.otel = Some(OtelConfigToml {
-        exporter: Some(OtelExporterKind::OtlpHttp {
-            endpoint: "http://localhost:14318/v1/logs".to_string(),
-            headers: HashMap::new(),
-            protocol: codex_config::types::OtelHttpProtocol::Binary,
-            tls: None,
+async fn config_load_rejects_otel_exporter_endpoints() -> std::io::Result<()> {
+    let cwd = TempDir::new()?;
+    std::fs::write(cwd.path().join(".git"), "gitdir: nowhere")?;
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        model_provider: Some(WHISPLY_PROVIDER_ID.to_string()),
+        otel: Some(OtelConfigToml {
+            exporter: Some(OtelExporterKind::OtlpHttp {
+                endpoint: "http://localhost:14318/v1/logs".to_string(),
+                headers: HashMap::new(),
+                protocol: codex_config::types::OtelHttpProtocol::Binary,
+                tls: None,
+            }),
+            metrics_exporter: Some(OtelExporterKind::None),
+            ..Default::default()
         }),
-        metrics_exporter: Some(OtelExporterKind::None),
         ..Default::default()
-    });
+    };
 
-    let config = Config::load_from_base_config_with_overrides(
+    let error = Config::load_from_base_config_with_overrides(
         cfg,
         ConfigOverrides {
-            cwd: Some(fixture.cwd_path()),
+            cwd: Some(cwd.path().to_path_buf()),
             ..Default::default()
         },
-        fixture.codex_home(),
+        codex_home.abs(),
     )
-    .await?;
+    .await
+    .expect_err("OTLP endpoints must not create direct telemetry paths");
 
-    assert!(matches!(
-        config.otel.exporter,
-        OtelExporterKind::OtlpHttp { .. }
-    ));
-    assert_eq!(config.otel.trace_exporter, OtelExporterKind::None);
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("OTEL exporters"));
     Ok(())
 }
 
@@ -9282,7 +9411,7 @@ async fn explicit_null_service_tier_override_maps_to_default_service_tier() -> s
     let fixture = create_test_fixture()?;
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg.clone(),
+        managed_test_config(),
         ConfigOverrides {
             cwd: Some(fixture.cwd_path()),
             service_tier: Some(None),
@@ -9305,7 +9434,7 @@ async fn default_service_tier_override_uses_default_request_value() -> std::io::
     let fixture = create_test_fixture()?;
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg.clone(),
+        managed_test_config(),
         ConfigOverrides {
             cwd: Some(fixture.cwd_path()),
             service_tier: Some(Some("default".to_string())),
@@ -9327,7 +9456,7 @@ async fn legacy_fast_service_tier_override_uses_priority_request_value() -> std:
     let fixture = create_test_fixture()?;
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg.clone(),
+        managed_test_config(),
         ConfigOverrides {
             cwd: Some(fixture.cwd_path()),
             service_tier: Some(Some("fast".to_string())),
@@ -9346,13 +9475,14 @@ async fn legacy_fast_service_tier_override_uses_priority_request_value() -> std:
 
 #[tokio::test]
 async fn config_toml_priority_service_tier_uses_priority_request_value() -> std::io::Result<()> {
-    let mut fixture = create_test_fixture()?;
-    fixture.cfg.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    let fixture = create_test_fixture()?;
+    let mut cfg = managed_test_config();
+    cfg.service_tier = Some(ServiceTier::Fast.request_value().to_string());
     let cwd = fixture.cwd_path();
     let codex_home = fixture.codex_home();
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg,
+        cfg,
         ConfigOverrides {
             cwd: Some(cwd),
             ..Default::default()
@@ -9370,13 +9500,14 @@ async fn config_toml_priority_service_tier_uses_priority_request_value() -> std:
 
 #[tokio::test]
 async fn config_toml_service_tier_accepts_arbitrary_string() -> std::io::Result<()> {
-    let mut fixture = create_test_fixture()?;
-    fixture.cfg.service_tier = Some("experimental-tier-id".to_string());
+    let fixture = create_test_fixture()?;
+    let mut cfg = managed_test_config();
+    cfg.service_tier = Some("experimental-tier-id".to_string());
     let cwd = fixture.cwd_path();
     let codex_home = fixture.codex_home();
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg,
+        cfg,
         ConfigOverrides {
             cwd: Some(cwd),
             ..Default::default()
@@ -9394,13 +9525,14 @@ async fn config_toml_service_tier_accepts_arbitrary_string() -> std::io::Result<
 
 #[tokio::test]
 async fn config_toml_legacy_fast_service_tier_uses_priority_request_value() -> std::io::Result<()> {
-    let mut fixture = create_test_fixture()?;
-    fixture.cfg.service_tier = Some("fast".to_string());
+    let fixture = create_test_fixture()?;
+    let mut cfg = managed_test_config();
+    cfg.service_tier = Some("fast".to_string());
     let cwd = fixture.cwd_path();
     let codex_home = fixture.codex_home();
 
     let config = Config::load_from_base_config_with_overrides(
-        fixture.cfg,
+        cfg,
         ConfigOverrides {
             cwd: Some(cwd),
             ..Default::default()
@@ -9419,7 +9551,7 @@ async fn config_toml_legacy_fast_service_tier_uses_priority_request_value() -> s
 #[tokio::test]
 async fn fast_default_opt_out_notice_config_is_respected() -> std::io::Result<()> {
     let fixture = create_test_fixture()?;
-    let mut cfg = fixture.cfg.clone();
+    let mut cfg = managed_test_config();
     cfg.notice = Some(Notice {
         fast_default_opt_out: Some(true),
         ..Default::default()
@@ -9508,7 +9640,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
 
     let config = Config::load_config_with_layer_stack(
         LOCAL_FS.as_ref(),
-        fixture.cfg.clone(),
+        managed_test_config(),
         ConfigOverrides {
             cwd: Some(fixture.cwd_path()),
             ..Default::default()
@@ -11719,7 +11851,7 @@ disabled_tools = [
         ),
     )?;
 
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join(CONFIG_TOML_FILE),
@@ -11784,7 +11916,7 @@ experimental_realtime_start_instructions = "start instructions from config"
 }
 
 #[tokio::test]
-async fn experimental_thread_config_endpoint_loads_from_config_toml() -> std::io::Result<()> {
+async fn config_load_rejects_remote_thread_config_endpoint() -> std::io::Result<()> {
     let cfg: ConfigToml = toml::from_str(
         r#"
 experimental_thread_config_endpoint = "http://127.0.0.1:8061"
@@ -11798,22 +11930,21 @@ experimental_thread_config_endpoint = "http://127.0.0.1:8061"
     );
 
     let codex_home = TempDir::new()?;
-    let config = Config::load_from_base_config_with_overrides(
+    let error = Config::load_from_base_config_with_overrides(
         cfg,
         ConfigOverrides::default(),
         codex_home.abs(),
     )
-    .await?;
+    .await
+    .expect_err("remote thread-config endpoint must not bypass BrokerOnly");
 
-    assert_eq!(
-        config.experimental_thread_config_endpoint.as_deref(),
-        Some("http://127.0.0.1:8061")
-    );
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("remote thread-config endpoints"));
     Ok(())
 }
 
 #[tokio::test]
-async fn experimental_realtime_ws_base_url_loads_from_config_toml() -> std::io::Result<()> {
+async fn config_load_rejects_experimental_realtime_endpoint_overrides() -> std::io::Result<()> {
     let cfg: ConfigToml = toml::from_str(
         r#"experimental_realtime_ws_base_url = "http://127.0.0.1:8011"
 experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:8082/v1"
@@ -11835,16 +11966,11 @@ experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:8082/v1"
         ConfigOverrides::default(),
         codex_home.abs(),
     )
-    .await?;
+    .await
+    .expect_err("Whisply must reject direct realtime endpoint overrides");
 
-    assert_eq!(
-        config.experimental_realtime_ws_base_url.as_deref(),
-        Some("http://127.0.0.1:8011")
-    );
-    assert_eq!(
-        config.experimental_realtime_webrtc_call_base_url.as_deref(),
-        Some("http://127.0.0.1:8082/v1")
-    );
+    assert_eq!(config.kind(), ErrorKind::InvalidInput);
+    assert!(config.to_string().contains("realtime endpoint overrides"));
     Ok(())
 }
 

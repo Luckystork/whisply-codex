@@ -1,8 +1,7 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
-use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::rollout_path;
 use app_test_support::to_response;
 use codex_app_server_protocol::GitInfo;
@@ -50,9 +49,8 @@ const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
 #[tokio::test]
 async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
     let state_db = init_state_db(codex_home.path()).await?;
 
     let mut thread_ids = Vec::new();
@@ -74,13 +72,13 @@ async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() 
             filename_timestamp,
             timestamp,
             preview,
-            Some("mock_provider"),
+            Some("whisply"),
             /*git_info*/ None,
         )?;
         reconcile_rollout(
             Some(&state_db),
             rollout_path(codex_home.path(), filename_timestamp, &thread_id).as_path(),
-            "mock_provider",
+            "whisply",
             /*builder*/ None,
             &[],
             /*archived_only*/ None,
@@ -285,9 +283,8 @@ async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() 
 #[tokio::test]
 async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_restarts() -> Result<()>
 {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
     let state_db = init_state_db(codex_home.path()).await?;
 
     let mut thread_ids = Vec::new();
@@ -313,13 +310,13 @@ async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_res
             filename_timestamp,
             timestamp,
             preview,
-            Some("mock_provider"),
+            Some("whisply"),
             /*git_info*/ None,
         )?;
         reconcile_rollout(
             Some(&state_db),
             rollout_path(codex_home.path(), filename_timestamp, &thread_id).as_path(),
-            "mock_provider",
+            "whisply",
             /*builder*/ None,
             &[],
             /*archived_only*/ None,
@@ -462,9 +459,8 @@ async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_res
 
 #[tokio::test]
 async fn thread_metadata_update_patches_git_branch_and_returns_updated_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -560,9 +556,8 @@ async fn thread_metadata_update_patches_git_branch_and_returns_updated_thread() 
 
 #[tokio::test]
 async fn thread_metadata_update_rejects_empty_git_info_patch() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -609,9 +604,8 @@ async fn thread_metadata_update_rejects_empty_git_info_patch() -> Result<()> {
 
 #[tokio::test]
 async fn thread_metadata_update_rejects_ephemeral_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -685,9 +679,8 @@ async fn thread_metadata_update_rejects_ephemeral_thread() -> Result<()> {
 
 #[tokio::test]
 async fn thread_metadata_update_repairs_missing_sqlite_row_for_stored_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
     let _state_db = init_state_db(codex_home.path()).await?;
 
     let preview = "Stored thread preview";
@@ -696,7 +689,7 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_stored_thread() -
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -742,9 +735,8 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_stored_thread() -
 
 #[tokio::test]
 async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
     let state_db = init_state_db(codex_home.path()).await?;
 
     let preview = "Loaded thread preview";
@@ -753,7 +745,7 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
         "2025-01-06T08-30-00",
         "2025-01-06T08:30:00Z",
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let thread_uuid = ThreadId::from_string(&thread_id)?;
@@ -761,7 +753,7 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
     reconcile_rollout(
         Some(&state_db),
         rollout_path.as_path(),
-        "mock_provider",
+        "whisply",
         /*builder*/ None,
         &[],
         /*archived_only*/ None,
@@ -826,9 +818,8 @@ async fn thread_metadata_update_repairs_loaded_thread_without_resetting_summary(
 
 #[tokio::test]
 async fn thread_metadata_update_repairs_missing_sqlite_row_for_archived_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
     let _state_db = init_state_db(codex_home.path()).await?;
 
     let preview = "Archived thread preview";
@@ -837,7 +828,7 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_archived_thread()
         "2025-01-06T08-30-00",
         "2025-01-06T08:30:00Z",
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -893,16 +884,15 @@ async fn thread_metadata_update_repairs_missing_sqlite_row_for_archived_thread()
 
 #[tokio::test]
 async fn thread_metadata_update_can_clear_stored_git_fields() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_metadata_config().write(codex_home.path())?;
 
     let thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-07T09-15-00",
         "2025-01-07T09:15:00Z",
         "Thread preview",
-        Some("mock_provider"),
+        Some("whisply"),
         Some(RolloutGitInfo {
             commit_hash: Some(GitSha::new("abc123")),
             branch: Some("feature/sidebar-pr".to_string()),
@@ -960,7 +950,7 @@ async fn thread_metadata_update_can_clear_stored_git_fields() -> Result<()> {
 async fn init_state_db(codex_home: &Path) -> Result<Arc<StateRuntime>> {
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -969,8 +959,6 @@ async fn init_state_db(codex_home: &Path) -> Result<Arc<StateRuntime>> {
     Ok(state_db)
 }
 
-fn mock_responses_config(server_uri: &str) -> MockResponsesConfig {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config("suppress_unstable_features_warning = true")
-        .enable_feature(Feature::Sqlite)
+fn managed_metadata_config() -> ManagedWhisplyConfig {
+    ManagedWhisplyConfig::new().enable_feature(Feature::Sqlite)
 }

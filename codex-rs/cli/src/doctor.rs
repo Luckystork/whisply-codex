@@ -1,4 +1,4 @@
-//! Implements the `codex doctor` diagnostic report.
+//! Implements the `whisply doctor` diagnostic report.
 //!
 //! Doctor is intentionally read-mostly: checks inspect the current installation,
 //! configuration, authentication, terminal, state paths, and bounded reachability
@@ -18,7 +18,6 @@ use std::ffi::OsStr;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -28,9 +27,6 @@ use std::time::Instant;
 
 use anyhow::Context;
 use clap::Parser;
-use codex_api::ApiError;
-use codex_api::ResponsesWebsocketClient;
-use codex_api::is_azure_responses_provider;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
@@ -43,17 +39,6 @@ use codex_install_context::CodexPackageLayout;
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
 use codex_install_context::StandalonePlatform;
-use codex_login::AuthDotJson;
-use codex_login::AuthManager;
-use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
-use codex_login::CODEX_API_KEY_ENV_VAR;
-use codex_login::CodexAuth;
-use codex_login::OPENAI_API_KEY_ENV_VAR;
-use codex_login::default_client::create_client_without_request_logging;
-use codex_login::default_client::default_headers;
-use codex_login::load_auth_dot_json;
-use codex_model_provider::create_model_provider;
-use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::AskForApproval;
 use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
@@ -61,8 +46,8 @@ use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
 use codex_tui::Cli as TuiCli;
 use codex_utils_cli::CliConfigOverrides;
-use http::HeaderMap;
-use http::HeaderValue;
+use codex_whisply::NativeBrokerClient;
+use codex_whisply::WHISPLY_RUNTIME_VERSION;
 use serde::Serialize;
 use supports_color::Stream;
 
@@ -90,9 +75,6 @@ use thread_inventory::thread_inventory_check;
 use title::terminal_title_check;
 use updates::updates_check;
 
-const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
-const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
-const WEBSOCKET_IMMEDIATE_CLOSE_GRACE: Duration = Duration::from_millis(250);
 const SLOW_CHECK_PROGRESS_THRESHOLD: Duration = Duration::from_secs(2);
 const SLOW_CHECK_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const PROXY_ENV_VARS: &[&str] = &[
@@ -143,7 +125,7 @@ const TMUX_OPTION_NAMES: &[&str] = &[
 const NARROW_TERMINAL_COLUMNS: u16 = 80;
 const NARROW_TERMINAL_ROWS: u16 = 24;
 
-/// Options for building a local Codex diagnostic report.
+/// Options for building a local Whisply diagnostic report.
 ///
 /// The command always runs the full bounded diagnostic set. Human output includes
 /// detailed diagnostics by default; --summary keeps the terminal output compact.
@@ -189,7 +171,7 @@ struct DoctorReport {
     schema_version: u32,
     generated_at: String,
     overall_status: CheckStatus,
-    codex_version: String,
+    runtime_version: String,
     checks: Vec<DoctorCheck>,
 }
 
@@ -301,7 +283,7 @@ impl DoctorCheck {
 
 /// Builds, renders, and exits according to the current doctor report.
 ///
-/// This is the CLI entry point for codex doctor. It does not repair issues;
+/// This is the CLI entry point for whisply doctor. It does not repair issues;
 /// failures are represented in the report and cause a non-zero process exit so
 /// scripts can distinguish a clean environment from one that needs attention.
 pub async fn run_doctor(
@@ -350,132 +332,88 @@ async fn build_report(
     let config_result = load_config(root_config_overrides, interactive, arg0_paths).await;
     match &config_result {
         Ok(config) => {
-            let auth_manager =
-                AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
-            let reachability_plan = provider_reachability_plan(config);
-            let (
-                config_check,
-                auth_check,
-                updates_check,
-                network_check,
-                websocket_check,
-                mcp_check,
-                sandbox_check,
-                terminal_check,
-                git_check,
-                terminal_title_check,
-                state_check,
-                thread_inventory_check,
-                background_server_check,
-                reachability_check,
-            ) = tokio::join!(
-                async { run_sync_check("config", progress.clone(), || config_check(config)) },
-                async { run_sync_check("auth", progress.clone(), || auth_check(config)) },
-                async { run_sync_check("updates", progress.clone(), || updates_check(config)) },
-                async { run_sync_check("network", progress.clone(), network_check) },
-                run_async_check(
-                    "websocket",
-                    progress.clone(),
-                    websocket_reachability_check(config, Some(auth_manager)),
-                ),
-                run_async_check("MCP", progress.clone(), mcp_check(config)),
-                async {
-                    run_sync_check("sandbox", progress.clone(), || {
-                        sandbox_check(config, arg0_paths)
-                    })
-                },
-                async {
-                    run_sync_check("terminal", progress.clone(), || {
-                        terminal_check(command.no_color)
-                    })
-                },
-                run_async_check("git", progress.clone(), git_check(config.cwd.as_path())),
-                async {
-                    run_sync_check("terminal title", progress.clone(), || {
-                        terminal_title_check(config)
-                    })
-                },
-                run_async_check("state", progress.clone(), state_check(config)),
-                run_async_check(
-                    "thread inventory",
-                    progress.clone(),
-                    thread_inventory_check(config),
-                ),
-                run_async_check(
-                    "app-server",
-                    progress.clone(),
-                    background_server_check(config)
-                ),
-                run_async_check(
-                    "provider reachability",
-                    progress.clone(),
-                    provider_reachability_check(reachability_plan),
-                ),
-            );
+            // Keep the public CLI dispatch future shallow. Doctor's bounded,
+            // read-only checks are intentionally sequential rather than
+            // embedding a large `join!` tuple in the top-level async type.
+            let config_result_check =
+                run_sync_check("config", progress.clone(), || config_check(config));
+            let managed_broker_result =
+                run_sync_check("managed broker", progress.clone(), managed_broker_check);
+            let updates_result =
+                run_sync_check("updates", progress.clone(), || updates_check(config));
+            let network_result = run_sync_check("network", progress.clone(), network_check);
+            let mcp_result = run_sync_check("MCP", progress.clone(), || mcp_check(config));
+            let sandbox_result = run_sync_check("sandbox", progress.clone(), || {
+                sandbox_check(config, arg0_paths)
+            });
+            let terminal_result = run_sync_check("terminal", progress.clone(), || {
+                terminal_check(command.no_color)
+            });
+            let git_result =
+                run_async_check("git", progress.clone(), git_check(config.cwd.as_path())).await;
+            let terminal_title_result = run_sync_check("terminal title", progress.clone(), || {
+                terminal_title_check(config)
+            });
+            let state_result =
+                run_async_check("state", progress.clone(), state_check(config)).await;
+            let thread_inventory_result = run_async_check(
+                "thread inventory",
+                progress.clone(),
+                thread_inventory_check(config),
+            )
+            .await;
+            let background_server_result = run_async_check(
+                "app-server",
+                progress.clone(),
+                background_server_check(config),
+            )
+            .await;
             checks.extend([
-                config_check,
-                auth_check,
-                updates_check,
-                network_check,
-                websocket_check,
-                mcp_check,
-                sandbox_check,
-                terminal_check,
-                git_check,
-                terminal_title_check,
-                state_check,
-                thread_inventory_check,
-                background_server_check,
-                reachability_check,
+                config_result_check,
+                managed_broker_result,
+                updates_result,
+                network_result,
+                mcp_result,
+                sandbox_result,
+                terminal_result,
+                git_result,
+                terminal_title_result,
+                state_result,
+                thread_inventory_result,
+                background_server_result,
             ]);
         }
         Err(err) => {
-            let reachability_plan = default_reachability_plan();
             let fallback_cwd = interactive
                 .cwd
                 .clone()
                 .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            let (
-                config_check,
-                network_check,
-                terminal_check,
-                git_check,
-                state_check,
-                reachability_check,
-            ) = tokio::join!(
-                async {
-                    run_sync_check("config", progress.clone(), || {
-                        DoctorCheck::new(
-                            "config.load",
-                            "config",
-                            CheckStatus::Fail,
-                            "config could not be loaded",
-                        )
-                        .detail(err.to_string())
-                        .remediation("Fix the reported config error, then rerun codex doctor.")
-                    })
-                },
-                async { run_sync_check("network", progress.clone(), network_check) },
-                async {
-                    run_sync_check("terminal", progress.clone(), || {
-                        terminal_check(command.no_color)
-                    })
-                },
-                run_async_check("git", progress.clone(), git_check(fallback_cwd.as_path())),
-                async { run_sync_check("state", progress.clone(), fallback_state_check) },
-                run_async_check(
-                    "provider reachability",
-                    progress.clone(),
-                    provider_reachability_check(reachability_plan),
-                ),
-            );
+            let config_result_check = run_sync_check("config", progress.clone(), || {
+                DoctorCheck::new(
+                    "config.load",
+                    "config",
+                    CheckStatus::Fail,
+                    "config could not be loaded",
+                )
+                .detail(err.to_string())
+                .remediation("Fix the reported config error, then rerun whisply doctor.")
+            });
+            let network_result = run_sync_check("network", progress.clone(), network_check);
+            let terminal_result = run_sync_check("terminal", progress.clone(), || {
+                terminal_check(command.no_color)
+            });
+            let git_result =
+                run_async_check("git", progress.clone(), git_check(fallback_cwd.as_path())).await;
+            let state_result = run_sync_check("state", progress.clone(), fallback_state_check);
+            let managed_broker_result =
+                run_sync_check("managed broker", progress.clone(), managed_broker_check);
             checks.extend([
-                config_check,
-                network_check,
-                terminal_check,
-                git_check,
-                state_check,
-                reachability_check,
+                config_result_check,
+                network_result,
+                terminal_result,
+                git_result,
+                state_result,
+                managed_broker_result,
             ]);
         }
     }
@@ -487,8 +425,68 @@ async fn build_report(
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
-        codex_version: env!("CARGO_PKG_VERSION").to_string(),
+        runtime_version: WHISPLY_RUNTIME_VERSION.to_string(),
         checks,
+    }
+}
+
+/// Verifies only the native-broker authority path. Doctor deliberately never
+/// reads legacy token stores or probes OpenAI/ChatGPT/custom-provider URLs:
+/// managed descriptors are the sole authority for a public Whisply runtime.
+fn managed_broker_check() -> DoctorCheck {
+    let broker = match NativeBrokerClient::from_environment() {
+        Ok(Some(broker)) => broker,
+        Ok(None) => {
+            return DoctorCheck::new(
+                "auth.managed_broker",
+                "auth",
+                CheckStatus::Fail,
+                "managed native broker descriptors are unavailable",
+            )
+            .remediation("Launch through Whisply, then sign in with `whisply login`.");
+        }
+        Err(_) => {
+            return DoctorCheck::new(
+                "auth.managed_broker",
+                "auth",
+                CheckStatus::Fail,
+                "managed native broker descriptors are invalid",
+            )
+            .remediation("Relaunch Whisply from its verified installation.");
+        }
+    };
+
+    if broker.hello().is_err() {
+        return DoctorCheck::new(
+            "auth.managed_broker",
+            "auth",
+            CheckStatus::Fail,
+            "managed native broker could not be verified",
+        )
+        .remediation("Relaunch Whisply from its verified installation.");
+    }
+
+    match broker.status() {
+        Ok(status) if status.authenticated && status.account_epoch.is_some() => DoctorCheck::new(
+            "auth.managed_broker",
+            "auth",
+            CheckStatus::Ok,
+            "managed broker is authenticated",
+        ),
+        Ok(_) => DoctorCheck::new(
+            "auth.managed_broker",
+            "auth",
+            CheckStatus::Fail,
+            "managed broker requires sign-in",
+        )
+        .remediation("Run `whisply login` from the managed Whisply runtime."),
+        Err(_) => DoctorCheck::new(
+            "auth.managed_broker",
+            "auth",
+            CheckStatus::Fail,
+            "managed broker status is unavailable",
+        )
+        .remediation("Relaunch Whisply from its verified installation."),
     }
 }
 
@@ -517,7 +515,7 @@ async fn load_config(
         .harness_overrides(overrides)
         .build()
         .await
-        .context("failed to load Codex config")
+        .context("failed to load Whisply config")
 }
 
 fn config_overrides_from_interactive(
@@ -552,7 +550,7 @@ fn config_overrides_from_interactive(
     }
 }
 
-/// JSON support report emitted by `codex doctor --json`.
+/// JSON support report emitted by `whisply doctor --json`.
 ///
 /// The report is keyed by check id so support tooling can fetch paths like
 /// `checks["terminal.metadata"]` without scanning arrays. Human rendering can
@@ -564,7 +562,7 @@ struct JsonDoctorReport {
     schema_version: u32,
     generated_at: String,
     overall_status: CheckStatus,
-    codex_version: String,
+    runtime_version: String,
     checks: BTreeMap<String, JsonDoctorCheck>,
 }
 
@@ -629,7 +627,7 @@ fn redacted_json_report(report: &DoctorReport) -> JsonDoctorReport {
         schema_version: report.schema_version,
         generated_at: report.generated_at.clone(),
         overall_status: report.overall_status,
-        codex_version: report.codex_version.clone(),
+        runtime_version: report.runtime_version.clone(),
         checks,
     }
 }
@@ -1175,270 +1173,6 @@ fn config_toml_details(config: &Config, details: &mut Vec<String>) {
     }
 }
 
-fn auth_check(config: &Config) -> DoctorCheck {
-    let mut details = Vec::new();
-    let auth_path = config.codex_home.join("auth.json");
-    details.push(format!(
-        "auth storage mode: {:?}",
-        config.cli_auth_credentials_store_mode
-    ));
-    details.push(format!("auth file: {}", auth_path.display()));
-
-    let env_auth_vars = [
-        OPENAI_API_KEY_ENV_VAR,
-        CODEX_API_KEY_ENV_VAR,
-        CODEX_ACCESS_TOKEN_ENV_VAR,
-    ]
-    .into_iter()
-    .filter(|name| env_var_present(name))
-    .collect::<Vec<_>>();
-    if !env_auth_vars.is_empty() {
-        details.push(format!(
-            "auth env vars present: {}",
-            env_auth_vars.join(", ")
-        ));
-    }
-    if let Some(check) = provider_specific_auth_check(
-        config.model_provider.requires_openai_auth,
-        config.model_provider.env_key.as_deref(),
-        config.model_provider.env_key_instructions.as_deref(),
-        details.clone(),
-        env_var_present,
-    ) {
-        return check;
-    }
-
-    match load_auth_dot_json(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    ) {
-        Ok(Some(auth)) => {
-            details.push(format!("stored auth mode: {}", stored_auth_mode(&auth)));
-            details.push(format!("stored API key: {}", auth.openai_api_key.is_some()));
-            details.push(format!("stored ChatGPT tokens: {}", auth.tokens.is_some()));
-            details.push(format!(
-                "stored agent identity: {}",
-                auth.agent_identity.is_some()
-            ));
-            let auth_issues = stored_auth_issues(&auth, env_var_present);
-            details.extend(
-                auth_issues
-                    .iter()
-                    .map(|issue| format!("stored auth issue: {issue}")),
-            );
-            let status = if !auth_issues.is_empty() && env_auth_vars.is_empty() {
-                CheckStatus::Fail
-            } else if !auth_issues.is_empty() || env_auth_vars.len() > 1 {
-                CheckStatus::Warning
-            } else {
-                CheckStatus::Ok
-            };
-            let summary = match status {
-                CheckStatus::Ok => "auth is configured",
-                CheckStatus::Warning if !auth_issues.is_empty() => {
-                    "auth is provided by environment, but stored credentials are incomplete"
-                }
-                CheckStatus::Warning => {
-                    "auth is configured, but multiple auth env vars are present"
-                }
-                CheckStatus::Fail => "stored credentials are incomplete",
-            };
-            let mut check =
-                DoctorCheck::new("auth.credentials", "auth", status, summary).details(details);
-            if status == CheckStatus::Fail {
-                check =
-                    check.remediation("Run codex login again or provide a supported auth env var.");
-            }
-            check
-        }
-        Ok(None) if !env_auth_vars.is_empty() => DoctorCheck::new(
-            "auth.credentials",
-            "auth",
-            CheckStatus::Ok,
-            "auth is provided by environment",
-        )
-        .details(details),
-        Ok(None) => DoctorCheck::new(
-            "auth.credentials",
-            "auth",
-            CheckStatus::Fail,
-            "no Codex credentials were found",
-        )
-        .details(details)
-        .remediation("Run codex login or provide an API key through a supported auth env var."),
-        Err(err) => DoctorCheck::new(
-            "auth.credentials",
-            "auth",
-            CheckStatus::Fail,
-            "stored credentials could not be read",
-        )
-        .detail(err.to_string())
-        .remediation("Fix auth storage access or run codex login again."),
-    }
-}
-
-fn provider_specific_auth_check(
-    requires_openai_auth: bool,
-    provider_env_key: Option<&str>,
-    provider_env_key_instructions: Option<&str>,
-    mut details: Vec<String>,
-    env_var_present: impl Fn(&str) -> bool,
-) -> Option<DoctorCheck> {
-    details.push(format!(
-        "model provider requires OpenAI auth: {requires_openai_auth}"
-    ));
-    if requires_openai_auth {
-        return None;
-    }
-
-    match provider_env_key {
-        Some(env_key) if env_var_present(env_key) => {
-            details.push(format!("provider auth env var: {env_key} (present)"));
-            Some(
-                DoctorCheck::new(
-                    "auth.credentials",
-                    "auth",
-                    CheckStatus::Ok,
-                    "auth is provided by the active model provider",
-                )
-                .details(details),
-            )
-        }
-        Some(env_key) => {
-            details.push(format!("provider auth env var: {env_key} (missing)"));
-            let remediation = provider_env_key_instructions
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("Set {env_key} for the active model provider."));
-            Some(
-                DoctorCheck::new(
-                    "auth.credentials",
-                    "auth",
-                    CheckStatus::Fail,
-                    "active model provider auth env var is missing",
-                )
-                .details(details)
-                .remediation(remediation),
-            )
-        }
-        None => Some(
-            DoctorCheck::new(
-                "auth.credentials",
-                "auth",
-                CheckStatus::Ok,
-                "OpenAI auth is not required for the active model provider",
-            )
-            .details(details),
-        ),
-    }
-}
-
-fn stored_auth_mode(auth: &codex_login::AuthDotJson) -> &'static str {
-    match stored_auth_mode_value(auth) {
-        AuthMode::ApiKey => "api_key",
-        AuthMode::Chatgpt => "chatgpt",
-        AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
-        AuthMode::Headers => "headers",
-        AuthMode::AgentIdentity => "agent_identity",
-        AuthMode::PersonalAccessToken => "personal_access_token",
-        AuthMode::BedrockApiKey => "bedrock_api_key",
-    }
-}
-
-fn stored_auth_mode_value(auth: &AuthDotJson) -> AuthMode {
-    if let Some(mode) = auth.auth_mode {
-        return mode;
-    }
-    if auth.personal_access_token.is_some() {
-        AuthMode::PersonalAccessToken
-    } else if auth.bedrock_api_key.is_some() {
-        AuthMode::BedrockApiKey
-    } else if auth.openai_api_key.is_some() {
-        AuthMode::ApiKey
-    } else {
-        AuthMode::Chatgpt
-    }
-}
-
-fn stored_auth_issues(
-    auth: &AuthDotJson,
-    env_var_present: impl Fn(&str) -> bool,
-) -> Vec<&'static str> {
-    let mut issues = Vec::new();
-    match stored_auth_mode_value(auth) {
-        AuthMode::ApiKey => {
-            let stored_key_present = auth
-                .openai_api_key
-                .as_deref()
-                .is_some_and(|key| !key.trim().is_empty());
-            let env_key_present =
-                env_var_present(OPENAI_API_KEY_ENV_VAR) || env_var_present(CODEX_API_KEY_ENV_VAR);
-            if !stored_key_present && !env_key_present {
-                issues.push("API key auth is missing an API key");
-            }
-        }
-        AuthMode::Chatgpt => {
-            match auth.tokens.as_ref() {
-                Some(tokens) => {
-                    if tokens.access_token.trim().is_empty() {
-                        issues.push("ChatGPT auth is missing an access token");
-                    }
-                    if tokens.refresh_token.trim().is_empty() {
-                        issues.push("ChatGPT auth is missing a refresh token");
-                    }
-                }
-                None => issues.push("ChatGPT auth is missing token data"),
-            }
-            if auth.last_refresh.is_none() {
-                issues.push("ChatGPT auth is missing refresh metadata");
-            }
-        }
-        AuthMode::ChatgptAuthTokens => {
-            match auth.tokens.as_ref() {
-                Some(tokens) => {
-                    if tokens.access_token.trim().is_empty() {
-                        issues.push("external ChatGPT auth is missing an access token");
-                    }
-                    if tokens.account_id.is_none() && tokens.id_token.chatgpt_account_id.is_none() {
-                        issues.push("external ChatGPT auth is missing a ChatGPT account id");
-                    }
-                }
-                None => issues.push("external ChatGPT auth is missing token data"),
-            }
-            if auth.last_refresh.is_none() {
-                issues.push("external ChatGPT auth is missing refresh metadata");
-            }
-        }
-        AuthMode::Headers => {
-            issues.push("header auth cannot be loaded from auth storage");
-        }
-        AuthMode::AgentIdentity => {
-            if auth
-                .agent_identity
-                .as_ref()
-                .is_none_or(|agent_identity| !agent_identity.has_auth_material())
-            {
-                issues.push("agent identity auth is missing an agent identity token");
-            }
-        }
-        AuthMode::PersonalAccessToken => {
-            if auth
-                .personal_access_token
-                .as_deref()
-                .is_none_or(|token| token.trim().is_empty())
-            {
-                issues.push("personal access token auth is missing a personal access token");
-            }
-        }
-        AuthMode::BedrockApiKey => {
-            if auth.bedrock_api_key.is_none() {
-                issues.push("Bedrock API key auth is missing a Bedrock API key");
-            }
-        }
-    }
-    issues
-}
-
 fn network_check() -> DoctorCheck {
     let mut details = Vec::new();
     push_proxy_env_details(&mut details);
@@ -1498,11 +1232,11 @@ fn read_probe_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn mcp_check(config: &Config) -> DoctorCheck {
-    mcp_check_from_servers(config.mcp_servers.get()).await
+fn mcp_check(config: &Config) -> DoctorCheck {
+    mcp_check_from_servers(config.mcp_servers.get())
 }
 
-async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> DoctorCheck {
+fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> DoctorCheck {
     if servers.is_empty() {
         return DoctorCheck::new(
             "mcp.config",
@@ -1516,8 +1250,7 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     let mut transport_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut disabled = 0usize;
     let mut missing_env = Vec::new();
-    let mut unreachable_required_http = Vec::new();
-    let mut unreachable_optional_http = Vec::new();
+    let mut streamable_http_servers = 0usize;
 
     for (name, server) in servers {
         let disabled_server = !server.enabled || server.disabled_reason.is_some();
@@ -1585,12 +1318,12 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 }
             }
             McpServerTransportConfig::StreamableHttp {
-                url,
                 bearer_token_env_var,
                 env_http_headers,
                 ..
             } => {
                 *transport_counts.entry("streamable_http").or_default() += 1;
+                streamable_http_servers += 1;
                 if disabled_server {
                     continue;
                 }
@@ -1607,14 +1340,6 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                         }
                     }
                 }
-                if let Err(err) = mcp_http_probe_url(url).await {
-                    let detail = format!("{name}: {url} ({err})");
-                    if server.required {
-                        unreachable_required_http.push(detail);
-                    } else {
-                        unreachable_optional_http.push(detail);
-                    }
-                }
             }
         }
     }
@@ -1625,16 +1350,11 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
         details.push(format!("{transport} servers: {count}"));
     }
     details.extend(missing_env.iter().cloned());
-    details.extend(
-        unreachable_required_http
-            .iter()
-            .map(|detail| format!("required reachability failed: {detail}")),
-    );
-    details.extend(
-        unreachable_optional_http
-            .iter()
-            .map(|detail| format!("optional reachability failed: {detail}")),
-    );
+    if streamable_http_servers > 0 {
+        details.push(
+            "HTTP reachability probes: skipped (managed runtime; configuration only)".to_string(),
+        );
+    }
 
     let required_missing = servers.iter().any(|(name, server)| {
         server.required
@@ -1642,9 +1362,9 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 .iter()
                 .any(|missing| missing.starts_with(&format!("{name}:")))
     });
-    let status = if required_missing || !unreachable_required_http.is_empty() {
+    let status = if required_missing {
         CheckStatus::Fail
-    } else if !missing_env.is_empty() || !unreachable_optional_http.is_empty() {
+    } else if !missing_env.is_empty() {
         CheckStatus::Warning
     } else {
         CheckStatus::Ok
@@ -1652,7 +1372,7 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     let summary = match status {
         CheckStatus::Ok => "MCP configuration is locally consistent",
         CheckStatus::Warning => "MCP configuration has optional issues",
-        CheckStatus::Fail => "MCP configuration has failing required inputs or reachability",
+        CheckStatus::Fail => "MCP configuration has failing required inputs",
     };
 
     let mut check = DoctorCheck::new("mcp.config", "mcp", status, summary).details(details);
@@ -2314,217 +2034,6 @@ fn is_rollout_file(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with("rollout-"))
 }
 
-async fn websocket_reachability_check(
-    config: &Config,
-    auth_manager: Option<Arc<AuthManager>>,
-) -> DoctorCheck {
-    let provider = &config.model_provider;
-    let mut details = vec![
-        format!("model provider: {}", config.model_provider_id),
-        format!("provider name: {}", provider.name),
-        format!("wire API: {}", provider.wire_api),
-        format!("supports websockets: {}", provider.supports_websockets),
-    ];
-    push_proxy_env_details(&mut details);
-
-    if !provider.supports_websockets {
-        return DoctorCheck::new(
-            "network.websocket_reachability",
-            "websocket",
-            CheckStatus::Ok,
-            "Responses WebSocket is not enabled for the active provider",
-        )
-        .details(details);
-    }
-
-    details.push(format!(
-        "connect timeout: {} ms",
-        provider.websocket_connect_timeout().as_millis()
-    ));
-
-    let runtime_provider = create_model_provider(provider.clone(), auth_manager);
-    let auth = runtime_provider.auth().await;
-    details.push(format!(
-        "auth mode: {}",
-        auth.as_ref().map(auth_mode_name).unwrap_or("none")
-    ));
-
-    let api_provider = match runtime_provider.api_provider().await {
-        Ok(api_provider) => api_provider,
-        Err(err) => {
-            return websocket_probe_warning(
-                "Responses WebSocket provider setup failed",
-                details,
-                format!("provider setup failed: {err}"),
-            );
-        }
-    };
-    match api_provider.websocket_url_for_path("responses") {
-        Ok(url) => {
-            details.push(format!("endpoint: {url}"));
-            if let Some(host) = url.host_str()
-                && let Some(port) = url.port_or_known_default()
-            {
-                details.extend(dns_address_family_details(host, port).await);
-            }
-        }
-        Err(err) => {
-            return websocket_probe_warning(
-                "Responses WebSocket endpoint could not be built",
-                details,
-                format!("endpoint build failed: {err}"),
-            );
-        }
-    }
-
-    let api_auth = match runtime_provider.api_auth().await {
-        Ok(api_auth) => api_auth,
-        Err(err) => {
-            return websocket_probe_warning(
-                "Responses WebSocket auth could not be resolved",
-                details,
-                format!("auth resolution failed: {err}"),
-            );
-        }
-    };
-
-    let mut extra_headers = HeaderMap::new();
-    extra_headers.insert(
-        OPENAI_BETA_HEADER,
-        HeaderValue::from_static(RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE),
-    );
-    let client = ResponsesWebsocketClient::new(api_provider, api_auth);
-    let http_client_factory = config.http_client_factory();
-    match tokio::time::timeout(
-        provider.websocket_connect_timeout(),
-        client.probe_handshake(
-            &http_client_factory,
-            extra_headers,
-            default_headers(),
-            WEBSOCKET_IMMEDIATE_CLOSE_GRACE,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(probe)) => {
-            details.push(format!("handshake result: HTTP {}", probe.status));
-            details.push(format!("reasoning header: {}", probe.reasoning_included));
-            details.push(format!(
-                "models etag present: {}",
-                probe.models_etag_present
-            ));
-            details.push(format!(
-                "server model present: {}",
-                probe.server_model_present
-            ));
-            if let Some(close) = probe.immediate_close {
-                details.push(format!("immediate close code: {}", close.code));
-                details.push(format!("immediate close reason: {}", close.reason));
-                return DoctorCheck::new(
-                    "network.websocket_reachability",
-                    "websocket",
-                    CheckStatus::Warning,
-                    "Responses WebSocket closed immediately after handshake",
-                )
-                .details(details)
-                .remediation(
-                    "Check proxy, VPN, firewall, DNS, custom CA, and WebSocket policy support.",
-                );
-            }
-            DoctorCheck::new(
-                "network.websocket_reachability",
-                "websocket",
-                CheckStatus::Ok,
-                "Responses WebSocket handshake succeeded",
-            )
-            .details(details)
-        }
-        Ok(Err(err)) => websocket_probe_warning(
-            "Responses WebSocket failed; HTTPS fallback may still work",
-            details,
-            websocket_error_detail(&err),
-        ),
-        Err(_) => websocket_probe_warning(
-            "Responses WebSocket timed out; HTTPS fallback may still work",
-            details,
-            "handshake timed out".to_string(),
-        ),
-    }
-}
-
-fn websocket_probe_warning(
-    summary: &'static str,
-    mut details: Vec<String>,
-    error_detail: String,
-) -> DoctorCheck {
-    details.push(error_detail);
-    DoctorCheck::new(
-        "network.websocket_reachability",
-        "websocket",
-        CheckStatus::Warning,
-        summary,
-    )
-    .details(details)
-    .remediation("Check proxy, VPN, firewall, DNS, custom CA, and WebSocket policy support.")
-}
-
-fn websocket_error_detail(err: &ApiError) -> String {
-    match err {
-        ApiError::Transport(transport) => format!("handshake transport error: {transport}"),
-        ApiError::Api { status, message } => {
-            format!("handshake API error: {status} {message}")
-        }
-        ApiError::Stream(message) => format!("handshake stream error: {message}"),
-        ApiError::ContextWindowExceeded
-        | ApiError::QuotaExceeded
-        | ApiError::UsageNotIncluded
-        | ApiError::Retryable { .. }
-        | ApiError::RateLimit(_)
-        | ApiError::InvalidRequest { .. }
-        | ApiError::CyberPolicy { .. }
-        | ApiError::ServerOverloaded => format!("handshake error: {err}"),
-    }
-}
-
-fn auth_mode_name(auth: &CodexAuth) -> &'static str {
-    match auth.auth_mode() {
-        AuthMode::ApiKey => "api_key",
-        AuthMode::Chatgpt => "chatgpt",
-        AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
-        AuthMode::Headers => "headers",
-        AuthMode::AgentIdentity => "agent_identity",
-        AuthMode::PersonalAccessToken => "personal_access_token",
-        AuthMode::BedrockApiKey => "bedrock_api_key",
-    }
-}
-
-async fn dns_address_family_details(host: &str, port: u16) -> Vec<String> {
-    match tokio::net::lookup_host((host, port)).await {
-        Ok(addresses) => {
-            let addresses = addresses.collect::<Vec<_>>();
-            let ipv4_count = addresses
-                .iter()
-                .filter(|address| matches!(address.ip(), IpAddr::V4(_)))
-                .count();
-            let ipv6_count = addresses
-                .iter()
-                .filter(|address| matches!(address.ip(), IpAddr::V6(_)))
-                .count();
-            let first_family = addresses
-                .first()
-                .map(|address| match address.ip() {
-                    IpAddr::V4(_) => "IPv4",
-                    IpAddr::V6(_) => "IPv6",
-                })
-                .unwrap_or("none");
-            vec![format!(
-                "DNS: {ipv4_count} IPv4, {ipv6_count} IPv6, first {first_family}"
-            )]
-        }
-        Err(err) => vec![format!("DNS: lookup failed ({err})")],
-    }
-}
-
 fn fallback_state_check() -> DoctorCheck {
     let codex_home = find_codex_home();
     match codex_home {
@@ -2543,402 +2052,6 @@ fn fallback_state_check() -> DoctorCheck {
         )
         .detail(err.to_string()),
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReachabilityPlan {
-    description: String,
-    endpoints: Vec<ReachabilityEndpoint>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReachabilityEndpoint {
-    label: String,
-    url: String,
-    required: bool,
-    route_probe_url: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProviderAuthReachabilityMode {
-    NotRequired,
-    ApiKey,
-    Chatgpt,
-}
-
-impl ProviderAuthReachabilityMode {
-    fn description(self) -> &'static str {
-        match self {
-            Self::NotRequired => "provider auth",
-            Self::ApiKey => "API key auth",
-            Self::Chatgpt => "ChatGPT auth",
-        }
-    }
-}
-
-fn provider_reachability_plan(config: &Config) -> ReachabilityPlan {
-    let stored_auth = load_auth_dot_json(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    )
-    .ok()
-    .flatten();
-    let mode = provider_auth_reachability_mode_from_auth(
-        config.model_provider.requires_openai_auth,
-        env_var_present,
-        stored_auth.as_ref(),
-    );
-    provider_reachability_plan_from_parts(
-        mode,
-        &config.model_provider_id,
-        &config.model_provider.name,
-        config.model_provider.base_url.as_deref(),
-        config.model_provider.query_params.as_ref(),
-        config.model_provider.is_amazon_bedrock(),
-        &config.chatgpt_base_url,
-    )
-}
-
-fn default_reachability_plan() -> ReachabilityPlan {
-    provider_reachability_plan_from_parts(
-        ProviderAuthReachabilityMode::Chatgpt,
-        "openai",
-        "OpenAI",
-        /*provider_base_url*/ None,
-        /*provider_query_params*/ None,
-        /*is_amazon_bedrock*/ false,
-        "https://chatgpt.com/backend-api/",
-    )
-}
-
-fn provider_auth_reachability_mode_from_auth(
-    requires_openai_auth: bool,
-    env_var_present: impl Fn(&str) -> bool,
-    stored_auth: Option<&AuthDotJson>,
-) -> ProviderAuthReachabilityMode {
-    if !requires_openai_auth {
-        return ProviderAuthReachabilityMode::NotRequired;
-    }
-    if env_var_present(OPENAI_API_KEY_ENV_VAR) || env_var_present(CODEX_API_KEY_ENV_VAR) {
-        return ProviderAuthReachabilityMode::ApiKey;
-    }
-    if env_var_present(CODEX_ACCESS_TOKEN_ENV_VAR) {
-        return ProviderAuthReachabilityMode::Chatgpt;
-    }
-    match stored_auth.map(stored_auth_mode_value) {
-        Some(AuthMode::ApiKey | AuthMode::BedrockApiKey) => ProviderAuthReachabilityMode::ApiKey,
-        Some(
-            AuthMode::Chatgpt
-            | AuthMode::ChatgptAuthTokens
-            | AuthMode::Headers
-            | AuthMode::AgentIdentity
-            | AuthMode::PersonalAccessToken,
-        )
-        | None => ProviderAuthReachabilityMode::Chatgpt,
-    }
-}
-
-fn provider_reachability_plan_from_parts(
-    mode: ProviderAuthReachabilityMode,
-    provider_id: &str,
-    provider_name: &str,
-    provider_base_url: Option<&str>,
-    provider_query_params: Option<&HashMap<String, String>>,
-    is_amazon_bedrock: bool,
-    chatgpt_base_url: &str,
-) -> ReachabilityPlan {
-    let provider_route_probe_url = provider_base_url
-        .or_else(|| {
-            (mode == ProviderAuthReachabilityMode::ApiKey).then_some("https://api.openai.com/v1")
-        })
-        .and_then(|url| {
-            should_probe_models_route(provider_name, url, is_amazon_bedrock)
-                .then(|| provider_url_for_path(url, "models", provider_query_params))
-        });
-    let endpoints = match mode {
-        ProviderAuthReachabilityMode::ApiKey => vec![ReachabilityEndpoint {
-            label: format!("{provider_id} API"),
-            url: provider_base_url
-                .unwrap_or("https://api.openai.com/v1")
-                .to_string(),
-            required: true,
-            route_probe_url: provider_route_probe_url,
-        }],
-        ProviderAuthReachabilityMode::Chatgpt => vec![ReachabilityEndpoint {
-            label: "ChatGPT".to_string(),
-            url: chatgpt_base_url.to_string(),
-            required: true,
-            route_probe_url: None,
-        }],
-        ProviderAuthReachabilityMode::NotRequired => provider_base_url
-            .map(|url| {
-                vec![ReachabilityEndpoint {
-                    label: format!("{provider_id} API"),
-                    url: url.to_string(),
-                    required: true,
-                    route_probe_url: provider_route_probe_url,
-                }]
-            })
-            .unwrap_or_default(),
-    };
-    ReachabilityPlan {
-        description: mode.description().to_string(),
-        endpoints,
-    }
-}
-
-fn should_probe_models_route(provider_name: &str, base_url: &str, is_amazon_bedrock: bool) -> bool {
-    !is_amazon_bedrock && !is_azure_responses_provider(provider_name, Some(base_url))
-}
-
-fn provider_url_for_path(
-    base_url: &str,
-    path: &str,
-    query_params: Option<&HashMap<String, String>>,
-) -> String {
-    let base = base_url.trim_end_matches('/');
-    let path = path.trim_start_matches('/');
-    let mut url = if path.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}/{path}")
-    };
-
-    if let Some(params) = query_params
-        && !params.is_empty()
-    {
-        let separator = if url.contains('?') { '&' } else { '?' };
-        url.push(separator);
-        url.push_str(
-            &params
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .join("&"),
-        );
-    }
-
-    url
-}
-
-async fn provider_reachability_check(plan: ReachabilityPlan) -> DoctorCheck {
-    let mut details = vec![format!("reachability mode: {}", plan.description)];
-    if plan.endpoints.is_empty() {
-        details.push("active provider endpoint: none configured".to_string());
-        return DoctorCheck::new(
-            "network.provider_reachability",
-            "reachability",
-            CheckStatus::Ok,
-            "active provider has no HTTP endpoint to probe",
-        )
-        .details(details);
-    }
-
-    let mut failures = Vec::new();
-    let mut optional_failures = Vec::new();
-    let mut route_failures = Vec::new();
-    let mut route_warnings = Vec::new();
-    let mut issues = Vec::new();
-    for endpoint in plan.endpoints {
-        match http_probe_url(&endpoint.url).await {
-            Ok(status) => details.push(format!(
-                "{} base URL: {} reachable ({status})",
-                endpoint.label, endpoint.url
-            )),
-            Err(err) => {
-                let requirement = if endpoint.required {
-                    "required"
-                } else {
-                    "optional"
-                };
-                details.push(format!(
-                    "{} base URL: {} {err} ({requirement})",
-                    endpoint.label, endpoint.url
-                ));
-                if endpoint.required {
-                    failures.push(endpoint.url);
-                } else {
-                    optional_failures.push(endpoint.url);
-                }
-                continue;
-            }
-        }
-
-        let Some(route_probe_url) = endpoint.route_probe_url.as_deref() else {
-            continue;
-        };
-        match provider_route_probe_url(route_probe_url).await {
-            RouteProbeOutcome::Ok(status) => {
-                details.push(format!(
-                    "{} route probe: {route_probe_url} route exists ({status})",
-                    endpoint.label,
-                ));
-            }
-            RouteProbeOutcome::Warning(status) => {
-                details.push(format!(
-                    "{} route probe: {route_probe_url} returned {status} (warning)",
-                    endpoint.label,
-                ));
-                route_warnings.push(route_probe_url.to_string());
-            }
-            RouteProbeOutcome::Fail(status) => {
-                details.push(format!(
-                    "{} route probe: {route_probe_url} returned {status} (required)",
-                    endpoint.label,
-                ));
-                route_failures.push(route_probe_url.to_string());
-                issues.push(
-                    DoctorIssue::new(
-                        CheckStatus::Fail,
-                        "provider base URL route returned 404 - verify the configured API prefix",
-                    )
-                    .measured(format!("{route_probe_url} returned {status}"))
-                    .expected("GET /models returns 2xx, 401, or 403")
-                    .remedy("Set base_url to the provider API root, for example https://api.openai.com/v1")
-                    .field("route probe"),
-                );
-            }
-            RouteProbeOutcome::TransportError(err) => {
-                details.push(format!(
-                    "{} route probe: {route_probe_url} {err} (required)",
-                    endpoint.label,
-                ));
-                route_failures.push(route_probe_url.to_string());
-                issues.push(
-                    DoctorIssue::new(
-                        CheckStatus::Fail,
-                        "provider route probe could not connect - verify network access to the provider API",
-                    )
-                    .measured(format!("{route_probe_url} {err}"))
-                    .expected("GET /models completes")
-                    .remedy("Check proxy, VPN, firewall, DNS, and custom CA configuration.")
-                    .field("route probe"),
-                );
-            }
-        }
-    }
-
-    let (status, summary) = provider_reachability_outcome(
-        failures.len() + route_failures.len(),
-        optional_failures.len() + route_warnings.len(),
-    );
-    let mut check = DoctorCheck::new(
-        "network.provider_reachability",
-        "reachability",
-        status,
-        summary,
-    )
-    .details(details);
-    for issue in issues {
-        check = check.issue(issue);
-    }
-    if status != CheckStatus::Ok {
-        check = check.remediation("Check proxy, VPN, firewall, DNS, and custom CA configuration.");
-    }
-    check
-}
-
-enum RouteProbeOutcome {
-    Ok(String),
-    Warning(String),
-    Fail(String),
-    TransportError(String),
-}
-
-async fn provider_route_probe_url(url: &str) -> RouteProbeOutcome {
-    match http_get_probe_status_with_timeout(url, Duration::from_secs(3)).await {
-        Ok(status) if (200..300).contains(&status) || matches!(status, 401 | 403) => {
-            RouteProbeOutcome::Ok(format!("HTTP {status}"))
-        }
-        Ok(404) => RouteProbeOutcome::Fail("HTTP 404".to_string()),
-        Ok(status) => RouteProbeOutcome::Warning(format!("HTTP {status}")),
-        Err(err) => RouteProbeOutcome::TransportError(err),
-    }
-}
-
-fn provider_reachability_outcome(
-    required_failures: usize,
-    warnings: usize,
-) -> (CheckStatus, &'static str) {
-    match (required_failures, warnings) {
-        (0, 0) => (
-            CheckStatus::Ok,
-            "active provider endpoints are reachable over HTTP",
-        ),
-        (0, _) => (
-            CheckStatus::Warning,
-            "provider endpoint checks returned warnings",
-        ),
-        (_, _) => (
-            CheckStatus::Fail,
-            "one or more required provider endpoints are unreachable over HTTP",
-        ),
-    }
-}
-
-async fn http_probe_url(url: &str) -> Result<String, String> {
-    http_probe_url_with_timeout(url, Duration::from_secs(3)).await
-}
-
-async fn mcp_http_probe_url(url: &str) -> Result<String, String> {
-    mcp_http_probe_url_with_timeout(url, Duration::from_secs(3)).await
-}
-
-async fn mcp_http_probe_url_with_timeout(url: &str, timeout: Duration) -> Result<String, String> {
-    match http_probe_url_with_timeout(url, timeout).await {
-        Ok(status) => Ok(status),
-        Err(head_err) => match http_get_probe_url_with_timeout(url, timeout).await {
-            Ok(status) => Ok(status),
-            Err(get_err) => Err(format!("HEAD {head_err}; GET {get_err}")),
-        },
-    }
-}
-
-async fn http_probe_url_with_timeout(url: &str, timeout: Duration) -> Result<String, String> {
-    let response = create_client_without_request_logging()
-        .head(url)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|err| {
-            if err.is_timeout() {
-                "request timed out".to_string()
-            } else if err.is_connect() {
-                "connect failed".to_string()
-            } else if err.is_builder() {
-                "request could not be built".to_string()
-            } else {
-                err.to_string()
-            }
-        })?;
-    Ok(format!("HTTP {}", response.status().as_u16()))
-}
-
-async fn http_get_probe_url_with_timeout(url: &str, timeout: Duration) -> Result<String, String> {
-    http_get_probe_status_with_timeout(url, timeout)
-        .await
-        .map(|status| format!("HTTP {status}"))
-}
-
-async fn http_get_probe_status_with_timeout(url: &str, timeout: Duration) -> Result<u16, String> {
-    let response = create_client_without_request_logging()
-        .get(url)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|err| {
-            if err.is_timeout() {
-                "request timed out".to_string()
-            } else if err.is_connect() {
-                "connect failed".to_string()
-            } else if err.is_builder() {
-                "request could not be built".to_string()
-            } else {
-                err.to_string()
-            }
-        })?;
-    Ok(response.status().as_u16())
 }
 
 fn stdio_command_resolves(
@@ -3099,8 +2212,6 @@ fn should_enable_color(
 #[cfg(test)]
 mod tests {
     use std::io::Read;
-    use std::io::Write;
-    use std::net::TcpListener;
     use std::sync::Mutex;
 
     use clap::Parser;
@@ -3148,13 +2259,6 @@ mod tests {
                 .expect("events lock")
                 .push("settle".to_string());
         }
-    }
-
-    fn respond_once(listener: &TcpListener, response: &[u8]) {
-        let (mut stream, _) = listener.accept().expect("accept probe request");
-        let mut request = [0; 1024];
-        let _ = stream.read(&mut request);
-        stream.write_all(response).expect("write response");
     }
 
     #[test]
@@ -3302,7 +2406,7 @@ mod tests {
             schema_version: 1,
             generated_at: "0s since unix epoch".to_string(),
             overall_status: CheckStatus::Warning,
-            codex_version: "0.0.0".to_string(),
+            runtime_version: "0.0.0".to_string(),
             checks: vec![
                 DoctorCheck::new(
                     "system.environment",
@@ -3402,8 +2506,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn mcp_check_ignores_disabled_servers() {
+    #[test]
+    fn mcp_check_ignores_disabled_servers() {
         let disabled_server: McpServerConfig = toml::from_str(
             r#"
                 url = "http://127.0.0.1:9/mcp"
@@ -3415,7 +2519,7 @@ mod tests {
         .expect("should deserialize disabled MCP config");
         let servers = HashMap::from([("disabled".to_string(), disabled_server)]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert_eq!(check.summary, "MCP configuration is locally consistent");
@@ -3434,8 +2538,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn mcp_check_warns_for_optional_http_reachability() {
+    #[test]
+    fn mcp_check_keeps_http_diagnostics_offline() {
         let optional_server: McpServerConfig = toml::from_str(
             r#"
                 url = "http://127.0.0.1:9/mcp"
@@ -3444,20 +2548,16 @@ mod tests {
         .expect("should deserialize optional MCP config");
         let servers = HashMap::from([("optional".to_string(), optional_server)]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
-        assert_eq!(check.status, CheckStatus::Warning);
-        assert_eq!(check.summary, "MCP configuration has optional issues");
-        assert!(
-            check
-                .details
-                .iter()
-                .any(|detail| detail.contains("optional reachability failed: optional:"))
-        );
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.summary, "MCP configuration is locally consistent");
+        assert!(check.details.iter().any(|detail| detail
+            == "HTTP reachability probes: skipped (managed runtime; configuration only)"));
     }
 
-    #[tokio::test]
-    async fn mcp_check_fails_required_remote_stdio_env_var() {
+    #[test]
+    fn mcp_check_fails_required_remote_stdio_env_var() {
         let command = toml::Value::String(
             std::env::current_exe()
                 .expect("current exe")
@@ -3474,7 +2574,7 @@ mod tests {
         .expect("should deserialize required MCP config");
         let servers = HashMap::from([("required".to_string(), required_server)]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(check.details.iter().any(|detail| {
@@ -3484,8 +2584,8 @@ mod tests {
         }));
     }
 
-    #[tokio::test]
-    async fn mcp_check_does_not_probe_environment_stdio_on_the_host() {
+    #[test]
+    fn mcp_check_does_not_probe_environment_stdio_on_the_host() {
         let remote_server: McpServerConfig = toml::from_str(
             r#"
                 command = "remote-only-command"
@@ -3498,328 +2598,10 @@ mod tests {
         .expect("remote MCP config");
         let servers = HashMap::from([("remote".to_string(), remote_server)]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert_eq!(check.summary, "MCP configuration is locally consistent");
-    }
-
-    #[test]
-    fn provider_specific_auth_allows_non_openai_provider_without_env_key() {
-        let check = provider_specific_auth_check(
-            /*requires_openai_auth*/ false,
-            /*provider_env_key*/ None,
-            /*provider_env_key_instructions*/ None,
-            Vec::new(),
-            |_| false,
-        )
-        .expect("non-OpenAI provider should produce a provider-specific check");
-
-        assert_eq!(check.status, CheckStatus::Ok);
-        assert_eq!(
-            check.summary,
-            "OpenAI auth is not required for the active model provider"
-        );
-    }
-
-    #[test]
-    fn provider_specific_auth_fails_when_provider_env_key_is_missing() {
-        let check = provider_specific_auth_check(
-            /*requires_openai_auth*/ false,
-            Some("PROVIDER_API_KEY"),
-            Some("Set PROVIDER_API_KEY before running Codex."),
-            Vec::new(),
-            |_| false,
-        )
-        .expect("non-OpenAI provider should produce a provider-specific check");
-
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert_eq!(
-            check.summary,
-            "active model provider auth env var is missing"
-        );
-        assert_eq!(
-            check.remediation,
-            Some("Set PROVIDER_API_KEY before running Codex.".to_string())
-        );
-    }
-
-    #[test]
-    fn stored_auth_validation_rejects_missing_api_key() {
-        let auth = AuthDotJson {
-            auth_mode: Some(AuthMode::ApiKey),
-            openai_api_key: None,
-            tokens: None,
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-        };
-
-        assert_eq!(
-            stored_auth_issues(&auth, |_| false),
-            vec!["API key auth is missing an API key"]
-        );
-        assert!(stored_auth_issues(&auth, |name| name == OPENAI_API_KEY_ENV_VAR).is_empty());
-    }
-
-    #[test]
-    fn stored_auth_validation_rejects_missing_chatgpt_tokens() {
-        let auth = AuthDotJson {
-            auth_mode: None,
-            openai_api_key: None,
-            tokens: None,
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-        };
-
-        assert_eq!(
-            stored_auth_issues(&auth, |_| false),
-            vec![
-                "ChatGPT auth is missing token data",
-                "ChatGPT auth is missing refresh metadata",
-            ]
-        );
-    }
-
-    #[test]
-    fn stored_auth_validation_handles_personal_access_token() {
-        let mut auth = AuthDotJson {
-            auth_mode: None,
-            openai_api_key: None,
-            tokens: None,
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: Some("at-test".to_string()),
-            bedrock_api_key: None,
-        };
-
-        assert_eq!(stored_auth_mode(&auth), "personal_access_token");
-        assert!(stored_auth_issues(&auth, |_| false).is_empty());
-
-        auth.auth_mode = Some(AuthMode::PersonalAccessToken);
-        auth.personal_access_token = None;
-        assert_eq!(
-            stored_auth_issues(&auth, |_| false),
-            vec!["personal access token auth is missing a personal access token"]
-        );
-    }
-
-    #[test]
-    fn provider_reachability_mode_uses_api_key_auth() {
-        let api_key_auth = AuthDotJson {
-            auth_mode: Some(AuthMode::ApiKey),
-            openai_api_key: Some("sk-test".to_string()),
-            tokens: None,
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-        };
-
-        assert_eq!(
-            provider_auth_reachability_mode_from_auth(
-                /*requires_openai_auth*/ true,
-                |_| false,
-                Some(&api_key_auth),
-            ),
-            ProviderAuthReachabilityMode::ApiKey
-        );
-        assert_eq!(
-            provider_auth_reachability_mode_from_auth(
-                /*requires_openai_auth*/ true,
-                |name| name == OPENAI_API_KEY_ENV_VAR,
-                /*stored_auth*/ None,
-            ),
-            ProviderAuthReachabilityMode::ApiKey
-        );
-    }
-
-    #[test]
-    fn provider_reachability_uses_active_provider_endpoint() {
-        assert_eq!(
-            provider_reachability_plan_from_parts(
-                ProviderAuthReachabilityMode::NotRequired,
-                "azure",
-                "azure",
-                Some("https://example.openai.azure.com/openai/v1"),
-                /*provider_query_params*/ None,
-                /*is_amazon_bedrock*/ false,
-                "https://chatgpt.com/backend-api/",
-            ),
-            ReachabilityPlan {
-                description: "provider auth".to_string(),
-                endpoints: vec![ReachabilityEndpoint {
-                    label: "azure API".to_string(),
-                    url: "https://example.openai.azure.com/openai/v1".to_string(),
-                    required: true,
-                    route_probe_url: None,
-                }],
-            }
-        );
-    }
-
-    #[test]
-    fn provider_reachability_adds_models_route_probe_for_openai_compatible_base_urls() {
-        let query_params = HashMap::from([("api-version".to_string(), "2026-01-01".to_string())]);
-
-        assert_eq!(
-            provider_reachability_plan_from_parts(
-                ProviderAuthReachabilityMode::NotRequired,
-                "custom",
-                "Custom",
-                Some("https://example.com/openai/v1/"),
-                Some(&query_params),
-                /*is_amazon_bedrock*/ false,
-                "https://chatgpt.com/backend-api/",
-            ),
-            ReachabilityPlan {
-                description: "provider auth".to_string(),
-                endpoints: vec![ReachabilityEndpoint {
-                    label: "custom API".to_string(),
-                    url: "https://example.com/openai/v1/".to_string(),
-                    required: true,
-                    route_probe_url: Some(
-                        "https://example.com/openai/v1/models?api-version=2026-01-01".to_string()
-                    ),
-                }],
-            }
-        );
-    }
-
-    #[test]
-    fn provider_reachability_skips_route_probe_for_bedrock() {
-        let plan = provider_reachability_plan_from_parts(
-            ProviderAuthReachabilityMode::NotRequired,
-            "amazon-bedrock",
-            "Amazon Bedrock",
-            Some("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"),
-            /*provider_query_params*/ None,
-            /*is_amazon_bedrock*/ true,
-            "https://chatgpt.com/backend-api/",
-        );
-
-        assert_eq!(plan.endpoints[0].route_probe_url, None);
-    }
-
-    #[test]
-    fn provider_reachability_api_key_does_not_require_chatgpt() {
-        let plan = provider_reachability_plan_from_parts(
-            ProviderAuthReachabilityMode::ApiKey,
-            "openai",
-            "OpenAI",
-            /*provider_base_url*/ None,
-            /*provider_query_params*/ None,
-            /*is_amazon_bedrock*/ false,
-            "https://chatgpt.com/backend-api/",
-        );
-
-        assert_eq!(
-            plan.endpoints,
-            vec![ReachabilityEndpoint {
-                label: "openai API".to_string(),
-                url: "https://api.openai.com/v1".to_string(),
-                required: true,
-                route_probe_url: Some("https://api.openai.com/v1/models".to_string()),
-            }]
-        );
-    }
-
-    #[test]
-    fn provider_reachability_outcome_reports_required_failures() {
-        assert_eq!(
-            provider_reachability_outcome(/*required_failures*/ 0, /*warnings*/ 1,),
-            (
-                CheckStatus::Warning,
-                "provider endpoint checks returned warnings",
-            )
-        );
-        assert_eq!(
-            provider_reachability_outcome(/*required_failures*/ 1, /*warnings*/ 0,),
-            (
-                CheckStatus::Fail,
-                "one or more required provider endpoints are unreachable over HTTP",
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn provider_reachability_route_404_fails_bad_base_url_path() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-        let addr = listener.local_addr().expect("listener address");
-        let server = std::thread::spawn(move || {
-            respond_once(
-                &listener,
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-            respond_once(
-                &listener,
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-        });
-        let plan = provider_reachability_plan_from_parts(
-            ProviderAuthReachabilityMode::ApiKey,
-            "openai",
-            "OpenAI",
-            Some(&format!("http://{addr}/xxxx")),
-            /*provider_query_params*/ None,
-            /*is_amazon_bedrock*/ false,
-            "https://chatgpt.com/backend-api/",
-        );
-
-        let check = provider_reachability_check(plan).await;
-        server.join().expect("probe server thread should finish");
-
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert!(
-            check
-                .details
-                .iter()
-                .any(|detail| detail.contains("route probe:") && detail.contains("HTTP 404"))
-        );
-        assert_eq!(check.issues.len(), 1);
-        assert_eq!(
-            check.issues[0].remedy.as_deref(),
-            Some("Set base_url to the provider API root, for example https://api.openai.com/v1")
-        );
-    }
-
-    #[tokio::test]
-    async fn provider_reachability_route_401_keeps_reachability_ok() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-        let addr = listener.local_addr().expect("listener address");
-        let server = std::thread::spawn(move || {
-            respond_once(
-                &listener,
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-            respond_once(
-                &listener,
-                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-        });
-        let plan = provider_reachability_plan_from_parts(
-            ProviderAuthReachabilityMode::ApiKey,
-            "openai",
-            "OpenAI",
-            Some(&format!("http://{addr}/v1")),
-            /*provider_query_params*/ None,
-            /*is_amazon_bedrock*/ false,
-            "https://chatgpt.com/backend-api/",
-        );
-
-        let check = provider_reachability_check(plan).await;
-        server.join().expect("probe server thread should finish");
-
-        assert_eq!(check.status, CheckStatus::Ok);
-        assert!(
-            check
-                .details
-                .iter()
-                .any(|detail| detail.contains("route exists (HTTP 401)"))
-        );
     }
 
     #[test]
@@ -3847,62 +2629,8 @@ mod tests {
         assert_eq!(stats.error, None);
     }
 
-    #[tokio::test]
-    async fn http_probe_treats_http_status_as_reachable() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-        let addr = listener.local_addr().expect("listener address");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept probe request");
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request);
-            stream
-                .write_all(
-                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .expect("write response");
-        });
-
-        let status = http_probe_url(&format!("http://{addr}/mcp")).await;
-        server.join().expect("probe server thread should finish");
-
-        assert_eq!(status, Ok("HTTP 405".to_string()));
-    }
-
-    #[tokio::test]
-    async fn mcp_http_probe_falls_back_to_get_when_head_times_out() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-        let addr = listener.local_addr().expect("listener address");
-        let server = std::thread::spawn(move || {
-            let (mut head_stream, _) = listener.accept().expect("accept HEAD probe request");
-            let head = std::thread::spawn(move || {
-                let mut request = [0; 1024];
-                let _ = head_stream.read(&mut request);
-                std::thread::sleep(Duration::from_millis(50));
-            });
-
-            let (mut get_stream, _) = listener.accept().expect("accept GET probe request");
-            let mut request = [0; 1024];
-            let _ = get_stream.read(&mut request);
-            get_stream
-                .write_all(
-                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .expect("write response");
-            head.join().expect("HEAD holder should finish");
-        });
-
-        let status = mcp_http_probe_url_with_timeout(
-            &format!("http://{addr}/mcp"),
-            Duration::from_millis(10),
-        )
-        .await;
-        server.join().expect("probe server thread should finish");
-
-        assert_eq!(status, Ok("HTTP 405".to_string()));
-    }
-
-    #[tokio::test]
-    async fn mcp_check_fails_required_missing_stdio_command() {
+    #[test]
+    fn mcp_check_fails_required_missing_stdio_command() {
         let required_server: McpServerConfig = toml::from_str(
             r#"
                 command = "definitely-missing-codex-doctor-mcp"
@@ -3912,12 +2640,12 @@ mod tests {
         .expect("should deserialize required MCP config");
         let servers = HashMap::from([("required".to_string(), required_server)]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
         assert_eq!(check.status, CheckStatus::Fail);
         assert_eq!(
             check.summary,
-            "MCP configuration has failing required inputs or reachability"
+            "MCP configuration has failing required inputs"
         );
         assert!(check.details.iter().any(|detail| {
             detail.contains(
@@ -3926,8 +2654,8 @@ mod tests {
         }));
     }
 
-    #[tokio::test]
-    async fn mcp_check_skips_host_path_checks_for_remote_stdio() {
+    #[test]
+    fn mcp_check_skips_host_path_checks_for_remote_stdio() {
         #[cfg(not(windows))]
         let cwd = r"C:\Users\openai\share";
         #[cfg(windows)]
@@ -3945,14 +2673,14 @@ mod tests {
         .expect("should deserialize remote MCP config");
         let servers = HashMap::from([("remote".to_string(), remote_server)]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
         assert_eq!(check.status, CheckStatus::Ok);
         assert_eq!(check.summary, "MCP configuration is locally consistent");
     }
 
-    #[tokio::test]
-    async fn mcp_check_validates_remote_stdio_cwd() {
+    #[test]
+    fn mcp_check_validates_remote_stdio_cwd() {
         let missing_cwd: McpServerConfig = toml::from_str(
             r#"
                 command = "echo"
@@ -3975,7 +2703,7 @@ mod tests {
             ("relative".to_string(), relative_cwd),
         ]);
 
-        let check = mcp_check_from_servers(&servers).await;
+        let check = mcp_check_from_servers(&servers);
 
         assert_eq!(check.status, CheckStatus::Fail);
         assert!(

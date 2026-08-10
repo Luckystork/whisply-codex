@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CurrentTimeReadResponse;
@@ -53,9 +56,9 @@ async fn external_sleep_polls_current_time_and_emits_items() -> Result<()> {
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_root_config("include_environment_context = false")
-        .with_extra_config(
+    ManagedWhisplyConfig::new()
+        .with_additional_config("include_environment_context = false")
+        .with_additional_config(
             r#"[features.current_time_reminder]
 enabled = true
 sleep_tool = true
@@ -64,8 +67,10 @@ clock_source = "external"
         )
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 

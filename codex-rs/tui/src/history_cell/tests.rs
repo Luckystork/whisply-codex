@@ -1188,30 +1188,19 @@ fn web_search_history_cell_snapshot() {
 }
 
 #[test]
-fn standalone_unix_update_available_history_cell_snapshot() {
+fn managed_update_available_history_cell_has_no_standalone_installer() {
     let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneUnix));
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::ManagedAppBundle));
+    let rendered = cell
+        .raw_lines()
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    insta::assert_snapshot!(rendered);
-}
-
-#[test]
-fn standalone_windows_update_available_history_cell_snapshot() {
-    let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
-
-    insta::assert_snapshot!(rendered);
-}
-
-#[test]
-fn pnpm_update_available_history_cell_snapshot() {
-    let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
-
-    insta::assert_snapshot!(rendered);
+    assert!(rendered.contains("Whisply app update"));
+    assert!(!rendered.contains("curl"));
+    assert!(!rendered.contains("@openai"));
 }
 
 #[test]

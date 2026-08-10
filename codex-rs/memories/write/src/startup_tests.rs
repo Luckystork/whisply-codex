@@ -410,6 +410,56 @@ async fn memories_startup_phase1_uses_live_thread_service_tier_and_detached_meta
 }
 
 #[tokio::test]
+async fn memories_startup_phase1_retains_the_supplied_provider_for_transport() -> anyhow::Result<()>
+{
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let test = build_test_codex(&server, home).await?;
+    let provider = Arc::new(MockMemoryModelProvider::new(
+        test.config.model_provider.clone(),
+        Some(test.thread_manager.auth_manager()),
+    ));
+    let config_snapshot = test.codex.config_snapshot().await;
+    let mut config = test.config.clone();
+    // The supplied provider retains the mock endpoint. Reconstructing from
+    // config would instead fail before making the mounted request below.
+    config.model_provider.base_url = Some("invalid://config-provider".to_string());
+    let context = MemoryStartupContext::new_for_testing(
+        Arc::clone(&test.thread_manager),
+        test.thread_manager.auth_manager(),
+        test.session_configured.thread_id,
+        Arc::clone(&test.codex),
+        &config,
+        config_snapshot.session_source,
+        provider,
+    );
+    let request_context = context
+        .stage_one_request_context(&config, MOCK_PROVIDER_PHASE_ONE_MODEL, ReasoningEffort::Low)
+        .await;
+    let stage_one = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-phase1"),
+            ev_assistant_message("msg-phase1", "phase1 complete"),
+            ev_completed("resp-phase1"),
+        ]),
+    )
+    .await;
+
+    context
+        .stream_stage_one_prompt(&config, &codex_core::Prompt::default(), &request_context)
+        .await?;
+    let request = wait_for_single_request(&stage_one).await;
+    assert_eq!(
+        request.body_json()["model"].as_str(),
+        Some(MOCK_PROVIDER_PHASE_ONE_MODEL)
+    );
+
+    shutdown_test_codex(&test).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn memories_startup_phase1_provider_default_drives_request_model() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);

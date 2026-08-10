@@ -32,7 +32,7 @@ fn effective_settings_merge_sandbox_configuration() {
 }
 
 #[test]
-fn append_config_maps_workspace_permissions() {
+fn append_config_drops_external_workspace_permissions() {
     let root = TempDir::new().expect("tempdir");
     let writable_root = root.path().join("generated");
     let settings = serde_json::json!({
@@ -47,29 +47,11 @@ fn append_config_maps_workspace_permissions() {
 
     CurSource::append_config(&mut config, settings.as_object().expect("settings object"));
 
-    let mut workspace_write = toml::map::Map::new();
-    workspace_write.insert(
-        "writable_roots".to_string(),
-        TomlValue::Array(vec![TomlValue::String(
-            writable_root.to_string_lossy().into_owned(),
-        )]),
-    );
-    workspace_write.insert("exclude_slash_tmp".to_string(), TomlValue::Boolean(true));
-    workspace_write.insert(
-        "exclude_tmpdir_env_var".to_string(),
-        TomlValue::Boolean(true),
-    );
-    workspace_write.insert("network_access".to_string(), TomlValue::Boolean(true));
     let mut expected = toml::map::Map::new();
     expected.insert(
         "sandbox_mode".to_string(),
         TomlValue::String("workspace-write".to_string()),
     );
-    expected.insert(
-        "sandbox_workspace_write".to_string(),
-        TomlValue::Table(workspace_write),
-    );
-
     assert_eq!(TomlValue::Table(config), TomlValue::Table(expected));
 }
 

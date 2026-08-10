@@ -209,7 +209,7 @@ impl ConfigLayerEntry {
         }
     }
 
-    // Get the `.codex/` folder associated with this config layer, if any.
+    // Get the `.whisply/` folder associated with this config layer, if any.
     pub fn config_folder(&self) -> Option<AbsolutePathBuf> {
         match &self.name {
             ConfigLayerSource::Mdm { .. } => None,
@@ -223,7 +223,7 @@ impl ConfigLayerEntry {
         }
     }
 
-    /// Returns the `.codex/` folder that should be used for hook declarations.
+    /// Returns the `.whisply/` folder that should be used for hook declarations.
     ///
     /// Project layers normally use their own config folder. Linked Git worktrees
     /// can instead point hook discovery at the matching folder from the root
@@ -259,6 +259,12 @@ pub struct ConfigLayerStack {
     /// `None` means the loader did not check for stack-level warnings, while
     /// `Some(vec![])` means it checked and found nothing to report.
     startup_warnings: Option<Vec<String>>,
+
+    /// Loader-authorized boundary for repository-local discovery.
+    ///
+    /// This is retained separately from project config layers because a trusted
+    /// repository can legitimately have no `.whisply` directory.
+    trusted_project_root: Option<AbsolutePathBuf>,
 }
 
 impl ConfigLayerStack {
@@ -275,7 +281,22 @@ impl ConfigLayerStack {
             requirements_toml,
             ignore_user_and_project_exec_policy_rules: false,
             startup_warnings: None,
+            trusted_project_root: None,
         })
+    }
+
+    pub(crate) fn with_trusted_project_root(
+        mut self,
+        trusted_project_root: Option<AbsolutePathBuf>,
+    ) -> Self {
+        self.trusted_project_root = trusted_project_root;
+        self
+    }
+
+    /// Returns the loader-authorized root for repo-scoped discovery, if the
+    /// active project passed the trust gate.
+    pub fn trusted_project_root(&self) -> Option<&AbsolutePathBuf> {
+        self.trusted_project_root.as_ref()
     }
 
     pub fn with_user_and_project_exec_policy_rules_ignored(
@@ -303,7 +324,7 @@ impl ConfigLayerStack {
     ///
     /// This does not merge other config layers or apply any requirements. When
     /// a profile-v2 layer is active, this returns that profile layer rather than
-    /// the base `$CODEX_HOME/config.toml` layer because the active layer is the
+    /// the base `$WHISPLY_HOME/config.toml` layer because the active layer is the
     /// writable target for profile-aware edits.
     pub fn get_active_user_layer(&self) -> Option<&ConfigLayerEntry> {
         self.layers
@@ -381,6 +402,7 @@ impl ConfigLayerStack {
         );
         validate_enabled_config_layers(std::slice::from_ref(&user_layer))?;
 
+        let trust_inputs_before = project_trust_inputs(&self.layers);
         let mut layers = self.layers.clone();
         if let Some(index) = layers.iter().position(|layer| {
             matches!(
@@ -397,6 +419,10 @@ impl ConfigLayerStack {
             Some(index) => layers.insert(index, user_layer),
             None => layers.push(user_layer),
         }
+        let project_trust_changed = project_trust_inputs(&layers) != trust_inputs_before;
+        if project_trust_changed {
+            layers.retain(|layer| !matches!(layer.name, ConfigLayerSource::Project { .. }));
+        }
         Ok(Self {
             layers,
             requirements: self.requirements.clone(),
@@ -404,12 +430,57 @@ impl ConfigLayerStack {
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
+            trusted_project_root: (!project_trust_changed)
+                .then(|| self.trusted_project_root.clone())
+                .flatten(),
         })
     }
 
-    /// Returns a new stack with the user layer copied from `other`, preserving
-    /// every non-user layer already present in this stack.
+    /// Replaces user and project layers with a fresh loader-produced snapshot
+    /// while preserving session-local and managed layers from this stack.
+    pub fn with_user_and_project_layers_from(&self, other: &Self) -> Self {
+        let mut layers = self
+            .layers
+            .iter()
+            .filter(|layer| {
+                !matches!(
+                    layer.name,
+                    ConfigLayerSource::User { .. } | ConfigLayerSource::Project { .. }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for layer in other.layers.iter().filter(|layer| {
+            matches!(
+                layer.name,
+                ConfigLayerSource::User { .. } | ConfigLayerSource::Project { .. }
+            )
+        }) {
+            match layers
+                .iter()
+                .position(|existing| existing.name.precedence() > layer.name.precedence())
+            {
+                Some(index) => layers.insert(index, layer.clone()),
+                None => layers.push(layer.clone()),
+            }
+        }
+        Self {
+            layers,
+            requirements: self.requirements.clone(),
+            requirements_toml: self.requirements_toml.clone(),
+            ignore_user_and_project_exec_policy_rules: self
+                .ignore_user_and_project_exec_policy_rules,
+            startup_warnings: self.startup_warnings.clone(),
+            trusted_project_root: other.trusted_project_root.clone(),
+        }
+    }
+
+    /// Returns a new stack with the user layer copied from `other`.
+    ///
+    /// Project layers and their trust boundary are retained only when the
+    /// copied user configuration leaves project-trust inputs unchanged.
     pub fn with_user_layer_from(&self, other: &Self) -> Self {
+        let trust_inputs_before = project_trust_inputs(&self.layers);
         let user_layers = other
             .layers
             .iter()
@@ -431,6 +502,10 @@ impl ConfigLayerStack {
                 None => layers.push(user_layer),
             }
         }
+        let project_trust_changed = project_trust_inputs(&layers) != trust_inputs_before;
+        if project_trust_changed {
+            layers.retain(|layer| !matches!(layer.name, ConfigLayerSource::Project { .. }));
+        }
         Self {
             layers,
             requirements: self.requirements.clone(),
@@ -438,6 +513,9 @@ impl ConfigLayerStack {
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
+            trusted_project_root: (!project_trust_changed)
+                .then(|| self.trusted_project_root.clone())
+                .flatten(),
         }
     }
 
@@ -498,6 +576,22 @@ impl ConfigLayerStack {
     pub fn all_layers_high_to_low(&self) -> impl DoubleEndedIterator<Item = &ConfigLayerEntry> {
         self.all_layers_low_to_high().rev()
     }
+}
+
+fn project_trust_inputs(layers: &[ConfigLayerEntry]) -> (Option<TomlValue>, Option<TomlValue>) {
+    let mut effective = TomlValue::Table(Default::default());
+    for layer in layers {
+        if !matches!(layer.name, ConfigLayerSource::Project { .. }) {
+            merge_toml_values(&mut effective, &layer.config);
+        }
+    }
+    let table = effective.as_table();
+    (
+        table.and_then(|table| table.get("projects")).cloned(),
+        table
+            .and_then(|table| table.get("project_root_markers"))
+            .cloned(),
+    )
 }
 
 /// Validates before merging so mixed forms and malformed filter entries cannot be normalized away.

@@ -5049,6 +5049,48 @@
           "type": "object"
         },
         {
+          "description": "Progress for an owner-validated first-party Whisply tool. This is a normal event projection and carries no trusted execution envelope.",
+          "properties": {
+            "method": {
+              "enum": [
+                "whisply/tool/progress"
+              ],
+              "title": "Whisply/tool/progressNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/WhisplyToolProgress"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Whisply/tool/progressNotification",
+          "type": "object"
+        },
+        {
+          "description": "Terminal result for an owner-validated first-party Whisply tool. This is distinct from generic dynamic tools so setup/confirmation suspension cannot be projected as an automatic success.",
+          "properties": {
+            "method": {
+              "enum": [
+                "whisply/tool/result"
+              ],
+              "title": "Whisply/tool/resultNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/WhisplyToolResult"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Whisply/tool/resultNotification",
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "enum": [
@@ -5895,6 +5937,56 @@
           "type": "object"
         },
         {
+          "description": "Execute a first-party Whisply tool through the trusted native/server owner. This is intentionally distinct from `item/tool/call`: only this route carries the separately authenticated execution envelope and strictest-wins policy inputs.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "whisply/tool/execute"
+              ],
+              "title": "Whisply/tool/executeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/WhisplyToolAppServerExecuteRequest"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Whisply/tool/executeRequest",
+          "type": "object"
+        },
+        {
+          "description": "Cancel a first-party Whisply tool execution. Cancellation retains the same trusted envelope so a model-visible execution id alone cannot target another account, task, or broker generation.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "whisply/tool/cancel"
+              ],
+              "title": "Whisply/tool/cancelRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/WhisplyToolAppServerCancelRequest"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Whisply/tool/cancelRequest",
+          "type": "object"
+        },
+        {
           "properties": {
             "id": {
               "$ref": "#/definitions/v2/RequestId"
@@ -6139,6 +6231,408 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "WhisplyExecutionEnvelope": {
+      "additionalProperties": false,
+      "description": "Trusted data that is never embedded in model-visible tool arguments.",
+      "properties": {
+        "accountEpoch": {
+          "type": "string"
+        },
+        "activityID": {
+          "type": "string"
+        },
+        "confirmationHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contentDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deviceID": {
+          "type": "string"
+        },
+        "expiresAtMS": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "installationID": {
+          "type": "string"
+        },
+        "leasePhase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WhisplyToolLeasePhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "leaseToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "originDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serverIntentGrantID": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skillRunID": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskID": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskVersion": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "threadID": {
+          "type": "string"
+        },
+        "turnID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountEpoch",
+        "activityID",
+        "deviceID",
+        "expiresAtMS",
+        "installationID",
+        "nonce",
+        "threadID",
+        "turnID"
+      ],
+      "type": "object"
+    },
+    "WhisplyToolAppServerCancelRequest": {
+      "additionalProperties": false,
+      "description": "Trusted cancellation request for `whisply/tool/cancel`.",
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/WhisplyExecutionEnvelope"
+        },
+        "executionID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "envelope",
+        "executionID"
+      ],
+      "type": "object"
+    },
+    "WhisplyToolAppServerExecuteRequest": {
+      "additionalProperties": false,
+      "description": "Trusted server-to-native execution request for `whisply/tool/execute`.",
+      "properties": {
+        "call": {
+          "$ref": "#/definitions/WhisplyToolModelCall"
+        },
+        "envelope": {
+          "$ref": "#/definitions/WhisplyExecutionEnvelope"
+        },
+        "policyInputs": {
+          "$ref": "#/definitions/WhisplyToolPolicyInput"
+        }
+      },
+      "required": [
+        "call",
+        "envelope",
+        "policyInputs"
+      ],
+      "type": "object"
+    },
+    "WhisplyToolCancelParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Trusted cancellation request for `whisply/tool/cancel`.",
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/WhisplyExecutionEnvelope"
+        },
+        "executionID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "envelope",
+        "executionID"
+      ],
+      "title": "WhisplyToolAppServerCancelRequest",
+      "type": "object"
+    },
+    "WhisplyToolCancelResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Typed cancellation acknowledgement. It never contains handler secrets or authority data.",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "executionID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted",
+        "executionID"
+      ],
+      "title": "WhisplyToolAppServerCancelAcknowledgement",
+      "type": "object"
+    },
+    "WhisplyToolExecuteParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Trusted server-to-native execution request for `whisply/tool/execute`.",
+      "properties": {
+        "call": {
+          "$ref": "#/definitions/WhisplyToolModelCall"
+        },
+        "envelope": {
+          "$ref": "#/definitions/WhisplyExecutionEnvelope"
+        },
+        "policyInputs": {
+          "$ref": "#/definitions/WhisplyToolPolicyInput"
+        }
+      },
+      "required": [
+        "call",
+        "envelope",
+        "policyInputs"
+      ],
+      "title": "WhisplyToolAppServerExecuteRequest",
+      "type": "object"
+    },
+    "WhisplyToolExecuteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Terminal result delivered through the normal typed item/event path.",
+      "properties": {
+        "content": true,
+        "executionID": {
+          "type": "string"
+        },
+        "receiptID": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "safeSummary": {
+          "type": "string"
+        },
+        "setupRoute": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/v2/WhisplyToolTerminalStatus"
+        }
+      },
+      "required": [
+        "executionID",
+        "safeSummary",
+        "status"
+      ],
+      "title": "WhisplyToolResult",
+      "type": "object"
+    },
+    "WhisplyToolLeasePhase": {
+      "description": "Closed trusted lease phases. Unknown values fail deserialization rather than becoming an execution permission.",
+      "enum": [
+        "prepare",
+        "execute",
+        "verify",
+        "commit",
+        "resume"
+      ],
+      "type": "string"
+    },
+    "WhisplyToolModelCall": {
+      "additionalProperties": false,
+      "description": "Model-visible first-party tool call. Authority data is deliberately absent.",
+      "properties": {
+        "arguments": true,
+        "executionID": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "toolID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "executionID",
+        "schemaVersion",
+        "toolID"
+      ],
+      "type": "object"
+    },
+    "WhisplyToolPolicyDecision": {
+      "description": "An independently-produced policy decision. Aggregation must only make a decision stricter; a call may not use this wire object to relax policy.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "allowed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "AllowedWhisplyToolPolicyDecision",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "setup_required"
+              ],
+              "type": "string"
+            },
+            "route": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "route"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "confirmation_required"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "ConfirmationRequiredWhisplyToolPolicyDecision",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "denied"
+              ],
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "unavailable"
+              ],
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WhisplyToolPolicyInput": {
+      "additionalProperties": false,
+      "description": "Per-owner policy inputs for exactly one execution.",
+      "properties": {
+        "connectorDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "finalConfirmationDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "modeDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "nativePermissionDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "serverDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "subscriptionDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "targetOrFileDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        },
+        "upstreamSandboxDecision": {
+          "$ref": "#/definitions/WhisplyToolPolicyDecision"
+        }
+      },
+      "required": [
+        "connectorDecision",
+        "finalConfirmationDecision",
+        "modeDecision",
+        "nativePermissionDecision",
+        "serverDecision",
+        "subscriptionDecision",
+        "targetOrFileDecision",
+        "upstreamSandboxDecision"
+      ],
       "type": "object"
     },
     "v2": {
@@ -22487,6 +22981,80 @@
           }
         },
         "type": "object"
+      },
+      "WhisplyToolProgress": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "description": "Progress delivered through the normal typed item/event path.",
+        "properties": {
+          "executionID": {
+            "type": "string"
+          },
+          "fraction": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "executionID",
+          "label"
+        ],
+        "title": "WhisplyToolProgress",
+        "type": "object"
+      },
+      "WhisplyToolResult": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "description": "Terminal result delivered through the normal typed item/event path.",
+        "properties": {
+          "content": true,
+          "executionID": {
+            "type": "string"
+          },
+          "receiptID": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "safeSummary": {
+            "type": "string"
+          },
+          "setupRoute": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/WhisplyToolTerminalStatus"
+          }
+        },
+        "required": [
+          "executionID",
+          "safeSummary",
+          "status"
+        ],
+        "title": "WhisplyToolResult",
+        "type": "object"
+      },
+      "WhisplyToolTerminalStatus": {
+        "description": "Terminal execution states. Setup and confirmation are suspension points, not successful authority escalation.",
+        "enum": [
+          "succeeded",
+          "failed",
+          "cancelled",
+          "setup_required",
+          "confirmation_required",
+          "unavailable"
+        ],
+        "type": "string"
       },
       "WindowsSandboxReadiness": {
         "enum": [

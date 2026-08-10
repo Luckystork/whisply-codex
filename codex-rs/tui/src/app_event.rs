@@ -468,6 +468,11 @@ pub(crate) enum AppEvent {
     /// Result of computing a `/diff` command.
     DiffResult(String),
 
+    /// Settled result of one capability-authenticated `/controls` broker call.
+    /// The payload is a bounded, redacted display string rather than broker
+    /// ownership, capability, or endpoint state.
+    HostControlsResult(Result<String, String>),
+
     /// Open the app link view in the bottom pane.
     OpenAppLink {
         app_id: String,

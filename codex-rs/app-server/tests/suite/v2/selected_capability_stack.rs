@@ -1,14 +1,13 @@
+#![cfg(target_os = "macos")]
+
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
-use app_test_support::write_chatgpt_auth;
-use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
-use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::CapabilityRootLocation;
 use codex_app_server_protocol::EnvironmentAddResponse;
 use codex_app_server_protocol::ListMcpServerStatusParams;
@@ -23,8 +22,8 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -45,15 +44,11 @@ use tokio::process::Child;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::app_list::connector_tool;
-use super::app_list::start_apps_server_with_delays;
-
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const EXECUTOR_ID: &str = "executor-1";
 const EXECUTOR_ENV_NAME: &str = "MCP_EXECUTOR_MARKER";
 const EXECUTOR_ENV_VALUE: &str = "executor-only";
 const PLUGIN_ID: &str = "executor-demo@1";
-const PLUGIN_DISPLAY_NAME: &str = "Executor Demo";
 const SKILL_NAME: &str = "executor-demo:deploy";
 const SKILL_DESCRIPTION: &str = "Deploy through the selected executor.";
 const SKILL_BODY_MARKER: &str = "SELECTED_EXECUTOR_SKILL_BODY";
@@ -61,35 +56,11 @@ const LOCAL_SKILL_BODY_MARKER: &str = "COLLIDING_LOCAL_SKILL_BODY";
 const NO_SELECTED_SKILLS_MESSAGE: &str = "No selected-environment skills are currently available.";
 const MCP_SERVER_NAME: &str = "executor_probe";
 const MCP_CALL_ID: &str = "selected-executor-mcp-call";
-const CONNECTOR_ID: &str = "calendar";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_capability_stack_tracks_environment_availability_and_resume() -> Result<()> {
     let responses_server = responses::start_mock_server().await;
-    let (apps_url, apps_server_handle) = start_apps_server_with_delays(
-        vec![AppInfo {
-            id: CONNECTOR_ID.to_string(),
-            name: "Calendar".to_string(),
-            description: None,
-            logo_url: None,
-            logo_url_dark: None,
-            icon_assets: None,
-            icon_dark_assets: None,
-            distribution_channel: None,
-            branding: None,
-            app_metadata: None,
-            labels: None,
-            install_url: None,
-            is_accessible: false,
-            is_enabled: true,
-            plugin_display_names: Vec::new(),
-        }],
-        vec![connector_tool(CONNECTOR_ID, "Calendar")?],
-        Duration::ZERO,
-        Duration::ZERO,
-    )
-    .await?;
-    let fixture = selected_capability_fixture(&responses_server.uri(), &apps_url)?;
+    let fixture = selected_capability_fixture(&responses_server.uri())?;
 
     let response_mock = responses::mount_sse_sequence(
         &responses_server,
@@ -140,7 +111,9 @@ async fn selected_capability_stack_tracks_environment_availability_and_resume() 
     )
     .await;
 
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(
+        &fixture.responses_server_uri,
+    )
         .with_codex_home(fixture.codex_home.path())
         // This fixture owns environments.toml and selects its environments explicitly.
         .without_auto_env()
@@ -191,7 +164,9 @@ async fn selected_capability_stack_tracks_environment_availability_and_resume() 
     drop(app_server);
     std::fs::remove_file(&fixture.pid_file)?;
 
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(
+        &fixture.responses_server_uri,
+    )
         .with_codex_home(fixture.codex_home.path())
         // This fixture owns environments.toml and selects its environments explicitly.
         .without_auto_env()
@@ -221,7 +196,7 @@ async fn selected_capability_stack_tracks_environment_availability_and_resume() 
     .await?;
     let requests = response_mock.requests();
     assert_eq!(5, requests.len());
-    assert_selected_plugin_tools_absent(&requests[4]);
+    assert_selected_mcp_tool_is_absent(&requests[4]);
     assert!(
         latest_selected_skill_update(&requests[4])
             .is_some_and(|text| text.contains(NO_SELECTED_SKILLS_MESSAGE))
@@ -245,12 +220,12 @@ async fn selected_capability_stack_tracks_environment_availability_and_resume() 
     assert_eq!(6, requests.len());
     for request in &requests[1..4] {
         assert_selected_skill_is_injected(request, /*expected_count*/ 1);
-        assert_selected_plugin_tools(request);
+        assert_selected_mcp_tool_is_available(request);
         assert_plugin_guidance_count(request, /*expected_count*/ 0);
     }
     assert_plugin_guidance_count(&requests[4], /*expected_count*/ 0);
     assert_selected_skill_is_injected(&requests[5], /*expected_count*/ 2);
-    assert_selected_plugin_tools(&requests[5]);
+    assert_selected_mcp_tool_is_available(&requests[5]);
     let output = requests[2].function_call_output(MCP_CALL_ID);
     let output = output["output"]
         .as_str()
@@ -259,8 +234,6 @@ async fn selected_capability_stack_tracks_environment_availability_and_resume() 
     assert!(output.contains(EXECUTOR_ENV_VALUE));
 
     exec_server.kill().await?;
-    apps_server_handle.abort();
-    let _ = apps_server_handle.await;
     Ok(())
 }
 
@@ -269,30 +242,7 @@ async fn selected_capabilities_become_available_between_samples_in_one_turn() ->
     const USER_INPUT_CALL_ID: &str = "pause-for-environment";
 
     let responses_server = responses::start_mock_server().await;
-    let (apps_url, apps_server_handle) = start_apps_server_with_delays(
-        vec![AppInfo {
-            id: CONNECTOR_ID.to_string(),
-            name: "Calendar".to_string(),
-            description: None,
-            logo_url: None,
-            logo_url_dark: None,
-            icon_assets: None,
-            icon_dark_assets: None,
-            distribution_channel: None,
-            branding: None,
-            app_metadata: None,
-            labels: None,
-            install_url: None,
-            is_accessible: false,
-            is_enabled: true,
-            plugin_display_names: Vec::new(),
-        }],
-        vec![connector_tool(CONNECTOR_ID, "Calendar")?],
-        Duration::ZERO,
-        Duration::ZERO,
-    )
-    .await?;
-    let fixture = selected_capability_fixture(&responses_server.uri(), &apps_url)?;
+    let fixture = selected_capability_fixture(&responses_server.uri())?;
     let response_mock = responses::mount_sse_sequence(
         &responses_server,
         vec![
@@ -343,7 +293,9 @@ async fn selected_capabilities_become_available_between_samples_in_one_turn() ->
     )
     .await;
 
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(
+        &fixture.responses_server_uri,
+    )
         .with_codex_home(fixture.codex_home.path())
         // This fixture owns environments.toml and selects its environments explicitly.
         .without_auto_env()
@@ -416,9 +368,9 @@ async fn selected_capabilities_become_available_between_samples_in_one_turn() ->
     let requests = response_mock.requests();
     assert_eq!(3, requests.len());
     assert_selected_skill_catalog_available(&requests[1]);
-    assert_selected_plugin_tools(&requests[1]);
+    assert_selected_mcp_tool_is_available(&requests[1]);
     assert_plugin_guidance_count(&requests[1], /*expected_count*/ 0);
-    assert_selected_plugin_tools(&requests[2]);
+    assert_selected_mcp_tool_is_available(&requests[2]);
     assert_plugin_guidance_count(&requests[2], /*expected_count*/ 0);
     let output = requests[2].function_call_output(MCP_CALL_ID);
     let output = output["output"]
@@ -429,13 +381,12 @@ async fn selected_capabilities_become_available_between_samples_in_one_turn() ->
     wait_for_pid_file(&fixture.pid_file).await?;
 
     exec_server.kill().await?;
-    apps_server_handle.abort();
-    let _ = apps_server_handle.await;
     Ok(())
 }
 
 struct SelectedCapabilityFixture {
     codex_home: TempDir,
+    responses_server_uri: String,
     _plugin: TempDir,
     pid_file: std::path::PathBuf,
     exec_server_url: String,
@@ -443,37 +394,13 @@ struct SelectedCapabilityFixture {
     environment_cwd: AbsolutePathBuf,
 }
 
-fn selected_capability_fixture(
-    responses_server_uri: &str,
-    apps_url: &str,
-) -> Result<SelectedCapabilityFixture> {
+fn selected_capability_fixture(responses_server_uri: &str) -> Result<SelectedCapabilityFixture> {
     let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        responses_server_uri,
-        apps_url,
-    )?;
-    let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?.replacen(
-        "model_provider = \"mock_provider\"",
-        "mcp_oauth_credentials_store = \"file\"\nmodel_provider = \"mock_provider\"",
-        1,
-    );
-    std::fs::write(
-        config_path,
-        format!(
-            "{config}\n[features]\napps = true\ndeferred_executor = true\nexecutor_capability_discovery = true\n\n[skills]\ninclude_instructions = true\n"
-        ),
-    )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .email("selected-capability-stack@example.com")
-            .plan_type("pro")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
+    ManagedWhisplyConfig::new()
+        .enable_feature(Feature::DeferredExecutor)
+        .enable_feature(Feature::ExecutorCapabilityDiscovery)
+        .with_additional_config("[skills]\ninclude_instructions = true")
+        .write(codex_home.path())?;
 
     // Reserve the URL before app-server starts. The configured environment initially fails to
     // connect, then environment/add points the same stable ID at the same URL once it is live.
@@ -504,17 +431,13 @@ fn selected_capability_fixture(
     std::fs::create_dir_all(&skill_dir)?;
     std::fs::write(
         manifest_dir.join("plugin.json"),
-        r#"{"name":"executor-demo","apps":"./.app.json","interface":{"displayName":"Executor Demo"}}"#,
+        r#"{"name":"executor-demo","interface":{"displayName":"Executor Demo"}}"#,
     )?;
     std::fs::write(
         skill_dir.join("SKILL.md"),
         format!(
             "---\nname: deploy\ndescription: {SKILL_DESCRIPTION}\n---\n\n{SKILL_BODY_MARKER}\n"
         ),
-    )?;
-    std::fs::write(
-        plugin.path().join(".app.json"),
-        format!(r#"{{"apps":{{"calendar":{{"id":"{CONNECTOR_ID}"}}}}}}"#),
     )?;
     std::fs::write(
         plugin.path().join(".mcp.json"),
@@ -542,6 +465,7 @@ fn selected_capability_fixture(
     let environment_cwd = AbsolutePathBuf::try_from(plugin.path().to_path_buf())?;
     Ok(SelectedCapabilityFixture {
         codex_home,
+        responses_server_uri: responses_server_uri.to_string(),
         _plugin: plugin,
         pid_file,
         exec_server_url,
@@ -557,23 +481,15 @@ fn assert_selected_capabilities_absent(request: &ResponsesRequest) {
             .into_iter()
             .all(|text| !text.contains(SKILL_DESCRIPTION))
     );
-    assert_selected_plugin_tools_absent(request);
+    assert_selected_mcp_tool_is_absent(request);
     assert_plugin_guidance_count(request, /*expected_count*/ 0);
 }
 
-fn assert_selected_plugin_tools_absent(request: &ResponsesRequest) {
+fn assert_selected_mcp_tool_is_absent(request: &ResponsesRequest) {
     assert!(
         request
             .tool_by_name(&format!("mcp__{MCP_SERVER_NAME}"), "echo")
             .is_none()
-    );
-    let connector = request
-        .tool_by_name("mcp__codex_apps__calendar", "connector_calendar")
-        .expect("host connector should remain model-visible");
-    assert!(
-        connector["description"]
-            .as_str()
-            .is_some_and(|description| !description.contains(PLUGIN_DISPLAY_NAME))
     );
 }
 
@@ -618,19 +534,11 @@ fn latest_selected_skill_update(request: &ResponsesRequest) -> Option<String> {
         .rfind(|text| text.contains(SKILL_DESCRIPTION) || text.contains(NO_SELECTED_SKILLS_MESSAGE))
 }
 
-fn assert_selected_plugin_tools(request: &ResponsesRequest) {
+fn assert_selected_mcp_tool_is_available(request: &ResponsesRequest) {
     assert!(
         request
             .tool_by_name(&format!("mcp__{MCP_SERVER_NAME}"), "echo")
             .is_some()
-    );
-    let connector = request
-        .tool_by_name("mcp__codex_apps__calendar", "connector_calendar")
-        .expect("selected connector should be model-visible");
-    assert!(
-        connector["description"]
-            .as_str()
-            .is_some_and(|description| description.contains(PLUGIN_DISPLAY_NAME))
     );
 }
 
@@ -747,13 +655,14 @@ async fn wait_for_selected_mcp_server(
 }
 
 async fn spawn_exec_server(codex_home: &std::path::Path, url: &str) -> Result<Child> {
-    let mut child = Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
+    let mut child = Command::new(codex_utils_cargo_bin::cargo_bin("whisply")?)
         .args(["exec-server", "--listen", url])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
-        .env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home)
+        .env_remove("CODEX_HOME")
         .env(EXECUTOR_ENV_NAME, EXECUTOR_ENV_VALUE)
         .spawn()?;
     let stdout = child

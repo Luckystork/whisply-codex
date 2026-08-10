@@ -32,6 +32,7 @@ use codex_exec_server::ExecProcessEventReceiver;
 use codex_exec_server::ProcessId;
 use codex_exec_server::ProcessOutputChunk;
 use codex_exec_server::WriteStatus;
+use codex_secrets::redact_mcp_stderr;
 use memchr::memchr;
 use rmcp::service::RoleClient;
 use rmcp::service::RxJsonRpcMessage;
@@ -470,10 +471,11 @@ impl ExecutorProcessTransport {
         self.stderr.extend_from_slice(bytes)?;
         while let Some(line) = self.stderr.take_line() {
             let line = Self::trim_trailing_carriage_return(line);
+            let stderr = String::from_utf8_lossy(&line);
+            let redacted_line = redact_mcp_stderr(stderr.as_ref());
             info!(
                 "MCP server stderr ({}): {}",
-                self.program_name,
-                String::from_utf8_lossy(&line)
+                self.program_name, redacted_line
             );
         }
         Ok(())
@@ -483,10 +485,11 @@ impl ExecutorProcessTransport {
         let Some(line) = self.stderr.take_remaining() else {
             return;
         };
+        let stderr = String::from_utf8_lossy(&line);
+        let redacted_line = redact_mcp_stderr(stderr.as_ref());
         info!(
             "MCP server stderr ({}): {}",
-            self.program_name,
-            String::from_utf8_lossy(&line)
+            self.program_name, redacted_line
         );
     }
 

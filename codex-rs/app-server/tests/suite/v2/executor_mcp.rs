@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use axum::Json;
 use axum::Router;
@@ -133,11 +136,10 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
         let _ = axum::serve(http_listener, http_router).await;
     });
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&responses_server.uri())
-        .with_root_config(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
             "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 1024\nmcp_oauth_credentials_store = \"file\"",
         )
-        .with_provider_config("supports_websockets = false")
         .write(codex_home.path())?;
     let executor_config: codex_config::types::McpServerConfig = serde_json::from_value(json!({
         "url": EXECUTOR_OAUTH_MCP_URL,
@@ -158,7 +160,7 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
         serde_json::to_vec(&json!({"host": host_oauth_credential.clone()}))?,
     )?;
     let codex_bin = toml::Value::String(
-        codex_utils_cargo_bin::cargo_bin("codex")?
+        codex_utils_cargo_bin::cargo_bin("whisply")?
             .to_string_lossy()
             .into_owned(),
     );
@@ -210,8 +212,10 @@ HTTP_PROXY = {http_proxy}
         }))?,
     )?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&responses_server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         // This suite owns environments.toml to exercise explicit executor selection.
         .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)

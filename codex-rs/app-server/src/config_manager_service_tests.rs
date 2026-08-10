@@ -129,7 +129,7 @@ async fn process_routing_does_not_enter_config_layers() -> Result<()> {
         .await?;
 
     assert!(config.psp);
-    assert!(config.http_client_factory().has_chatgpt_cookies());
+    assert!(!config.http_client_factory().has_chatgpt_cookies());
     assert!(
         config
             .config_layer_stack
@@ -752,7 +752,7 @@ async fn managed_auth_policy_survives_unusable_requirements_file_changes() -> Re
         assert_eq!(refreshed.forced_chatgpt_workspace_id, None);
     }
     assert!(
-        auth_manager.is_login_method_allowed(codex_protocol::config_types::ForcedLoginMethod::Api)
+        !auth_manager.is_login_method_allowed(codex_protocol::config_types::ForcedLoginMethod::Api)
     );
     assert!(
         !auth_manager

@@ -26,6 +26,7 @@ mod review;
 mod thread;
 mod thread_data;
 mod turn;
+mod whisply_tool;
 mod windows_sandbox;
 
 pub use account::*;
@@ -55,6 +56,7 @@ pub use shared::*;
 pub use thread::*;
 pub use thread_data::*;
 pub use turn::*;
+pub use whisply_tool::*;
 pub use windows_sandbox::*;
 
 #[cfg(test)]

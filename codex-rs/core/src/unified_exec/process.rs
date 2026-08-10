@@ -61,6 +61,9 @@ pub(crate) type OutputBuffer = Arc<Mutex<HeadTailBuffer>>;
 #[derive(Clone)]
 pub(crate) struct OutputHandles {
     pub(crate) output_buffer: OutputBuffer,
+    /// Bounded lifetime output retained for the terminal command event. Unlike
+    /// `output_buffer`, polling never drains this buffer.
+    pub(crate) terminal_output_buffer: OutputBuffer,
     pub(crate) output_notify: Arc<Notify>,
     pub(crate) output_closed: Arc<AtomicBool>,
     pub(crate) output_closed_notify: Arc<Notify>,
@@ -77,6 +80,29 @@ impl Drop for OutputTaskGuard {
         self.output_closed.store(true, Ordering::Release);
         self.output_closed_notify.notify_waiters();
     }
+}
+
+/// Publish a chunk to the bounded terminal transcript, the drainable polling
+/// buffer, and the lossy live-delta stream. Terminal output must be recorded
+/// before publishing to the broadcast channel: delta receivers may lag without
+/// changing the eventual command result.
+async fn publish_output_chunk(
+    terminal_output_buffer: &OutputBuffer,
+    output_buffer: &OutputBuffer,
+    output_tx: &broadcast::Sender<Vec<u8>>,
+    output_notify: &Notify,
+    bytes: Vec<u8>,
+) {
+    {
+        let mut guard = terminal_output_buffer.lock().await;
+        guard.push_chunk(bytes.clone());
+    }
+    {
+        let mut guard = output_buffer.lock().await;
+        guard.push_chunk(bytes.clone());
+    }
+    let _ = output_tx.send(bytes);
+    output_notify.notify_waiters();
 }
 
 /// Transport-specific process handle used by unified exec.
@@ -118,6 +144,7 @@ impl UnifiedExecProcess {
     ) -> Self {
         let output = OutputHandles {
             output_buffer: Arc::new(Mutex::new(HeadTailBuffer::default())),
+            terminal_output_buffer: Arc::new(Mutex::new(HeadTailBuffer::default())),
             output_notify: Arc::new(Notify::new()),
             output_closed: Arc::new(AtomicBool::new(false)),
             output_closed_notify: Arc::new(Notify::new()),
@@ -172,6 +199,15 @@ impl UnifiedExecProcess {
 
     pub(super) fn output_receiver(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.output_tx.subscribe()
+    }
+
+    pub(super) fn terminal_output_buffer(&self) -> OutputBuffer {
+        Arc::clone(&self.output.terminal_output_buffer)
+    }
+
+    #[cfg(test)]
+    pub(super) fn output_sender_for_test(&self) -> broadcast::Sender<Vec<u8>> {
+        self.output_tx.clone()
     }
 
     pub(super) fn cancellation_token(&self) -> CancellationToken {
@@ -429,6 +465,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            terminal_output_buffer,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -504,11 +541,14 @@ impl UnifiedExecProcess {
                     } = response;
                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(bytes.clone());
-                        drop(guard);
-                        let _ = output_tx.send(bytes);
-                        output_notify.notify_waiters();
+                        publish_output_chunk(
+                            &terminal_output_buffer,
+                            &output_buffer,
+                            &output_tx,
+                            output_notify.as_ref(),
+                            bytes,
+                        )
+                        .await;
                     }
                     last_seq = last_seq.max(next_seq.saturating_sub(1));
                     if let Some(message) = failure {
@@ -547,11 +587,14 @@ impl UnifiedExecProcess {
                         }
                         last_seq = chunk.seq;
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(bytes.clone());
-                        drop(guard);
-                        let _ = output_tx.send(bytes);
-                        output_notify.notify_waiters();
+                        publish_output_chunk(
+                            &terminal_output_buffer,
+                            &output_buffer,
+                            &output_tx,
+                            output_notify.as_ref(),
+                            bytes,
+                        )
+                        .await;
                     }
                     ExecProcessEvent::Exited {
                         seq,
@@ -595,6 +638,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            terminal_output_buffer,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -608,11 +652,14 @@ impl UnifiedExecProcess {
             loop {
                 match receiver.recv().await {
                     Ok(chunk) => {
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(chunk.clone());
-                        drop(guard);
-                        let _ = output_tx.send(chunk);
-                        output_notify.notify_waiters();
+                        publish_output_chunk(
+                            &terminal_output_buffer,
+                            &output_buffer,
+                            &output_tx,
+                            output_notify.as_ref(),
+                            chunk,
+                        )
+                        .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {

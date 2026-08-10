@@ -4886,7 +4886,7 @@
       "type": "object"
     }
   },
-  "description": "Base config deserialized from ~/.codex/config.toml.",
+  "description": "Base config deserialized from ~/.whisply/config.toml.",
   "properties": {
     "agents": {
       "allOf": [
@@ -5475,7 +5475,7 @@
         "max_bytes": null,
         "persistence": "save-all"
       },
-      "description": "Settings that govern if and what will be written to `~/.codex/history.jsonl`."
+      "description": "Settings that govern if and what will be written to `~/.whisply/history.jsonl`."
     },
     "hooks": {
       "allOf": [
@@ -5511,7 +5511,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Directory where Codex writes log files. Setting this value explicitly also enables the TUI text log in this directory. Defaults to `$CODEX_HOME/log`."
+      "description": "Directory where Codex writes log files. Setting this value explicitly also enables the TUI text log in this directory. Defaults to `$WHISPLY_HOME/log`."
     },
     "marketplaces": {
       "additionalProperties": {
@@ -5717,7 +5717,7 @@
     },
     "project_root_markers": {
       "default": null,
-      "description": "Markers used to detect the project root when searching parent directories for `.codex` folders. Defaults to [\".git\"] when unset.",
+      "description": "Markers used to detect the project root when searching parent directories for `.whisply` folders. Defaults to [\".git\"] when unset.",
       "items": {
         "type": "string"
       },
@@ -5796,7 +5796,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
+      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$WHISPLY_SQLITE_HOME` when set. Otherwise uses `$WHISPLY_HOME`."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",

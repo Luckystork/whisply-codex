@@ -1,9 +1,8 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
-use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -32,15 +31,14 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 #[tokio::test]
 async fn thread_delete_rejects_paginated_writer_owned_by_another_process() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
     let thread_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-01T00-00-00",
         "2025-01-01T00:00:00Z",
         "owned",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let mut owner = TestAppServer::builder()
@@ -98,7 +96,7 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     let parent_thread_id = ThreadId::from_string(&parent_id)?;
@@ -208,7 +206,7 @@ async fn thread_delete_preflights_external_fork_references_for_spawned_subtrees(
 
     let state_db = StateRuntime::init(
         SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -267,7 +265,7 @@ fn create_delete_test_rollout(codex_home: &Path, minute: u8, preview: &str) -> R
         &format!("2025-01-01T00-{minute:02}-00"),
         &format!("2025-01-01T00:{minute:02}:00Z"),
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )
 }

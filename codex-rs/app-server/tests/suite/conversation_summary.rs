@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
 use app_test_support::rollout_path;
@@ -162,6 +162,7 @@ async fn get_conversation_summary_by_thread_id_reads_pathless_store_thread() -> 
         log_db: None,
         state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,
@@ -250,8 +251,8 @@ fn create_config_toml_with_in_memory_thread_store(
     codex_home: &Path,
     store_id: &str,
 ) -> std::io::Result<()> {
-    MockResponsesConfig::new("http://127.0.0.1:1")
-        .with_root_config(&format!(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(&format!(
             "experimental_thread_store = {{ type = \"in_memory\", id = \"{store_id}\" }}"
         ))
         .write(codex_home)

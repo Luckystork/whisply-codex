@@ -671,7 +671,7 @@ mod thread_processor_behavior_tests {
     }
 
     #[tokio::test]
-    async fn derive_config_from_params_uses_session_thread_config_model_provider() -> Result<()> {
+    async fn derive_config_from_params_rejects_hosted_session_provider_overrides() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let session_provider = ModelProviderInfo {
             name: "session".to_string(),
@@ -711,7 +711,7 @@ mod thread_processor_behavior_tests {
                 }),
             ])),
         );
-        let config = config_manager
+        let error = config_manager
             .load_with_overrides(
                 Some(HashMap::from([
                     ("model_provider".to_string(), json!("request")),
@@ -728,12 +728,12 @@ mod thread_processor_behavior_tests {
                 ])),
                 ConfigOverrides::default(),
             )
-            .await?;
+            .await
+            .expect_err("hosted session provider overrides must be rejected");
 
-        assert_eq!(config.model_provider_id, "session");
-        assert_eq!(config.model_provider, session_provider);
-        assert!(!config.features.enabled(Feature::Plugins));
-        assert!(config.bypass_hook_trust);
+        let message = error.to_string();
+        assert!(message.contains("Whisply does not permit configured model providers"));
+        assert!(!message.contains("127.0.0.1"));
         Ok(())
     }
 

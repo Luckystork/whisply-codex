@@ -1,8 +1,7 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
-use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server::INVALID_PARAMS_ERROR_CODE;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCError;
@@ -52,9 +51,8 @@ async fn section_request_error(
 
 #[tokio::test]
 async fn custom_sections_remain_discoverable_across_ordered_updates_and_restart() -> Result<()> {
-    let responses = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&responses.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
     let mut server = TestAppServer::builder()
@@ -158,9 +156,8 @@ async fn custom_sections_remain_discoverable_across_ordered_updates_and_restart(
 
 #[tokio::test]
 async fn deleting_custom_sections_unassigns_active_and_archived_members() -> Result<()> {
-    let responses = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&responses.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
     let first_thread = create_fake_rollout(
@@ -168,7 +165,7 @@ async fn deleting_custom_sections_unassigns_active_and_archived_members() -> Res
         "2025-01-06T08-00-00",
         "2025-01-06T08:00:00Z",
         "First thread",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let archived_thread = create_fake_rollout(
@@ -176,7 +173,7 @@ async fn deleting_custom_sections_unassigns_active_and_archived_members() -> Res
         "2025-01-06T09-00-00",
         "2025-01-06T09:00:00Z",
         "Archived thread",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let mut server = TestAppServer::builder()
@@ -303,9 +300,8 @@ async fn deleting_custom_sections_unassigns_active_and_archived_members() -> Res
 #[tokio::test]
 async fn custom_section_management_rejects_empty_names_missing_ids_and_pinned_mutations()
 -> Result<()> {
-    let responses = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&responses.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
     let mut server = TestAppServer::builder()

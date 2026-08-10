@@ -2,6 +2,8 @@ use super::*;
 use crate::app::safety_buffering::SafetyBufferedRetry;
 use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::chatwidget::UserMessage;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -12,14 +14,13 @@ use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_response_created;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::StreamingSseServer;
-use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::streaming_sse::start_managed_streaming_sse_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-const CURRENT_MODEL: &str = "gpt-5.2";
-const FASTER_MODEL: &str = "gpt-5.4";
-const MODEL_PROVIDER_ID: &str = "safety-retry-test";
+const CURRENT_MODEL: &str = "gpt-5.6-terra";
+const FASTER_MODEL: &str = "gpt-5.6-sol";
 const PREVIOUS_PROMPT: &str = "Establish context";
 const RETRY_PROMPT: &str = "Handle the safety-buffered request";
 const COMMITTED_STEER: &str = "Keep the accepted steer";
@@ -157,40 +158,30 @@ async fn wait_for_turn_completed(
 async fn active_turn_interrupt_is_nonblocking_and_coalesces_repeated_requests() -> Result<()> {
     let (chunks, release_response) =
         gated_response_chunks("interrupt-response", ev_completed("interrupt-response"));
-    let (server, _completions) = start_streaming_sse_server(vec![chunks]).await;
+    let (server, _completions) = start_managed_streaming_sse_server(vec![chunks]).await;
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        format!(
-            r#"
-model = "{CURRENT_MODEL}"
-model_provider = "{MODEL_PROVIDER_ID}"
-
-[model_providers.{MODEL_PROVIDER_ID}]
-name = "Interrupt test"
-base_url = "{}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-"#,
-            server.uri()
-        ),
-    )?;
+    ManagedWhisplyConfig::new()
+        .with_model(CURRENT_MODEL)
+        .write(codex_home.path())?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     app.config.model = Some(CURRENT_MODEL.to_string());
-    app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
-    app.config.model_provider = ModelProviderInfo {
-        name: "Interrupt test".to_string(),
-        base_url: Some(format!("{}/v1", server.uri())),
-        request_max_retries: Some(0),
-        stream_max_retries: Some(0),
-        ..ModelProviderInfo::default()
-    };
 
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())
+        .map_err(|err| color_eyre::eyre::eyre!(err))?
+        .into_in_process_gateway()
+        .map_err(|err| color_eyre::eyre::eyre!(err))?;
+    let mut app_server = Box::pin(
+        crate::start_embedded_app_server_for_picker_with_managed_gateway(
+            &app.config,
+            managed_gateway.client(),
+        ),
+    )
+    .await?;
+    let bootstrap = app_server.bootstrap(&app.config).await?;
+    apply_managed_bootstrap_catalog(&mut app, &bootstrap);
     let started = app_server.start_thread(&app.config).await?;
     let thread_id = started.session.thread_id;
     app.replace_chat_widget_with_app_server_thread(
@@ -264,6 +255,9 @@ stream_max_retries = 0
 
     let _ = release_response.send(());
     app_server.shutdown().await?;
+    managed_gateway
+        .assert_healthy()
+        .map_err(|err| color_eyre::eyre::eyre!(err))?;
     server.shutdown().await;
     Ok(())
 }
@@ -327,6 +321,31 @@ fn user_message_count(thread: &Thread, prompt: &str) -> usize {
         .count()
 }
 
+/// Match the production startup handoff before replacing the test widget.
+/// The managed server's signed catalog, rather than the generic bundled test
+/// catalog used to construct `App`, owns the model selection for these turns.
+fn apply_managed_bootstrap_catalog(
+    app: &mut App,
+    bootstrap: &crate::app_server_session::AppServerBootstrap,
+) {
+    assert_eq!(bootstrap.default_model, CURRENT_MODEL);
+    assert!(
+        bootstrap
+            .available_models
+            .iter()
+            .any(|model| model.model == CURRENT_MODEL)
+    );
+    assert!(
+        bootstrap
+            .available_models
+            .iter()
+            .any(|model| model.model == FASTER_MODEL)
+    );
+    app.model_catalog = std::sync::Arc::new(crate::model_catalog::ModelCatalog::new(
+        bootstrap.available_models.clone(),
+    ));
+}
+
 async fn run_safety_retry(
     previous_prompt: Option<&str>,
     failing_draft: Option<&str>,
@@ -344,6 +363,10 @@ async fn run_safety_retry(
         gated_response_chunks("previous-response", ev_completed("previous-response"));
     let (retry_chunks, release_retry_response) =
         gated_response_chunks("retry-response", ev_completed("retry-response"));
+    // Managed routes supply distinct compaction hashes for Terra and Sol. A source
+    // turn that has started with Terra persists its compaction settings even when
+    // interrupted, so every retry with earlier source history compacts before Sol.
+    let requires_model_transition_compaction = previous_prompt.is_some();
     let mut response_sequences = Vec::new();
     if previous_prompt.is_some() {
         if scenario == SafetyRetryScenario::InterruptedPrevious {
@@ -355,6 +378,9 @@ async fn run_safety_retry(
     response_sequences.push(active_chunks);
     if committed_steer.is_some() {
         response_sequences.push(steered_chunks);
+    }
+    if requires_model_transition_compaction {
+        response_sequences.push(response_chunks("model-transition-compaction-response"));
     }
     if scenario == SafetyRetryScenario::RetryTwice {
         response_sequences.push(retry_chunks);
@@ -371,48 +397,36 @@ async fn run_safety_retry(
         ]),
     }]);
     let expected_request_count = response_sequences.len();
-    let (server, _completions) = start_streaming_sse_server(response_sequences).await;
+    let (server, _completions) = start_managed_streaming_sse_server(response_sequences).await;
 
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        format!(
-            r#"
-model = "{CURRENT_MODEL}"
-model_provider = "{MODEL_PROVIDER_ID}"
-
-[model_providers.{MODEL_PROVIDER_ID}]
-name = "Safety retry test"
-base_url = "{}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-
-[features]
-goals = true
-"#,
-            server.uri()
-        ),
-    )?;
+    ManagedWhisplyConfig::new()
+        .with_model(CURRENT_MODEL)
+        .enable_feature(Feature::Goals)
+        .write(codex_home.path())?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     app.config.model = Some(CURRENT_MODEL.to_string());
-    app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
-    app.config.model_provider = ModelProviderInfo {
-        name: "Safety retry test".to_string(),
-        base_url: Some(format!("{}/v1", server.uri())),
-        request_max_retries: Some(0),
-        stream_max_retries: Some(0),
-        ..ModelProviderInfo::default()
-    };
     app.config
         .features
         .enable(Feature::Goals)
         .expect("test config should allow goals");
 
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())
+        .map_err(|err| color_eyre::eyre::eyre!(err))?
+        .into_in_process_gateway()
+        .map_err(|err| color_eyre::eyre::eyre!(err))?;
+    let mut app_server = Box::pin(
+        crate::start_embedded_app_server_for_picker_with_managed_gateway(
+            &app.config,
+            managed_gateway.client(),
+        ),
+    )
+    .await?;
+    let bootstrap = app_server.bootstrap(&app.config).await?;
+    apply_managed_bootstrap_catalog(&mut app, &bootstrap);
     let started = app_server.start_thread(&app.config).await?;
     let source_thread_id = started.session.thread_id;
     app.replace_chat_widget_with_app_server_thread(
@@ -661,6 +675,9 @@ goals = true
         }
         let _ = release_steered_response.send(());
         app_server.shutdown().await?;
+        managed_gateway
+            .assert_healthy()
+            .map_err(|err| color_eyre::eyre::eyre!(err))?;
         server.shutdown().await;
         return Ok(());
     }
@@ -758,8 +775,16 @@ goals = true
         .iter()
         .map(|request| serde_json::from_slice::<Value>(request))
         .collect::<serde_json::Result<Vec<_>>>()?;
-    let retry_request_index =
-        usize::from(previous_prompt.is_some()) + usize::from(committed_steer.is_some()) + 1;
+    let retry_request_index = usize::from(previous_prompt.is_some())
+        + usize::from(committed_steer.is_some())
+        + usize::from(requires_model_transition_compaction)
+        + 1;
+    if requires_model_transition_compaction {
+        let compaction_request = request_bodies
+            .get(retry_request_index - 1)
+            .expect("managed model transition should compact before the retry");
+        assert_eq!(compaction_request["model"].as_str(), Some(CURRENT_MODEL));
+    }
     let retry_request = request_bodies
         .get(retry_request_index)
         .expect("retry should issue a Responses API request");
@@ -821,6 +846,9 @@ goals = true
     let _ = release_previous_response.send(());
     let _ = release_retry_response.send(());
     app_server.shutdown().await?;
+    managed_gateway
+        .assert_healthy()
+        .map_err(|err| color_eyre::eyre::eyre!(err))?;
     server.shutdown().await;
     Ok(())
 }

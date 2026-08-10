@@ -1,5 +1,7 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
@@ -27,12 +29,10 @@ use tokio::time::timeout;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::test]
-async fn initialize_uses_client_info_name_as_originator() -> Result<()> {
-    let responses = Vec::new();
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+async fn initialize_uses_fixed_managed_identity() -> Result<()> {
     let codex_home = TempDir::new()?;
     let expected_codex_home = AbsolutePathBuf::try_from(codex_home.path().canonicalize()?)?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -61,7 +61,7 @@ async fn initialize_uses_client_info_name_as_originator() -> Result<()> {
         platform_os,
     } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_vscode/"));
+    assert!(user_agent.starts_with("Whisply/"));
     assert_eq!(response_codex_home, expected_codex_home);
     assert_eq!(platform_family, std::env::consts::FAMILY);
     assert_eq!(platform_os, std::env::consts::OS);
@@ -69,11 +69,9 @@ async fn initialize_uses_client_info_name_as_originator() -> Result<()> {
 }
 
 #[tokio::test]
-async fn initialize_probe_does_not_override_originator() -> Result<()> {
-    let responses = Vec::new();
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+async fn initialize_probe_does_not_override_managed_identity() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -97,16 +95,14 @@ async fn initialize_probe_does_not_override_originator() -> Result<()> {
     };
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_cli_rs/"));
+    assert!(user_agent.starts_with("Whisply/"));
     Ok(())
 }
 
 #[tokio::test]
-async fn initialize_codex_backend_does_not_override_originator() -> Result<()> {
-    let responses = Vec::new();
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+async fn initialize_codex_backend_does_not_override_managed_identity() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -130,17 +126,15 @@ async fn initialize_codex_backend_does_not_override_originator() -> Result<()> {
     };
     let InitializeResponse { user_agent, .. } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_cli_rs/"));
+    assert!(user_agent.starts_with("Whisply/"));
     Ok(())
 }
 
 #[tokio::test]
-async fn initialize_respects_originator_override_env_var() -> Result<()> {
-    let responses = Vec::new();
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+async fn initialize_ignores_originator_override_env_var() -> Result<()> {
     let codex_home = TempDir::new()?;
     let expected_codex_home = AbsolutePathBuf::try_from(codex_home.path().canonicalize()?)?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -173,7 +167,8 @@ async fn initialize_respects_originator_override_env_var() -> Result<()> {
         platform_os,
     } = to_response::<InitializeResponse>(response)?;
 
-    assert!(user_agent.starts_with("codex_originator_via_env_var/"));
+    assert!(user_agent.starts_with("Whisply/"));
+    assert!(!user_agent.contains("codex_originator_via_env_var"));
     assert_eq!(response_codex_home, expected_codex_home);
     assert_eq!(platform_family, std::env::consts::FAMILY);
     assert_eq!(platform_os, std::env::consts::OS);
@@ -182,10 +177,8 @@ async fn initialize_respects_originator_override_env_var() -> Result<()> {
 
 #[tokio::test]
 async fn initialize_rejects_invalid_client_name() -> Result<()> {
-    let responses = Vec::new();
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -220,10 +213,8 @@ async fn initialize_rejects_invalid_client_name() -> Result<()> {
 
 #[tokio::test]
 async fn initialize_opt_out_notification_methods_filters_notifications() -> Result<()> {
-    let responses = Vec::new();
-    let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
@@ -302,8 +293,8 @@ async fn turn_start_notify_payload_includes_initialize_client_name() -> Result<(
     let notify_file_str = notify_file
         .to_str()
         .expect("notify file path should be valid UTF-8");
-    MockResponsesConfig::new(&server.uri())
-        .with_root_config(&format!(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(&format!(
             "notify = [{}, {}]",
             toml_basic_string(notify_capture),
             toml_basic_string(notify_file_str)
@@ -311,7 +302,7 @@ async fn turn_start_notify_payload_includes_initialize_client_name() -> Result<(
         .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build()
         .await?;

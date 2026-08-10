@@ -39,6 +39,8 @@ use crate::remote_file_system::RemoteFileSystem;
 use crate::remote_process::RemoteProcess;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
+use url::Host;
+use url::Url;
 
 pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
 pub const CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR: &str =
@@ -160,7 +162,11 @@ impl EnvironmentManager {
     ) -> Self {
         let provider = DefaultEnvironmentProvider::new(exec_server_url);
         match Self::from_snapshot(
-            provider.snapshot_inner(),
+            provider
+                .snapshot_inner()
+                .unwrap_or_else(|err| {
+                    panic!("default provider should create valid environments: {err}")
+                }),
             local_runtime_paths,
             // Test-only construction has no application config from which to resolve proxy policy.
             HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -242,7 +248,11 @@ impl EnvironmentManager {
         exec_server_url: Option<String>,
         local_runtime_paths: ExecServerRuntimePaths,
     ) -> Self {
-        let mut snapshot = DefaultEnvironmentProvider::new(exec_server_url).snapshot_inner();
+        let mut snapshot = DefaultEnvironmentProvider::new(exec_server_url)
+            .snapshot_inner()
+            .unwrap_or_else(|err| {
+                panic!("default provider should create valid environments: {err}")
+            });
         snapshot.include_local = true;
         match Self::from_snapshot(
             snapshot,
@@ -265,6 +275,9 @@ impl EnvironmentManager {
             default,
             include_local,
         } = snapshot;
+        for (_, transport) in &environments {
+            validate_broker_only_execution_environment_transport(transport)?;
+        }
         let mut environment_map =
             HashMap::with_capacity(environments.len() + usize::from(include_local));
         let local_environment = if include_local {
@@ -670,56 +683,79 @@ fn validate_remote_exec_server_url(exec_server_url: String) -> Result<String, Ex
             "remote environment cannot use disabled exec-server url".to_string(),
         ));
     }
-    exec_server_url.ok_or_else(|| {
+    let exec_server_url = exec_server_url.ok_or_else(|| {
         ExecServerError::Protocol("remote environment requires an exec-server url".to_string())
-    })
+    })?;
+    validate_broker_only_execution_environment_websocket_url(&exec_server_url)?;
+    Ok(exec_server_url)
 }
 
-fn noise_environment_config_from_env()
--> Result<Option<NoiseRendezvousEnvironmentConfig>, ExecServerError> {
+/// Validates the only broker-owned remote execution transport: a WebSocket
+/// addressed to a literal loopback IPv4 or IPv6 host. Keeping this at the
+/// execution-environment boundary makes environment variables, TOML, provider
+/// snapshots, and public environment/add share the same authority decision.
+pub(crate) fn validate_broker_only_execution_environment_websocket_url(
+    websocket_url: &str,
+) -> Result<(), ExecServerError> {
+    let parsed = Url::parse(websocket_url).map_err(|err| {
+        ExecServerError::Protocol(format!(
+            "execution environment websocket URL is invalid: {err}"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return Err(ExecServerError::Protocol(
+            "execution environment websocket URL must use ws:// or wss://".to_string(),
+        ));
+    }
+    let is_loopback = match parsed.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(_)) | None => false,
+    };
+    if !is_loopback {
+        return Err(ExecServerError::Protocol(
+            "execution environment websocket URL must use a literal loopback IPv4 or IPv6 host"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_broker_only_execution_environment_transport(
+    transport: &ExecServerTransportParams,
+) -> Result<(), ExecServerError> {
+    match transport {
+        ExecServerTransportParams::Deferred(deferred) => {
+            validate_broker_only_execution_environment_transport(&deferred.transport)
+        }
+        ExecServerTransportParams::WebSocketUrl { websocket_url, .. } => {
+            validate_broker_only_execution_environment_websocket_url(websocket_url)
+        }
+        ExecServerTransportParams::NoiseRendezvous { .. } => Err(ExecServerError::Protocol(
+            "Noise rendezvous execution environments are unavailable in BrokerOnly".to_string(),
+        )),
+        ExecServerTransportParams::StdioCommand { .. } => Ok(()),
+    }
+}
+
+fn noise_environment_config_from_env() -> Result<Option<NoiseRendezvousEnvironmentConfig>, ExecServerError> {
     noise_environment_config_from_values(
-        optional_environment_value(CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR),
-        optional_environment_value(CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR),
-        optional_environment_value(CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR),
-        optional_environment_value(CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR),
+        /*registry_url*/ None,
+        /*environment_id*/ None,
+        /*auth_token*/ None,
+        /*chatgpt_account_id*/ None,
     )
 }
 
 fn noise_environment_config_from_values(
-    registry_url: Option<String>,
-    environment_id: Option<String>,
-    auth_token: Option<String>,
-    chatgpt_account_id: Option<String>,
+    _registry_url: Option<String>,
+    _environment_id: Option<String>,
+    _auth_token: Option<String>,
+    _chatgpt_account_id: Option<String>,
 ) -> Result<Option<NoiseRendezvousEnvironmentConfig>, ExecServerError> {
-    let (registry_url, environment_id, auth_token) =
-        match (registry_url, environment_id, auth_token) {
-            (None, None, None) => return Ok(None),
-            (Some(registry_url), Some(environment_id), Some(auth_token)) => {
-                (registry_url, environment_id, auth_token)
-            }
-            _ => {
-                return Err(ExecServerError::EnvironmentRegistryConfig(format!(
-                    "Noise environment requires {CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR}, \
-{CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR}, and \
-{CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR}"
-                )));
-            }
-        };
-
-    NoiseRendezvousEnvironmentConfig::new(
-        registry_url,
-        environment_id,
-        auth_token,
-        chatgpt_account_id,
-    )
-    .map(Some)
-}
-
-fn optional_environment_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    // BrokerOnly deliberately ignores every legacy registry/rendezvous value:
+    // no environment variable may provide a network execution authority.
+    Ok(None)
 }
 
 /// Concrete execution/filesystem environment selected for a session.
@@ -804,14 +840,17 @@ impl Environment {
         }
 
         Ok(match exec_server_url {
-            Some(exec_server_url) => Self::remote_with_transport(
-                ExecServerTransportParams::websocket_url(
-                    exec_server_url,
-                    DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
-                ),
-                local_runtime_paths,
-                http_client_factory,
-            ),
+            Some(exec_server_url) => {
+                validate_broker_only_execution_environment_websocket_url(&exec_server_url)?;
+                Self::remote_with_transport(
+                    ExecServerTransportParams::websocket_url(
+                        exec_server_url,
+                        DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+                    ),
+                    local_runtime_paths,
+                    http_client_factory,
+                )
+            }
             None => match local_runtime_paths {
                 Some(local_runtime_paths) => Self::local(local_runtime_paths, http_client_factory),
                 None => Self::default_for_tests(),
@@ -1144,39 +1183,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn noise_environment_config_selects_remote_as_default() {
+    #[test]
+    fn noise_environment_config_ignores_registry_inputs() {
         let config = noise_environment_config_from_values(
             Some("http://registry.example/api".to_string()),
             Some("environment-requested".to_string()),
             Some("registry-token".to_string()),
             Some("workspace-123".to_string()),
         )
-        .expect("parse noise environment configuration")
-        .expect("noise environment configuration");
+        .expect("ignore legacy registry inputs");
 
-        let manager = EnvironmentManager::from_noise_environment_config(
-            config,
-            /*local_runtime_paths*/ None,
-            HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
-        )
-        .expect("build environment manager");
-
-        assert_eq!(
-            manager.http_client_factory().outbound_proxy_policy(),
-            OutboundProxyPolicy::RespectSystemProxy
-        );
-        assert_eq!(
-            manager.default_environment_id(),
-            Some(REMOTE_ENVIRONMENT_ID)
-        );
-        assert!(
-            manager
-                .default_environment()
-                .expect("remote environment")
-                .is_remote()
-        );
-        assert_local_environment_unavailable(&manager);
+        assert!(config.is_none());
     }
 
     #[tokio::test]
@@ -1190,6 +1207,17 @@ mod tests {
 
         assert!(!environment.is_remote());
         assert!(environment.info().await.is_ok());
+    }
+
+    #[test]
+    fn create_remote_environment_rejects_non_loopback_websocket_without_connecting() {
+        let err = Environment::create_for_tests(Some("ws://executor.example:8765".to_string()))
+            .expect_err("non-loopback execution environment should be rejected");
+
+        assert_eq!(
+            err.to_string(),
+            "exec-server protocol error: execution environment websocket URL must use a literal loopback IPv4 or IPv6 host"
+        );
     }
 
     #[tokio::test]
@@ -1740,6 +1768,28 @@ mod tests {
             err.to_string(),
             "exec-server protocol error: remote environment requires an exec-server url"
         );
+    }
+
+    #[test]
+    fn environment_add_rejects_non_loopback_websocket_urls_without_connecting() {
+        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
+
+        for exec_server_url in [
+            "ws://executor.example:8765",
+            "wss://192.0.2.1:8765",
+        ] {
+            let err = manager
+                .upsert_environment(
+                    "executor-a".to_string(),
+                    exec_server_url.to_string(),
+                    /*connect_timeout*/ None,
+                )
+                .expect_err("public environment/add must reject non-loopback WebSocket URLs");
+            assert_eq!(
+                err.to_string(),
+                "exec-server protocol error: execution environment websocket URL must use a literal loopback IPv4 or IPv6 host"
+            );
+        }
     }
 
     #[tokio::test]

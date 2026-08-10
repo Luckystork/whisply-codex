@@ -14,6 +14,9 @@ use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
 use crate::goal_files::GoalDraft;
+use crate::host_controls_command::HostControlsTuiCommand;
+use crate::host_controls_command::execute_host_controls_command;
+use crate::host_controls_command::host_controls_client_from_environment;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -457,6 +460,9 @@ impl ChatWidget {
                     );
                 }
             }
+            SlashCommand::Controls => {
+                self.dispatch_host_controls_command("");
+            }
             SlashCommand::Usage => {
                 if self.ensure_usage_command_available() {
                     self.open_usage_menu();
@@ -681,6 +687,7 @@ impl ChatWidget {
         } = prepared;
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Controls => self.dispatch_host_controls_command(&args),
             SlashCommand::Usage => {
                 if self.ensure_usage_command_available() {
                     match tokens::TokenActivityView::parse(trimmed) {
@@ -1057,6 +1064,42 @@ impl ChatWidget {
         }
     }
 
+    /// Parses one fixed `/controls` operation and runs it away from the TUI
+    /// thread. The client is constructed only once because the verified
+    /// launcher supplies its capability through a one-shot inherited FD.
+    fn dispatch_host_controls_command(&mut self, args: &str) {
+        // `self.thread_id` belongs to the app-server runtime. It must never
+        // be cast to the Mac product-session identity consumed by host
+        // controls; session-bearing controls require an explicit
+        // `product-session <uuid>` parsed at the typed boundary.
+        let command = match HostControlsTuiCommand::parse(args) {
+            Ok(command) => command,
+            Err(message) => {
+                self.add_error_message(message);
+                return;
+            }
+        };
+        let broker = match &self.host_controls_broker {
+            Some(broker) => broker.clone(),
+            None => match host_controls_client_from_environment() {
+                Ok(client) => {
+                    self.host_controls_broker = Some(client.clone());
+                    client
+                }
+                Err(message) => {
+                    self.add_error_message(message);
+                    return;
+                }
+            },
+        };
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            app_event_tx.send(AppEvent::HostControlsResult(execute_host_controls_command(
+                &broker, command,
+            )));
+        });
+    }
+
     fn ensure_usage_command_available(&mut self) -> bool {
         if self.has_codex_backend_auth {
             return true;
@@ -1072,6 +1115,7 @@ impl ChatWidget {
         match cmd {
             SlashCommand::Ide
             | SlashCommand::Status
+            | SlashCommand::Controls
             | SlashCommand::Usage
             | SlashCommand::DebugConfig
             | SlashCommand::Ps

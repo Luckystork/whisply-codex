@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -30,10 +33,12 @@ async fn turn_start_accepts_output_schema_v2() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -116,10 +121,12 @@ async fn turn_start_output_schema_is_per_turn_v2() -> Result<()> {
     let response_mock1 = responses::mount_sse_once(&server, body1).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;

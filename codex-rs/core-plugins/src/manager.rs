@@ -58,6 +58,7 @@ use crate::remote_legacy::RemotePluginMutationError;
 use crate::remote_plugin_id_resolver::RemoteInstalledPluginsSnapshot;
 use crate::remote_plugin_id_resolver::RemotePluginIdResolver;
 use crate::remote_plugin_id_resolver::persisted_remote_plugin_id_for_installation;
+use crate::skill_package::validate_plugin_package_contents;
 use crate::startup_sync::curated_plugins_api_marketplace_path;
 use crate::startup_sync::curated_plugins_repo_path;
 use crate::startup_sync::read_curated_plugins_sha;
@@ -1609,6 +1610,7 @@ impl PluginsManager {
             };
         let store = self.store.clone();
         let codex_home = self.codex_home.clone();
+        let plugin_install_source = self.plugin_install_source;
         let manifest_fallback_contents = resolved
             .manifest_fallback
             .contents_if_has_metadata()
@@ -1618,6 +1620,13 @@ impl PluginsManager {
                 materialize_marketplace_plugin_source(codex_home.as_path(), &resolved.source)
                     .map_err(PluginStoreError::Invalid)?;
             let source_path = materialized.path;
+            if plugin_install_source == PluginInstallSource::ExternalAgentMigration {
+                validate_plugin_package_contents(source_path.as_path()).map_err(|err| {
+                    PluginStoreError::Invalid(format!(
+                        "external agent plugin imports reject credential-bearing package contents: {err}"
+                    ))
+                })?;
+            }
             match (plugin_version, manifest_fallback_contents.as_deref()) {
                 (Some(plugin_version), Some(manifest_contents)) => store
                     .install_with_version_and_fallback_manifest(
@@ -2503,6 +2512,10 @@ impl PluginsManager {
             .collect::<Vec<_>>();
         roots.sort_unstable();
         roots.dedup();
+        let configured_plugin_keys = configured_plugin_sources
+            .iter()
+            .map(|source| source.plugin_key.clone())
+            .collect::<Vec<_>>();
         if roots.is_empty() || configured_plugin_keys.is_empty() {
             return;
         }

@@ -34,6 +34,8 @@ mod tui_keymap;
 pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
+/// Directory containing Whisply's project-scoped configuration and integrations.
+pub const PROJECT_CONFIG_DIRECTORY: &str = ".whisply";
 
 pub use auth_policy::ManagedAuthPolicy;
 pub use cloud_config_bundle::CloudConfigBundle;

@@ -110,6 +110,30 @@ fn test_model_client_with_thread_id(
     )
 }
 
+#[test]
+fn new_with_model_provider_retains_supplied_provider() {
+    let provider = create_model_provider(
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses),
+        /*auth_manager*/ None,
+    );
+    let client = ModelClient::new_with_model_provider(
+        Arc::clone(&provider),
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        SessionSource::Exec,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+
+    assert!(Arc::ptr_eq(&provider, &client.state.provider));
+}
+
 #[tokio::test]
 async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -673,6 +697,7 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
         &mut auth_recovery,
         &test_session_telemetry(),
         &provider,
+        /*allow_provider_refresh*/ true,
     )
     .await
     .expect_err("expired Bedrock signature should fail");

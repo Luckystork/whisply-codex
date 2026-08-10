@@ -1062,11 +1062,29 @@ pub fn load_auth_dot_json(
     storage.load()
 }
 
+/// Selects whether an auth manager may materialize legacy direct credentials.
+///
+/// `BrokerOnly` deliberately carries no credential data: products with a
+/// native identity broker keep their gateway authority outside `CodexAuth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthSourceMode {
+    #[default]
+    Direct,
+    BrokerOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
     pub codex_home: PathBuf,
     pub auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub keyring_backend_kind: AuthKeyringBackendKind,
+    /// Whether this process may materialize legacy direct-provider credentials.
+    ///
+    /// Whisply leaves legacy auth data intact for recovery and audit purposes,
+    /// but its managed runtime must never load it into a request path. Brokered
+    /// Whisply gateway authority is intentionally not represented by
+    /// [`CodexAuth`].
+    pub source_mode: AuthSourceMode,
     pub forced_login_method: Option<ForcedLoginMethod>,
     pub chatgpt_base_url: Option<String>,
     pub forced_chatgpt_workspace_id: Option<Vec<String>>,
@@ -1076,11 +1094,12 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn is_login_method_allowed(&self, method: ForcedLoginMethod) -> bool {
-        self.managed_auth_policy.allows_login_method(
-            method,
-            self.forced_login_method,
-            self.forced_chatgpt_workspace_id.as_deref(),
-        )
+        self.source_mode == AuthSourceMode::Direct
+            && self.managed_auth_policy.allows_login_method(
+                method,
+                self.forced_login_method,
+                self.forced_chatgpt_workspace_id.as_deref(),
+            )
     }
 
     pub fn effective_chatgpt_workspaces(&self) -> Option<Vec<String>> {
@@ -1089,6 +1108,9 @@ impl AuthConfig {
     }
 
     pub fn validate(&self) -> std::io::Result<()> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return Ok(());
+        }
         if self.is_login_method_allowed(ForcedLoginMethod::Api)
             || self.is_login_method_allowed(ForcedLoginMethod::Chatgpt)
         {
@@ -1102,6 +1124,9 @@ impl AuthConfig {
     }
 
     pub fn allows_auth(&self, auth: &CodexAuth) -> bool {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return false;
+        }
         let allowed_login_methods = self.allowed_login_methods();
         let workspaces = self.effective_chatgpt_workspaces();
         validate_auth_restrictions(Some(&allowed_login_methods), workspaces.as_deref(), auth)
@@ -1112,6 +1137,9 @@ impl AuthConfig {
         &self,
         enable_codex_api_key_env: bool,
     ) -> std::io::Result<Option<CodexAuth>> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return Ok(None);
+        }
         let allowed_login_methods = self.allowed_login_methods();
         let workspaces = self.effective_chatgpt_workspaces();
         let agent_identity_authapi_base_url =
@@ -1210,6 +1238,9 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
     config: &AuthConfig,
     agent_identity_authapi_base_url: Option<&str>,
 ) -> std::io::Result<()> {
+    if config.source_mode == AuthSourceMode::BrokerOnly {
+        return Ok(());
+    }
     // Managed-only restrictions are enforced by AuthManager.
     if config.forced_login_method.is_none() && config.forced_chatgpt_workspace_id.is_none() {
         return Ok(());
@@ -1943,6 +1974,7 @@ pub struct AuthManager {
     enable_codex_api_key_env: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
+    source_mode: AuthSourceMode,
     forced_login_method: Option<ForcedLoginMethod>,
     forced_chatgpt_workspace_id: RwLock<Option<Vec<String>>>,
     managed_auth_policy: ManagedAuthPolicy,
@@ -1985,6 +2017,14 @@ pub trait AuthManagerConfig {
 
     /// Returns route-selection settings for auth-owned clients.
     fn auth_route_config(&self) -> AuthRouteConfig;
+
+    /// Whether resolved runtime configuration may use legacy API, ChatGPT,
+    /// Bedrock, or external auth. Upstream-compatible implementations retain
+    /// the historical behavior; Whisply's resolved configuration is always
+    /// managed-only.
+    fn auth_source_mode(&self) -> AuthSourceMode {
+        AuthSourceMode::Direct
+    }
 }
 
 impl Debug for AuthManager {
@@ -2034,6 +2074,7 @@ impl AuthManager {
                 codex_home,
                 auth_credentials_store_mode,
                 keyring_backend_kind,
+                source_mode: AuthSourceMode::Direct,
                 forced_login_method: None,
                 chatgpt_base_url,
                 forced_chatgpt_workspace_id,
@@ -2055,6 +2096,7 @@ impl AuthManager {
             codex_home,
             auth_credentials_store_mode,
             keyring_backend_kind,
+            source_mode,
             forced_login_method,
             chatgpt_base_url,
             forced_chatgpt_workspace_id,
@@ -2074,6 +2116,7 @@ impl AuthManager {
             enable_codex_api_key_env,
             auth_credentials_store_mode,
             keyring_backend_kind,
+            source_mode,
             forced_login_method,
             forced_chatgpt_workspace_id: RwLock::new(forced_chatgpt_workspace_id),
             managed_auth_policy,
@@ -2102,6 +2145,7 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
+            source_mode: AuthSourceMode::Direct,
             forced_login_method: None,
             forced_chatgpt_workspace_id: RwLock::new(None),
             managed_auth_policy: ManagedAuthPolicy::default(),
@@ -2129,6 +2173,7 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
+            source_mode: AuthSourceMode::Direct,
             forced_login_method: None,
             forced_chatgpt_workspace_id: RwLock::new(None),
             managed_auth_policy: ManagedAuthPolicy::default(),
@@ -2160,6 +2205,7 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
+            source_mode: AuthSourceMode::Direct,
             forced_login_method: None,
             forced_chatgpt_workspace_id: RwLock::new(None),
             managed_auth_policy: ManagedAuthPolicy::default(),
@@ -2189,6 +2235,7 @@ impl AuthManager {
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
+            source_mode: AuthSourceMode::Direct,
             forced_login_method: None,
             forced_chatgpt_workspace_id: RwLock::new(None),
             managed_auth_policy: ManagedAuthPolicy::default(),
@@ -2210,6 +2257,9 @@ impl AuthManager {
 
     /// Current cached auth (clone) without attempting a refresh.
     pub fn auth_cached(&self) -> Option<CodexAuth> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return None;
+        }
         self.inner
             .read()
             .ok()
@@ -2236,6 +2286,9 @@ impl AuthManager {
     /// a guarded reload and then refreshes only if the on-disk auth is unchanged.
     #[instrument(level = "trace", skip_all)]
     pub async fn auth(&self) -> Option<CodexAuth> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return None;
+        }
         if self.has_external_auth() {
             self.reload().await;
             return self.auth_cached();
@@ -2408,6 +2461,9 @@ impl AuthManager {
     }
 
     async fn load_auth(&self) -> Option<CodexAuth> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return None;
+        }
         if let Some(external_auth) = self.external_auth() {
             return match self.resolve_external_auth(&external_auth).await {
                 Ok(auth) => Some(auth),
@@ -2445,6 +2501,11 @@ impl AuthManager {
     }
 
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
+        let new_auth = if self.source_mode == AuthSourceMode::BrokerOnly {
+            None
+        } else {
+            new_auth
+        };
         if let Ok(mut guard) = self.inner.write() {
             let previous = guard.auth.as_ref();
             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
@@ -2468,6 +2529,11 @@ impl AuthManager {
         &self,
         external_auth: Arc<dyn ExternalAuth>,
     ) -> Result<(), RefreshTokenError> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return Err(RefreshTokenError::Transient(std::io::Error::other(
+                "Whisply account authentication is managed by the installed app",
+            )));
+        }
         let auth = self.resolve_external_auth(&external_auth).await?;
         *self.external_auth.write().map_err(|_| {
             RefreshTokenError::Transient(std::io::Error::other("external auth lock is poisoned"))
@@ -2504,14 +2570,18 @@ impl AuthManager {
     }
 
     pub fn is_login_method_allowed(&self, method: ForcedLoginMethod) -> bool {
-        self.managed_auth_policy.allows_login_method(
-            method,
-            self.forced_login_method,
-            self.forced_chatgpt_workspace_id().as_deref(),
-        )
+        self.source_mode == AuthSourceMode::Direct
+            && self.managed_auth_policy.allows_login_method(
+                method,
+                self.forced_login_method,
+                self.forced_chatgpt_workspace_id().as_deref(),
+            )
     }
 
     fn allowed_login_methods(&self) -> Vec<ForcedLoginMethod> {
+        if self.source_mode == AuthSourceMode::BrokerOnly {
+            return Vec::new();
+        }
         self.managed_auth_policy.allowed_login_methods(
             self.forced_login_method,
             self.forced_chatgpt_workspace_id().as_deref(),
@@ -2566,6 +2636,7 @@ impl AuthManager {
                 codex_home: config.codex_home(),
                 auth_credentials_store_mode: config.cli_auth_credentials_store_mode(),
                 keyring_backend_kind: config.auth_keyring_backend_kind(),
+                source_mode: config.auth_source_mode(),
                 forced_login_method: config.forced_login_method(),
                 chatgpt_base_url: Some(config.chatgpt_base_url()),
                 forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id(),

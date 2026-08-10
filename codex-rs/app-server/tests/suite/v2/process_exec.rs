@@ -1,7 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::TestAppServer;
-use app_test_support::create_mock_responses_server_sequence_unchecked;
 use codex_app_server_protocol::ProcessExitedNotification;
 use codex_app_server_protocol::ProcessKillParams;
 use codex_app_server_protocol::ProcessSpawnParams;
@@ -15,15 +14,14 @@ use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::sleep;
 use tokio::time::timeout;
-use wiremock::MockServer;
 
 use super::connection_handling_websocket::DEFAULT_READ_TIMEOUT;
-use super::connection_handling_websocket::create_config_toml;
+use super::connection_handling_websocket::create_managed_config_toml;
 
 #[tokio::test]
 async fn process_spawn_returns_before_exit_and_emits_exit_notification() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let (_server, mut mcp) = initialized_mcp(codex_home.path()).await?;
+    let mut mcp = initialized_mcp(codex_home.path()).await?;
 
     let process_handle = "one-shot-1".to_string();
     let probe_file = codex_home.path().join("process-created");
@@ -106,8 +104,7 @@ async fn process_spawn_returns_before_exit_and_emits_exit_notification() -> Resu
 #[tokio::test]
 async fn process_spawn_returns_error_when_local_environment_is_disabled() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    create_managed_config_toml(codex_home.path(), "never")?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
@@ -134,7 +131,7 @@ async fn process_spawn_returns_error_when_local_environment_is_disabled() -> Res
 #[tokio::test]
 async fn process_spawn_reports_buffered_output_cap_reached() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let (_server, mut mcp) = initialized_mcp(codex_home.path()).await?;
+    let mut mcp = initialized_mcp(codex_home.path()).await?;
 
     let process_handle = "capped-one-shot-1".to_string();
     let command = if cfg!(windows) {
@@ -183,7 +180,7 @@ async fn process_spawn_reports_buffered_output_cap_reached() -> Result<()> {
 #[tokio::test]
 async fn process_kill_terminates_running_process() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let (_server, mut mcp) = initialized_mcp(codex_home.path()).await?;
+    let mut mcp = initialized_mcp(codex_home.path()).await?;
 
     let process_handle = "sleep-process-1".to_string();
     let command = if cfg!(windows) {
@@ -231,16 +228,15 @@ async fn process_kill_terminates_running_process() -> Result<()> {
     Ok(())
 }
 
-async fn initialized_mcp(codex_home: &Path) -> Result<(MockServer, TestAppServer)> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    create_config_toml(codex_home, &server.uri(), "never")?;
+async fn initialized_mcp(codex_home: &Path) -> Result<TestAppServer> {
+    create_managed_config_toml(codex_home, "never")?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home)
         .without_auto_env()
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    Ok((server, mcp))
+    Ok(mcp)
 }
 
 fn process_spawn_params(

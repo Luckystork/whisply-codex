@@ -7,16 +7,6 @@ const DEFAULT_ANALYTICS_ENABLED: bool = false;
 const DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
 const OTEL_SERVICE_NAME: &str = "codex-exec-server";
 
-pub(crate) enum ParentLifetime {
-    Independent,
-    StdinPipe,
-}
-
-pub(crate) enum ShutdownBehavior {
-    Immediate,
-    Graceful(tokio::sync::oneshot::Sender<()>),
-}
-
 pub(crate) fn init(
     config: Option<&codex_core::config::Config>,
 ) -> (impl Send + Sync, codex_exec_server::ExecServerTelemetry) {
@@ -55,37 +45,13 @@ pub(crate) fn init(
     (otel, telemetry)
 }
 
-pub(crate) async fn run_until_shutdown<F, E>(
-    run: F,
-    parent_lifetime: ParentLifetime,
-    shutdown_behavior: ShutdownBehavior,
-) -> Result<(), E>
+pub(crate) async fn run_until_shutdown<F, E>(run: F) -> Result<(), E>
 where
     F: Future<Output = Result<(), E>>,
 {
-    let parent_disconnected = match parent_lifetime {
-        ParentLifetime::Independent => None,
-        ParentLifetime::StdinPipe => {
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            std::thread::spawn(move || {
-                if let Err(error) =
-                    std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink())
-                {
-                    tracing::warn!(%error, "Could not read exec-server parent lifetime pipe");
-                }
-                let _ = sender.send(());
-            });
-            Some(receiver)
-        }
-    };
-    let parent_disconnected = async {
-        match parent_disconnected {
-            Some(receiver) => {
-                let _ = receiver.await;
-            }
-            None => std::future::pending().await,
-        }
-    };
+    // A Whisply exec-server has no remote parent-registration channel. Its
+    // lifetime is therefore governed only by normal process signals; reading
+    // stdin as a synthetic authority/lifecycle signal is intentionally absent.
     let shutdown_signal = match shutdown_signal() {
         Ok(signal) => Some(signal),
         Err(error) => {
@@ -99,31 +65,20 @@ where
             None => std::future::pending().await,
         }
     };
-    run_until_shutdown_with_signals(run, parent_disconnected, shutdown_signal, shutdown_behavior)
-        .await
+    run_until_shutdown_with_signals(run, shutdown_signal).await
 }
 
-async fn run_until_shutdown_with_signals<F, E, P, S>(
-    run: F,
-    parent_disconnected: P,
-    shutdown_signal: S,
-    shutdown_behavior: ShutdownBehavior,
-) -> Result<(), E>
+async fn run_until_shutdown_with_signals<F, E, S>(run: F, shutdown_signal: S) -> Result<(), E>
 where
     F: Future<Output = Result<(), E>>,
-    P: Future<Output = ()>,
     S: Future<Output = std::io::Result<()>>,
 {
-    tokio::pin!(run, parent_disconnected, shutdown_signal);
+    tokio::pin!(run, shutdown_signal);
     let mut signal_enabled = true;
 
     loop {
         tokio::select! {
             result = &mut run => return result,
-            _ = &mut parent_disconnected => {
-                tracing::info!("Stopping exec-server after its parent closed stdin");
-                break;
-            }
             signal = &mut shutdown_signal, if signal_enabled => {
                 match signal {
                     Ok(()) => break,
@@ -136,13 +91,7 @@ where
         }
     }
 
-    match shutdown_behavior {
-        ShutdownBehavior::Immediate => Ok(()),
-        ShutdownBehavior::Graceful(sender) => {
-            let _ = sender.send(());
-            run.await
-        }
-    }
+    Ok(())
 }
 
 #[cfg(unix)]

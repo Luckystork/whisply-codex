@@ -34,9 +34,13 @@ async fn prepared_remote_environment_uses_configured_system_proxy() -> anyhow::R
         .to_string();
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await?;
     let proxy_url = format!("http://{}", proxy_listener.local_addr()?);
-    let websocket_url = "ws://exec-server-system-proxy.invalid:8765/";
-    let proxy_resolution_url = "http://exec-server-system-proxy.invalid:8765/";
-    cache_system_proxy_route_for_test(proxy_resolution_url, proxy_url);
+    // The configured remote endpoint remains a real local exec-server. The
+    // cached system-proxy route still proves that the connector honors the
+    // configured proxy without testing an authority the product rejects.
+    let websocket_url = format!("ws://{upstream}/");
+    let proxy_resolution_url = format!("http://{upstream}/");
+    let expected_connect = format!("CONNECT {upstream} HTTP/1.1");
+    cache_system_proxy_route_for_test(&proxy_resolution_url, proxy_url);
 
     let (request_tx, request_rx) = oneshot::channel();
     let _proxy_task = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -82,10 +86,7 @@ async fn prepared_remote_environment_uses_configured_system_proxy() -> anyhow::R
     let request_line = timeout(Duration::from_secs(5), request_rx)
         .await
         .context("prepared environment did not connect through the system proxy")??;
-    assert_eq!(
-        request_line,
-        "CONNECT exec-server-system-proxy.invalid:8765 HTTP/1.1"
-    );
+    assert_eq!(request_line, expected_connect);
     let environment = manager
         .default_environment()
         .context("prepared remote environment")?;

@@ -87,6 +87,7 @@ use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
 use codex_protocol::protocol::SessionSource;
+use codex_whisply::ManagedGatewayClient;
 pub use codex_rollout::StateDbHandle;
 pub use codex_state::log_db::LogDbLayer;
 use tokio::sync::mpsc;
@@ -141,6 +142,9 @@ pub struct InProcessStartArgs {
     pub state_db: Option<StateDbHandle>,
     /// Environment manager used by core execution and filesystem operations.
     pub environment_manager: Arc<EnvironmentManager>,
+    /// Test-scoped broker client for embedded response-I/O. Production callers
+    /// keep this unset and use ordinary launcher authority.
+    pub managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     /// Startup warnings emitted after initialize succeeds.
     pub config_warnings: Vec<ConfigWarningNotification>,
     /// Session source stamped into thread/session metadata.
@@ -465,6 +469,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 config: args.config,
                 config_manager,
                 environment_manager: args.environment_manager,
+                managed_gateway_client: args.managed_gateway_client,
                 feedback: args.feedback,
                 log_db: args.log_db,
                 state_db: args.state_db,
@@ -828,6 +833,7 @@ mod tests {
             log_db: None,
             state_db: Some(state_db),
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+            managed_gateway_client: None,
             config_warnings: Vec::new(),
             session_source,
             enable_codex_api_key_env: false,

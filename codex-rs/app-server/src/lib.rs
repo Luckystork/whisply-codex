@@ -3,10 +3,8 @@
 
 use codex_arg0::Arg0DispatchPaths;
 use codex_code_mode::CodeModeSessionProvider;
-use codex_code_mode::WebSocketCodeModeSessionProvider;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
-use codex_config::RemoteThreadConfigLoader;
 use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
@@ -62,7 +60,6 @@ use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::find_codex_home;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
-use codex_features::Feature;
 use codex_feedback::CodexFeedback;
 use codex_protocol::protocol::SessionSource;
 use codex_rollout::state_db as rollout_state_db;
@@ -145,11 +142,10 @@ enum LogFormat {
 
 type StderrLogLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
 
-fn configured_thread_config_loader(config: &Config) -> Arc<dyn ThreadConfigLoader> {
-    match config.experimental_thread_config_endpoint.as_deref() {
-        Some(endpoint) => Arc::new(RemoteThreadConfigLoader::new(endpoint)),
-        None => Arc::new(NoopThreadConfigLoader),
-    }
+fn configured_thread_config_loader(_config: &Config) -> Arc<dyn ThreadConfigLoader> {
+    // Do not allow an in-memory config mutation to bypass BrokerOnly config
+    // validation and create a direct remote thread-config client.
+    Arc::new(NoopThreadConfigLoader)
 }
 
 /// Control-plane messages from the processor/transport side to the outbound router task.
@@ -464,6 +460,12 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
+    if runtime_options.remote_control_startup_mode == RemoteControlStartupMode::EnabledEphemeral {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Whisply remote control is managed by the installed app and is unavailable in this runtime.",
+        ));
+    }
     let loader_overrides = loader_overrides_with_test_user_config_file(
         loader_overrides,
         test_user_config_file_from_env(),
@@ -506,19 +508,12 @@ pub async fn run_main_with_transport_options(
             let discovered_thread_config_loader = configured_thread_config_loader(&config);
             config_manager
                 .replace_thread_config_loader(Arc::clone(&discovered_thread_config_loader));
-            let auth_manager =
-                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
-            config_manager.replace_cloud_config_bundle_loader(
-                auth_manager,
-                config.chatgpt_base_url.clone(),
-                config.http_client_factory(),
-            );
         }
         Err(err) => {
-            warn!(error = %err, "Failed to preload config for cloud config bundle");
+            warn!(error = %err, "Failed to preload config for thread configuration discovery");
             // TODO: Decide whether bootstrap config preload failures should block startup.
-            // If this fails, we cannot install cloud/thread config loaders, so non-strict
-            // startup may continue without managed cloud config.
+            // If this fails, we cannot install the thread config loader, so non-strict
+            // startup may continue without thread-specific config.
         }
     };
     let mut config_warnings = Vec::new();
@@ -543,24 +538,16 @@ pub async fn run_main_with_transport_options(
         }
     };
     config.auth_config().validate()?;
-    let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> =
-        match &runtime_options.code_mode_host_transport {
-            CodeModeHostTransport::Local => None,
-            CodeModeHostTransport::WebSocket(url) => {
-                if !config.features.enabled(Feature::CodeModeHost) {
-                    return Err(std::io::Error::new(
-                        ErrorKind::InvalidInput,
-                        "remote code-mode host requires the code_mode_host feature to be enabled",
-                    ));
-                }
-                Some(Arc::new(
-                    WebSocketCodeModeSessionProvider::with_http_client_factory(
-                        url.to_string(),
-                        config.http_client_factory(),
-                    ),
-                ))
-            }
-        };
+    if !runtime_options
+        .code_mode_host_transport
+        .is_available_in_broker_only()
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "remote code-mode hosts are unavailable in BrokerOnly",
+        ));
+    }
+    let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> = None;
     let environment_manager = if ignore_user_config {
         EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory()).await
     } else {
@@ -683,28 +670,12 @@ pub async fn run_main_with_transport_options(
             None => error!("{}", warning.summary),
         }
     }
-    let remote_control_policy = if config
-        .config_layer_stack
-        .requirements()
-        .allow_remote_control
-        .as_ref()
-        .is_some_and(|requirement| !requirement.value)
-    {
-        RemoteControlPolicy::DisabledByRequirements
-    } else {
-        RemoteControlPolicy::Allowed
-    };
+    // BrokerOnly leaves the legacy remote-control transport permanently disabled.
+    // Its public RPCs are handled locally by the managed-unavailable processor.
+    let remote_control_policy = RemoteControlPolicy::DisabledByRequirements;
     let remote_control_startup_mode = runtime_options.remote_control_startup_mode;
     let remote_control_explicitly_requested =
         remote_control_startup_mode == RemoteControlStartupMode::EnabledEphemeral;
-    if remote_control_explicitly_requested
-        && remote_control_policy == RemoteControlPolicy::DisabledByRequirements
-    {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            "remote control is disabled by managed requirements",
-        ));
-    }
     let installation_id = resolve_installation_id(&config.codex_home).await?;
     let transport_shutdown_token = CancellationToken::new();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
@@ -888,6 +859,7 @@ pub async fn run_main_with_transport_options(
             config: Arc::new(config),
             config_manager,
             environment_manager,
+            managed_gateway_client: None,
             feedback: feedback.clone(),
             log_db,
             state_db: state_db.clone(),
@@ -1360,13 +1332,18 @@ fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransp
 #[cfg(test)]
 mod tests {
     use super::LogFormat;
+    use super::configured_thread_config_loader;
     #[cfg(debug_assertions)]
     use super::loader_overrides_with_test_user_config_file;
     #[cfg(debug_assertions)]
     use codex_config::LoaderOverrides;
+    use codex_config::ThreadConfigContext;
+    use codex_config::ThreadConfigLoader;
+    use codex_core::config::ConfigBuilder;
     #[cfg(debug_assertions)]
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
 
     #[test]
     fn log_format_from_env_value_matches_json_values_case_insensitively() {
@@ -1384,6 +1361,24 @@ mod tests {
         assert_eq!(LogFormat::from_env_value(Some("")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("text")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("jsonl")), LogFormat::Default);
+    }
+
+    #[tokio::test]
+    async fn configured_thread_config_loader_stays_noop_for_mutated_endpoint_config()
+    -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await?;
+        config.experimental_thread_config_endpoint = Some("http://127.0.0.1:8061".to_string());
+
+        let sources = configured_thread_config_loader(&config)
+            .load(ThreadConfigContext::default())
+            .await?;
+
+        assert!(sources.is_empty());
+        Ok(())
     }
 
     #[cfg(debug_assertions)]

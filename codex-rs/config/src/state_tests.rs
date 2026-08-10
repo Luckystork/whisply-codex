@@ -1,4 +1,5 @@
 use super::*;
+use crate::PROJECT_CONFIG_DIRECTORY;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -113,8 +114,10 @@ exclude = ["LEGACY_*"]
 fn disabled_layers_do_not_validate_shell_environment_policy() {
     let layer = ConfigLayerEntry::new_disabled(
         ConfigLayerSource::Project {
-            dot_codex_folder: AbsolutePathBuf::from_absolute_path("/untrusted/.codex")
-                .expect("project path should be absolute"),
+            dot_codex_folder: AbsolutePathBuf::from_absolute_path(format!(
+                "/untrusted/{PROJECT_CONFIG_DIRECTORY}"
+            ))
+            .expect("project path should be absolute"),
         },
         toml::from_str(
             r#"
@@ -258,7 +261,7 @@ fn layer_iterators_preserve_precedence_and_disabled_layers() {
         profile: None,
     };
     let project_source = ConfigLayerSource::Project {
-        dot_codex_folder: test_user_config_path(&temp_dir, ".codex"),
+        dot_codex_folder: test_user_config_path(&temp_dir, PROJECT_CONFIG_DIRECTORY),
     };
     let session_source = ConfigLayerSource::SessionFlags;
     let empty_config = TomlValue::Table(toml::map::Map::new());

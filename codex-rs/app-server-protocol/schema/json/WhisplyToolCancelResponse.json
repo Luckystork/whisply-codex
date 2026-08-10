@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Typed cancellation acknowledgement. It never contains handler secrets or authority data.",
+  "properties": {
+    "accepted": {
+      "type": "boolean"
+    },
+    "executionID": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "accepted",
+    "executionID"
+  ],
+  "title": "WhisplyToolAppServerCancelAcknowledgement",
+  "type": "object"
+}

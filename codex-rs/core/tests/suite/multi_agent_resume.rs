@@ -1,6 +1,13 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
+use app_test_support::ManagedWhisplyGatewayFixture;
+use codex_core::CodexThread;
+use codex_core::ThreadManager;
 use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
+use codex_model_provider::whisply_provider_info;
+use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
@@ -8,7 +15,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::Submission;
 use codex_protocol::user_input::UserInput;
-use core_test_support::responses::assert_parent_turn;
+use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
@@ -21,6 +28,7 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -48,9 +56,10 @@ const INTERRUPT_PROMPT: &str = "release the interrupted worker";
 const SIBLING_NAME: &str = "survivor";
 const ROLE_NAME: &str = "durable_worker";
 const ROLE_MODEL: &str = "gpt-5.6-sol";
-const ROLE_MODEL_PROVIDER_ID: &str = "mock";
+const ROLE_MODEL_PROVIDER_ID: &str = "whisply";
 const ROLE_DEVELOPER_INSTRUCTIONS: &str = "Keep the durable worker role configuration.";
 const SUBAGENT_DEVELOPER_INSTRUCTIONS: &str = "Use the default durable worker instructions.";
+const CHILD_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn decoded_body(request: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = request
@@ -92,6 +101,119 @@ fn request_has_input_type(request: &wiremock::Request, input_type: &str) -> bool
         })
 }
 
+/// The direct Whisply route intentionally sends only its bounded metadata
+/// envelope, rather than the upstream flat client-metadata projection.
+fn whisply_turn_metadata(body: &Value) -> Option<Value> {
+    body["client_metadata"]["x-whisply-turn-metadata"]
+        .as_str()
+        .and_then(|metadata| serde_json::from_str(metadata).ok())
+}
+
+async fn wait_for_child_thread_id(
+    request_mock: &ResponseMock,
+    parent_thread_id: ThreadId,
+    description: &str,
+) -> Result<ThreadId> {
+    let deadline = Instant::now() + CHILD_LIFECYCLE_TIMEOUT;
+    loop {
+        if let Some(thread_id) = request_mock.requests().into_iter().find_map(|request| {
+            let body = request.body_json();
+            let metadata = whisply_turn_metadata(&body)?;
+            if metadata["parent_thread_id"] != json!(parent_thread_id) {
+                return None;
+            }
+            metadata["thread_id"]
+                .as_str()
+                .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+        }) {
+            return Ok(thread_id);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {description} request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_spawned_child_turn_metadata(
+    server: &wiremock::MockServer,
+    parent_thread_id: ThreadId,
+    task: &str,
+    description: &str,
+) -> Result<Value> {
+    let deadline = Instant::now() + CHILD_LIFECYCLE_TIMEOUT;
+    loop {
+        let requests = server
+            .received_requests()
+            .await
+            .expect("captured response requests");
+        if let Some(metadata) = requests.into_iter().find_map(|request| {
+            let body = decoded_body(&request)?;
+            let parsed_body = serde_json::from_slice::<Value>(&body).ok()?;
+            let metadata = whisply_turn_metadata(&parsed_body)?;
+            (body_contains(&request, task)
+                && request_has_input_type(&request, "agent_message")
+                && metadata["parent_thread_id"] == json!(parent_thread_id)
+                && metadata["thread_id"] != json!(parent_thread_id)
+                && metadata["subagent_kind"] == "thread_spawn")
+                .then_some(metadata)
+        }) {
+            return Ok(metadata);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {description} request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_registered_thread(
+    thread_manager: &ThreadManager,
+    thread_id: ThreadId,
+    description: &str,
+) -> Result<Arc<CodexThread>> {
+    let deadline = Instant::now() + CHILD_LIFECYCLE_TIMEOUT;
+    loop {
+        if let Ok(thread) = thread_manager.get_thread(thread_id).await {
+            return Ok(thread);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {description} registration");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_thread_completion(thread: &CodexThread, description: &str) -> Result<()> {
+    let deadline = Instant::now() + CHILD_LIFECYCLE_TIMEOUT;
+    loop {
+        if matches!(thread.agent_status().await, AgentStatus::Completed(_)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {description} completion");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_thread_removal(
+    thread_manager: &ThreadManager,
+    thread_id: ThreadId,
+    description: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + CHILD_LIFECYCLE_TIMEOUT;
+    loop {
+        if thread_manager.get_thread(thread_id).await.is_err() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for {description} removal");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn mount_root_collaboration_call(
     server: &wiremock::MockServer,
     prompt: &'static str,
@@ -129,10 +251,9 @@ async fn mount_root_collaboration_call(
     .await;
 }
 
-fn configure_multi_agent_v2_with_role(
-    config: &mut codex_core::config::Config,
-    model_provider_base_url: &str,
-) {
+fn configure_multi_agent_v2_with_role(config: &mut codex_core::config::Config) {
+    config.model = Some("gpt-5.6-terra".to_string());
+    config.model_provider = whisply_provider_info();
     config
         .features
         .enable(Feature::Collab)
@@ -148,7 +269,7 @@ fn configure_multi_agent_v2_with_role(
     std::fs::write(
         &role_path,
         format!(
-            "model = \"{ROLE_MODEL}\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"{ROLE_DEVELOPER_INSTRUCTIONS}\"\nsandbox_mode = \"read-only\"\nmodel_provider = \"mock\"\n\n[model_providers.mock]\nname = \"mock\"\nbase_url = \"{model_provider_base_url}\"\nenv_key = \"PATH\"\nwire_api = \"responses\"\n"
+            "model = \"{ROLE_MODEL}\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"{ROLE_DEVELOPER_INSTRUCTIONS}\"\nsandbox_mode = \"read-only\"\n"
         ),
     )
     .expect("write durable worker role config");
@@ -165,6 +286,8 @@ fn configure_multi_agent_v2_with_role(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Result<()> {
     let server = start_mock_server().await;
+    let managed_gateway =
+        ManagedWhisplyGatewayFixture::new(&server.uri())?.into_in_process_gateway()?;
     let spawn_args = serde_json::to_string(&json!({
         "message": INITIAL_TASK,
         "task_name": "worker",
@@ -205,7 +328,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
-    let nested_mock = mount_sse_once_match(
+    mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             body_contains(request, NESTED_TASK)
@@ -239,10 +362,11 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
 
-    let initial_model_provider_base_url = format!("{}/v1", server.uri());
-    let mut initial_builder = test_codex().with_config(move |config| {
-        configure_multi_agent_v2_with_role(config, &initial_model_provider_base_url);
-    });
+    let mut initial_builder = test_codex()
+        .with_managed_gateway_client(managed_gateway.client())
+        .with_config(move |config| {
+            configure_multi_agent_v2_with_role(config);
+        });
     let initial = initial_builder.build_with_auto_env(&server).await?;
     let root_thread_id = initial.session_configured.thread_id;
     let mut op = vec![UserInput::Text {
@@ -271,42 +395,21 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     })
     .await;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let worker_thread_id = loop {
-        if let Some(thread_id) = initial_child_request
-            .requests()
-            .into_iter()
-            .find_map(|request| {
-                let body = request.body_json();
-                if body["client_metadata"]["x-codex-parent-thread-id"] != json!(root_thread_id) {
-                    return None;
-                }
-                body["client_metadata"]["thread_id"]
-                    .as_str()
-                    .and_then(|thread_id| codex_protocol::ThreadId::from_string(thread_id).ok())
-            })
-        {
-            break thread_id;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for spawned worker");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
-    let worker_thread = initial.thread_manager.get_thread(worker_thread_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        if matches!(
-            worker_thread.agent_status().await,
-            AgentStatus::Completed(_)
-        ) {
-            break;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for worker completion");
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
+    let worker_thread_id =
+        wait_for_child_thread_id(&initial_child_request, root_thread_id, "spawned worker").await?;
+    let worker_thread =
+        wait_for_registered_thread(&initial.thread_manager, worker_thread_id, "spawned worker")
+            .await?;
+    wait_for_thread_completion(worker_thread.as_ref(), "spawned worker").await?;
+    let nested_metadata = wait_for_spawned_child_turn_metadata(
+        &server,
+        worker_thread_id,
+        NESTED_TASK,
+        "nested grandchild",
+    )
+    .await?;
+    assert_eq!(nested_metadata["parent_thread_id"], json!(worker_thread_id));
+    assert_eq!(nested_metadata["subagent_kind"], "thread_spawn");
     assert!(initial_child_request.requests().iter().any(|request| {
         request.body_contains_text(INITIAL_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
@@ -344,7 +447,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         &sibling_spawn_args,
     )
     .await;
-    mount_sse_once_match(
+    let sibling_initial_request = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             request_has_model(request, ROLE_MODEL)
@@ -360,23 +463,29 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     .await;
     initial.submit_turn(SIBLING_PROMPT).await?;
 
-    let grandchild = nested_mock.last_request().expect("grandchild").body_json();
-    let nested_id = &grandchild["client_metadata"]["thread_id"];
-    let sibling_thread_id = initial
-        .thread_manager
-        .list_thread_ids()
-        .await
-        .into_iter()
-        .find(|id| ![root_thread_id, worker_thread_id].contains(id) && &json!(id) != nested_id)
-        .ok_or_else(|| anyhow::anyhow!("spawned sibling should be registered"))?;
-    let sibling_thread = initial.thread_manager.get_thread(sibling_thread_id).await?;
-    wait_for_event(sibling_thread.as_ref(), |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
+    let sibling_thread_id =
+        wait_for_child_thread_id(&sibling_initial_request, root_thread_id, "spawned sibling")
+            .await?;
+    let sibling_thread = wait_for_registered_thread(
+        &initial.thread_manager,
+        sibling_thread_id,
+        "spawned sibling",
+    )
+    .await?;
+    wait_for_thread_completion(sibling_thread.as_ref(), "spawned sibling").await?;
     sibling_thread.flush_rollout().await?;
     worker_thread.flush_rollout().await?;
     initial.codex.flush_rollout().await?;
+    let persisted_worker = worker_thread
+        .read_thread(
+            /*include_archived*/ true, /*include_history*/ false,
+        )
+        .await?;
+    assert_eq!(persisted_worker.parent_thread_id, Some(root_thread_id));
+    assert_eq!(
+        persisted_worker.source.parent_thread_id(),
+        Some(root_thread_id)
+    );
     sibling_thread.shutdown_and_wait().await?;
     worker_thread.shutdown_and_wait().await?;
     drop(sibling_thread);
@@ -429,10 +538,11 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
 
-    let resumed_model_provider_base_url = format!("{}/v1", server.uri());
-    let mut resume_builder = test_codex().with_config(move |config| {
-        configure_multi_agent_v2_with_role(config, &resumed_model_provider_base_url);
-    });
+    let mut resume_builder = test_codex()
+        .with_managed_gateway_client(managed_gateway.client())
+        .with_config(move |config| {
+            configure_multi_agent_v2_with_role(config);
+        });
     let resumed = resume_builder.restart(&server, &initial).await?;
     drop(initial);
     assert_eq!(
@@ -470,26 +580,22 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
     resumed.submit_turn(QUEUE_PROMPT).await?;
-    resumed.submit_turn(FOLLOWUP_PROMPT).await?;
+    let reloaded_worker =
+        wait_for_registered_thread(&resumed.thread_manager, worker_thread_id, "reloaded worker")
+            .await?;
+    let reloaded_worker_config = reloaded_worker.config_snapshot().await;
+    assert_eq!(
+        reloaded_worker_config.parent_thread_id,
+        Some(root_thread_id),
+        "cold-reloaded worker must retain the persisted root parent before handling a follow-up",
+    );
+    assert_eq!(
+        reloaded_worker_config.session_source.parent_thread_id(),
+        Some(root_thread_id),
+    );
 
-    let reloaded_worker = resumed
-        .thread_manager
-        .get_thread(worker_thread_id)
-        .await
-        .expect("queued message should lazily reload the original worker");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        if matches!(
-            reloaded_worker.agent_status().await,
-            AgentStatus::Completed(_)
-        ) {
-            break;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for reloaded worker completion");
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
+    resumed.submit_turn(FOLLOWUP_PROMPT).await?;
+    wait_for_thread_completion(reloaded_worker.as_ref(), "reloaded worker").await?;
     assert!(followup_child_request.requests().iter().any(|request| {
         request.body_contains_text(FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
@@ -501,57 +607,67 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         .await
         .expect("captured response requests");
     assert!(!followup_child_request.requests().iter().any(|request| {
-        request.body_json()["client_metadata"]["thread_id"] == json!(worker_thread_id)
-            && request.body_contains_text(QUEUED_MESSAGE)
-            && !request.body_contains_text(FOLLOWUP_TASK)
+        whisply_turn_metadata(&request.body_json()).is_some_and(|metadata| {
+            metadata["thread_id"] == json!(worker_thread_id)
+                && request.body_contains_text(QUEUED_MESSAGE)
+                && !request.body_contains_text(FOLLOWUP_TASK)
+        })
     }));
     let body_for = |text: &str, thread: codex_protocol::ThreadId| {
         requests
             .iter()
             .find_map(|request| {
                 let body: Value = serde_json::from_slice(&decoded_body(request)?).ok()?;
-                (body_contains(request, text)
-                    && body["client_metadata"]["thread_id"] == json!(thread))
-                .then_some(body)
+                let metadata = whisply_turn_metadata(&body)?;
+                (body_contains(request, text) && metadata["thread_id"] == json!(thread))
+                    .then_some((body, metadata))
             })
             .expect("matching model request for expected thread")
     };
-    let initial_root = body_for(INITIAL_PROMPT, root_thread_id);
-    let queue_root = body_for(QUEUE_PROMPT, root_thread_id);
-    let followup_root = body_for(FOLLOWUP_PROMPT, root_thread_id);
-    let initial_child = body_for(INITIAL_TASK, worker_thread_id);
-    let followup_child = body_for(FOLLOWUP_TASK, worker_thread_id);
-    let initial_parent = initial_root["client_metadata"]["turn_id"]
+    let (_initial_root, initial_root_metadata) = body_for(INITIAL_PROMPT, root_thread_id);
+    let (_queue_root, queue_root_metadata) = body_for(QUEUE_PROMPT, root_thread_id);
+    let (_followup_root, followup_root_metadata) = body_for(FOLLOWUP_PROMPT, root_thread_id);
+    let (_initial_child, initial_child_metadata) = body_for(INITIAL_TASK, worker_thread_id);
+    let (_followup_child, followup_child_metadata) = body_for(FOLLOWUP_TASK, worker_thread_id);
+    let initial_parent = initial_root_metadata["turn_id"]
         .as_str()
         .expect("initial parent turn");
-    let queue_parent = queue_root["client_metadata"]["turn_id"]
+    let queue_parent = queue_root_metadata["turn_id"]
         .as_str()
         .expect("queue-only parent turn");
-    let followup_parent = followup_root["client_metadata"]["turn_id"]
+    let followup_parent = followup_root_metadata["turn_id"]
         .as_str()
         .expect("follow-up parent turn");
-    assert_ne!(followup_parent, initial_parent);
-    assert_ne!(followup_parent, queue_parent);
-    let nested_parent = initial_child["client_metadata"]["turn_id"]
+    let nested_parent = initial_child_metadata["turn_id"]
         .as_str()
         .expect("nested worker parent turn");
-    for (body, parent_thread, parent_turn) in [
-        (&initial_root, None, None),
-        (&queue_root, None, None),
-        (&followup_root, None, None),
-        (&initial_child, Some(root_thread_id), Some(initial_parent)),
-        (&followup_child, Some(root_thread_id), Some(followup_parent)),
-        (&grandchild, Some(worker_thread_id), Some(nested_parent)),
+    assert_ne!(followup_parent, initial_parent);
+    assert_ne!(followup_parent, queue_parent);
+    for (metadata, parent_thread, parent_turn) in [
+        (&initial_root_metadata, None, None),
+        (&queue_root_metadata, None, None),
+        (&followup_root_metadata, None, None),
+        (
+            &initial_child_metadata,
+            Some(root_thread_id),
+            Some(initial_parent),
+        ),
+        (
+            &followup_child_metadata,
+            Some(root_thread_id),
+            Some(followup_parent),
+        ),
+        (
+            &nested_metadata,
+            Some(worker_thread_id),
+            Some(nested_parent),
+        ),
     ] {
         if let Some(parent_thread) = parent_thread {
-            assert_eq!(
-                body["client_metadata"]["x-codex-parent-thread-id"],
-                json!(parent_thread)
-            );
+            assert_eq!(metadata["parent_thread_id"], json!(parent_thread));
         }
-        assert_parent_turn(body, parent_turn)?;
+        assert_eq!(metadata["parent_turn_id"].as_str(), parent_turn);
     }
-    let reloaded_worker_config = reloaded_worker.config_snapshot().await;
     let reloaded_worker_role_config = (
         reloaded_worker_config.model,
         reloaded_worker_config.model_provider_id,
@@ -581,13 +697,12 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
     resumed.submit_turn(INTERRUPT_PROMPT).await?;
-    assert!(
-        resumed
-            .thread_manager
-            .get_thread(worker_thread_id)
-            .await
-            .is_err()
-    );
+    wait_for_thread_removal(
+        &resumed.thread_manager,
+        worker_thread_id,
+        "interrupted worker",
+    )
+    .await?;
 
     let sibling_followup_args = serde_json::to_string(&json!({
         "target": SIBLING_NAME,
@@ -617,19 +732,18 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     .await;
     resumed.submit_turn(SIBLING_FOLLOWUP_PROMPT).await?;
 
-    let surviving_sibling = resumed
-        .thread_manager
-        .get_thread(sibling_thread_id)
-        .await
-        .expect("follow-up should reload the surviving sibling");
-    wait_for_event(surviving_sibling.as_ref(), |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
+    let surviving_sibling = wait_for_registered_thread(
+        &resumed.thread_manager,
+        sibling_thread_id,
+        "surviving sibling",
+    )
+    .await?;
+    wait_for_thread_completion(surviving_sibling.as_ref(), "surviving sibling").await?;
     assert!(sibling_followup_request.requests().iter().any(|request| {
         request.body_contains_text(SIBLING_FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
     }));
+    managed_gateway.assert_healthy()?;
 
     Ok(())
 }

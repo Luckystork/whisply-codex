@@ -1,6 +1,10 @@
+#![cfg(target_os = "macos")]
+
 use std::time::Duration;
 
 use anyhow::Result;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use codex_app_server_protocol::CapabilityRootLocation;
@@ -92,13 +96,13 @@ async fn exercise_executor_skill(scenario: ExecutorSkillScenario) -> Result<()> 
 
     let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
-    let (sandbox_config, permission_profile) = if restricted {
+    let (managed_settings, permission_profile) = if restricted {
         (
             "default_permissions = \"workspace\"",
             "\n[permissions.workspace.filesystem.\":workspace_roots\"]\n\".\" = \"write\"\n\n[windows]\nsandbox = \"unelevated\"\n",
         )
     } else {
-        ("sandbox_mode = \"read-only\"", "")
+        ("", "")
     };
     let (approval_policy, requested_permission_feature) =
         if scenario == ExecutorSkillScenario::RestrictedDeniedReference {
@@ -109,30 +113,18 @@ async fn exercise_executor_skill(scenario: ExecutorSkillScenario) -> Result<()> 
         } else {
             ("never", "")
         };
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        format!(
+    ManagedWhisplyConfig::new()
+        .with_approval_policy(approval_policy)
+        .with_additional_config(&format!(
             r#"
-model = "mock-model"
-approval_policy = "{approval_policy}"
-{sandbox_config}
-model_provider = "mock_provider"
-
+{managed_settings}
 [skills]
 include_instructions = true
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
 {permission_profile}
 {requested_permission_feature}
-"#,
-            server.uri()
-        ),
-    )?;
+"#
+        ))
+        .write(codex_home.path())?;
     let local_skill_dir = codex_home.path().join("skills/local-deploy");
     std::fs::create_dir_all(&local_skill_dir)?;
     std::fs::write(
@@ -141,8 +133,10 @@ stream_max_retries = 0
             "---\nname: {SKILL_NAME}\ndescription: Colliding local skill.\n---\n\n# Local deploy\n\n{LOCAL_SKILL_MARKER}\n"
         ),
     )?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build()
         .await?;
     let auto_env = app_server.auto_env()?;

@@ -1,5 +1,7 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CodexErrorInfo;
@@ -27,7 +29,7 @@ use tokio::time::timeout;
 use wiremock::ResponseTemplate;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const REQUESTED_MODEL: &str = "gpt-5.4";
+const REQUESTED_MODEL: &str = "gpt-5.6-terra";
 const SERVER_MODEL: &str = "gpt-5.3-codex";
 const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION: &str = "trusted_access_for_cyber";
 const CYBER_POLICY_MESSAGE: &str =
@@ -49,7 +51,7 @@ async fn openai_model_header_mismatch_emits_model_rerouted_notification_v2() -> 
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -107,7 +109,7 @@ async fn cyber_policy_response_emits_typed_error_notification_v2() -> Result<()>
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -175,7 +177,7 @@ async fn response_model_field_mismatch_emits_model_rerouted_notification_v2_when
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -235,7 +237,7 @@ async fn model_verification_emits_typed_notification_and_warning_v2() -> Result<
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -300,7 +302,7 @@ async fn turn_moderation_metadata_emits_typed_notification_v2() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -482,8 +484,8 @@ fn is_warning_user_message_item(item: &ThreadItem) -> bool {
     warning_text_from_item(item).is_some()
 }
 
-fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri)
+fn create_config_toml(codex_home: &std::path::Path, _server_uri: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new()
         .with_model(REQUESTED_MODEL)
         .disable_feature(Feature::RemoteModels)
         .enable_feature(Feature::Personality)

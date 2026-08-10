@@ -69,6 +69,8 @@ pub(crate) struct Session {
 pub(crate) struct SessionConfiguration {
     /// Runtime provider and its provider-specific execution policy.
     pub(super) provider: SharedModelProvider,
+    /// Optional host-owned gateway used only by embedded test runtimes.
+    pub(super) managed_gateway_client: Option<Arc<codex_whisply::ManagedGatewayClient>>,
 
     pub(super) collaboration_mode: CollaborationMode,
     pub(super) model_reasoning_summary: Option<ReasoningSummaryConfig>,
@@ -1123,6 +1125,7 @@ impl Session {
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
                 auth_manager: Arc::clone(&auth_manager),
+                managed_gateway_client: session_configuration.managed_gateway_client.clone(),
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1154,15 +1157,14 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
-                    Some(Arc::clone(&auth_manager)),
+                model_client: ModelClient::new_with_model_provider(
+                    session_configuration.provider.clone(),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
                     } else {
                         AgentIdentityAuthPolicy::JwtOnly
                     },
                     thread_id,
-                    session_configuration.provider.info().clone(),
                     session_configuration.session_source.clone(),
                     session_configuration.originator.clone(),
                     config.model_verbosity,

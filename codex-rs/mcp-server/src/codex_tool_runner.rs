@@ -117,7 +117,7 @@ pub async fn run_codex_tool_session(
     };
 
     if let Err(e) = thread.submit_with_id(submission).await {
-        tracing::error!("Failed to submit initial prompt: {e}");
+        tracing::error!("failed to submit initial prompt");
         let result = create_call_tool_result_with_thread_id(
             thread_id,
             format!("Failed to submit initial prompt: {e}"),
@@ -162,7 +162,7 @@ pub async fn run_codex_tool_session_reply(
         })
         .await
     {
-        tracing::error!("Failed to submit user input: {e}");
+        tracing::error!("failed to submit user input");
         let result = create_call_tool_result_with_thread_id(
             thread_id,
             format!("Failed to submit user input: {e}"),

@@ -10,6 +10,8 @@ use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -721,15 +723,33 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                             .expect("thread-scoped MCP resolution should identify its source")
                             .clone(),
                     ));
-                let mut server = codex_mcp::codex_apps_mcp_server_config(
-                    "https://selected.invalid",
-                    /*apps_mcp_product_sku*/ None,
-                    /*originator*/ None,
-                );
                 let CapabilityRootLocation::Environment { environment_id, .. } =
                     &selected_root.location;
-                server.environment_id = environment_id.clone();
-                server.enabled = false;
+                let server = codex_config::McpServerConfig {
+                    transport: codex_config::McpServerTransportConfig::Stdio {
+                        command: "selected-plugin".to_string(),
+                        args: Vec::new(),
+                        env: None,
+                        env_vars: Vec::new(),
+                        cwd: None,
+                    },
+                    auth: Default::default(),
+                    environment_id: environment_id.clone(),
+                    enabled: false,
+                    required: false,
+                    supports_parallel_tool_calls: false,
+                    omit_tools_from: None,
+                    disabled_reason: None,
+                    startup_timeout_sec: None,
+                    tool_timeout_sec: None,
+                    default_tools_approval_mode: None,
+                    enabled_tools: None,
+                    disabled_tools: None,
+                    scopes: None,
+                    oauth: None,
+                    oauth_resource: None,
+                    tools: HashMap::new(),
+                };
                 let plugin_id = selected_root.id;
                 vec![codex_extension_api::McpServerContribution::SelectedPlugin {
                     name: plugin_id.clone(),
@@ -883,20 +903,10 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
         selected_servers(&second_resolved.config),
         std::collections::BTreeMap::from([("selected-b".to_string(), "env-b".to_string())])
     );
-    let codex_apps_server = codex_mcp::configured_mcp_servers(&first_resolved.config)
-        .remove(codex_mcp::CODEX_APPS_MCP_SERVER_NAME)
-        .expect("Codex Apps server should be configured");
-    let codex_apps_headers = match codex_apps_server.transport {
-        codex_config::McpServerTransportConfig::StreamableHttp { http_headers, .. } => http_headers,
-        codex_config::McpServerTransportConfig::Stdio { .. } => {
-            panic!("Codex Apps server should use streamable HTTP")
-        }
-    };
-    assert_eq!(
-        codex_apps_headers
-            .expect("Codex Apps headers should be configured")
-            .get("originator"),
-        Some(&"codex_work_desktop".to_string())
+    assert!(
+        !codex_mcp::configured_mcp_servers(&first_resolved.config)
+            .contains_key(codex_mcp::CODEX_APPS_MCP_SERVER_NAME),
+        "BrokerOnly must not synthesize the host-owned Codex Apps MCP server"
     );
 }
 
@@ -1510,7 +1520,8 @@ async fn new_uses_active_provider_for_model_refresh() {
     config.cwd = config.codex_home.abs();
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
     config.model_catalog = None;
-    config.model_provider.base_url = Some(server.uri());
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = ModelProviderInfo::create_openai_provider(Some(server.uri()));
 
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -1552,7 +1563,8 @@ async fn injected_models_manager_controls_refresh_policy() {
     config.cwd = config.codex_home.abs();
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
     config.model_catalog = None;
-    config.model_provider.base_url = Some(server.uri());
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = ModelProviderInfo::create_openai_provider(Some(server.uri()));
 
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());

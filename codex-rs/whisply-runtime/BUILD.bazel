@@ -1,0 +1,24 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+# A test-only app-server binary reaches this target through the
+# whisply_test_support_binary transition. Shipping targets remain on the
+# default, feature-free edge.
+config_setting(
+    name = "test_support_macos",
+    constraint_values = ["@platforms//os:macos"],
+    define_values = {"codex_whisply_test_support": "true"},
+)
+
+# The catalog fixture is compile-time data for the strict signed-catalog unit
+# test. Keep it in this package so Bazel sandboxing cannot silently omit the
+# cross-language fixture while Cargo happens to see the parent Runtime tree.
+codex_rust_crate(
+    name = "whisply-runtime",
+    compile_data = ["tests/fixtures/whisply-model-catalog-v1.json"],
+    crate_features = select({
+        ":test_support_macos": ["test-support"],
+        "//conditions:default": [],
+    }),
+    crate_name = "codex_whisply",
+    test_data_extra = ["tests/fixtures/whisply-model-catalog-v1.json"],
+)

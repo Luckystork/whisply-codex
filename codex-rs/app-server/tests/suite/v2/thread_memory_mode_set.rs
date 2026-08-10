@@ -1,8 +1,7 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
-use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ThreadMemoryMode;
 use codex_app_server_protocol::ThreadMemoryModeSetParams;
@@ -20,10 +19,8 @@ use tempfile::TempDir;
 
 #[tokio::test]
 async fn thread_memory_mode_set_updates_loaded_thread_state() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_root_config("suppress_unstable_features_warning = true")
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
     let state_db = init_state_db(codex_home.path()).await?;
@@ -58,10 +55,8 @@ async fn thread_memory_mode_set_updates_loaded_thread_state() -> Result<()> {
 
 #[tokio::test]
 async fn thread_memory_mode_set_updates_stored_thread_state() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_root_config("suppress_unstable_features_warning = true")
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
     let state_db = init_state_db(codex_home.path()).await?;
@@ -71,7 +66,7 @@ async fn thread_memory_mode_set_updates_stored_thread_state() -> Result<()> {
         "2025-01-06T08-30-00",
         "2025-01-06T08:30:00Z",
         "Stored thread preview",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let thread_uuid = ThreadId::from_string(&thread_id)?;
@@ -102,7 +97,7 @@ async fn thread_memory_mode_set_updates_stored_thread_state() -> Result<()> {
 async fn init_state_db(codex_home: &Path) -> Result<Arc<StateRuntime>> {
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db

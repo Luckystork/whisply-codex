@@ -123,6 +123,35 @@ fn commands_can_derive_descriptions_from_source_names() {
 }
 
 #[test]
+fn command_import_skips_literal_credentials_without_creating_a_partial_skill() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let commands = root.path().join("commands");
+    let target_skills = root.path().join("skills");
+    fs::create_dir_all(&commands).expect("create commands");
+    fs::write(
+        commands.join("safe.md"),
+        "---\ndescription: Safe command\n---\nDiscuss API_KEY=your-api-key.\n",
+    )
+    .expect("write safe command");
+    fs::write(
+        commands.join("credential.md"),
+        "---\ndescription: Credential command\n---\nOPENAI_API_KEY=private\n",
+    )
+    .expect("write credential command");
+
+    let profile = CommandMigrationProfile::new(
+        TEST_REWRITE_PROFILE,
+        CommandDescriptionMode::RequireFrontmatter,
+    );
+    assert_eq!(
+        import_commands_with_profile(&commands, &target_skills, profile).expect("import commands"),
+        vec!["source-command-safe".to_string()]
+    );
+    assert!(target_skills.join("source-command-safe/SKILL.md").is_file());
+    assert!(!target_skills.join("source-command-credential").exists());
+}
+
+#[test]
 fn command_slug_collisions_are_skipped() {
     let root = tempfile::TempDir::new().expect("tempdir");
     let commands = root.path().join("commands");

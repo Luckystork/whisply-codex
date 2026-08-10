@@ -11,6 +11,17 @@ use sha2::Digest;
 use sha2::Sha256;
 
 const MAX_FEEDBACK_TREE_THREADS: usize = 8;
+const WHISPLY_MANAGED_FEEDBACK_UPLOAD_UNAVAILABLE_ERROR: &str =
+    "Whisply feedback upload is managed by the installed app and is unavailable in this runtime.";
+
+/// Feedback upload is a broker-owned operation. This guard deliberately runs
+/// before auth lookup, rollout-path resolution, log/database reads, or Sentry
+/// client construction in `upload_feedback_response`.
+fn reject_direct_feedback_upload() -> Result<(), JSONRPCErrorError> {
+    Err(invalid_request(
+        WHISPLY_MANAGED_FEEDBACK_UPLOAD_UNAVAILABLE_ERROR,
+    ))
+}
 
 #[derive(Clone)]
 pub(crate) struct FeedbackRequestProcessor {
@@ -45,6 +56,7 @@ impl FeedbackRequestProcessor {
         &self,
         params: FeedbackUploadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        reject_direct_feedback_upload()?;
         self.upload_feedback_response(params)
             .await
             .map(|response| Some(response.into()))
@@ -435,6 +447,12 @@ mod tests {
     use codex_protocol::protocol::RolloutLine;
     use codex_protocol::protocol::TurnContextItem;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn direct_feedback_upload_is_rejected_before_legacy_upload_assembly() {
+        assert!(reject_direct_feedback_upload().is_err());
+    }
+
     #[test]
     fn feedback_tags_drop_unverified_client_prompt_tags() {
         let mut upload_tags = BTreeMap::from([

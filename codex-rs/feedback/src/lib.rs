@@ -721,17 +721,24 @@ mod tests {
     }
 
     #[test]
-    fn logger_layer_excludes_responses_websocket_timing_payloads() {
+    fn logger_layer_excludes_high_volume_payloads() {
         let fb = CodexFeedback::new();
         let _guard = tracing_subscriber::registry()
             .with(fb.logger_layer())
             .set_default();
 
         tracing::trace!(target: "codex_api::responses_websocket_timing", payload = "secret");
+        tracing::trace!(
+            target: "codex_core::post_sampling_token_estimate",
+            estimated_token_count = 42_u64,
+            "post sampling token estimate"
+        );
         tracing::trace!(target: "codex_feedback_test", "retained");
 
         let logs = String::from_utf8(fb.snapshot(/*session_id*/ None).bytes).unwrap();
         assert!(!logs.contains("secret"));
+        assert!(!logs.contains("post sampling token estimate"));
+        assert!(!logs.contains("estimated_token_count"));
         assert!(logs.contains("retained"));
     }
 

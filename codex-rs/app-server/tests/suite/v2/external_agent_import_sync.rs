@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::fs::FileTimes;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -7,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
@@ -64,7 +66,7 @@ impl ImportFixture {
         let initial_record = source_record(&project_root, "user", FIRST_USER);
         std::fs::write(&session_path, format!("{initial_record}\n"))?;
 
-        let app_server = start_app_server(codex_home.path()).await?;
+        let app_server = start_app_server(codex_home.path(), None).await?;
         Ok(Self {
             _codex_home: codex_home,
             project_root,
@@ -187,7 +189,13 @@ impl ImportFixture {
 
     async fn restart(&mut self) -> Result<()> {
         timeout(TIMEOUT, self.app_server.shutdown_gracefully()).await??;
-        self.app_server = start_app_server(self._codex_home.path()).await?;
+        self.app_server = start_app_server(self._codex_home.path(), None).await?;
+        Ok(())
+    }
+
+    async fn restart_with_managed_gateway(&mut self, gateway_base_url: &str) -> Result<()> {
+        timeout(TIMEOUT, self.app_server.shutdown_gracefully()).await??;
+        self.app_server = start_app_server(self._codex_home.path(), Some(gateway_base_url)).await?;
         Ok(())
     }
 
@@ -217,9 +225,18 @@ impl ImportFixture {
     }
 }
 
-async fn start_app_server(codex_home: &Path) -> Result<TestAppServer> {
+async fn start_app_server(
+    codex_home: &Path,
+    gateway_base_url: Option<&str>,
+) -> Result<TestAppServer> {
     let home = codex_home.display().to_string();
-    TestAppServer::builder()
+    let builder = match gateway_base_url {
+        Some(gateway_base_url) => {
+            app_test_support::managed_whisply_app_server_builder!(gateway_base_url)
+        }
+        None => TestAppServer::builder(),
+    };
+    builder
         .with_codex_home(codex_home)
         .with_env_overrides(&[("HOME", Some(home.as_str()))])
         .build_initialized_with_timeout(TIMEOUT)
@@ -305,8 +322,8 @@ async fn active_target_is_deferred_without_checkpoint() -> Result<()> {
 async fn cold_diverged_target_is_deferred_without_checkpoint() -> Result<()> {
     let model = create_mock_responses_server_repeating_assistant(NATIVE_ASSISTANT).await;
     let mut fixture = ImportFixture::new().await?;
-    MockResponsesConfig::new(&model.uri()).write(fixture._codex_home.path())?;
-    fixture.restart().await?;
+    ManagedWhisplyConfig::new().write(fixture._codex_home.path())?;
+    fixture.restart_with_managed_gateway(&model.uri()).await?;
     let original = fixture.import_one().await?;
     fixture.resume(&original).await?;
     let environment = fixture.app_server.auto_env_params()?;

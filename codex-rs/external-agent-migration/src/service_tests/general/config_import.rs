@@ -1,4 +1,5 @@
 use super::super::*;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -23,12 +24,12 @@ async fn import_repo_mcp_preserves_existing_same_named_server() {
         }"#,
     )
     .expect("write mcp");
-    fs::create_dir_all(repo_root.join(".codex")).expect("create codex dir");
+    fs::create_dir_all(repo_root.join(PROJECT_CONFIG_DIRECTORY)).expect("create Whisply dir");
     let existing_config = r#"[mcp_servers.mixedTransport]
 url = "https://example.com/mixed-transport"
 "#;
     fs::write(
-        repo_root.join(".codex").join("config.toml"),
+        repo_root.join(PROJECT_CONFIG_DIRECTORY).join("config.toml"),
         existing_config,
     )
     .expect("write config");
@@ -59,7 +60,8 @@ url = "https://example.com/mixed-transport"
         .await;
 
     assert_eq!(
-        fs::read_to_string(repo_root.join(".codex").join("config.toml")).expect("read config"),
+        fs::read_to_string(repo_root.join(PROJECT_CONFIG_DIRECTORY).join("config.toml"))
+            .expect("read config"),
         existing_config
     );
 }
@@ -79,9 +81,9 @@ async fn detect_repo_mcp_lists_only_missing_servers() {
         }"#,
     )
     .expect("write mcp");
-    fs::create_dir_all(repo_root.join(".codex")).expect("create codex dir");
+    fs::create_dir_all(repo_root.join(PROJECT_CONFIG_DIRECTORY)).expect("create Whisply dir");
     fs::write(
-        repo_root.join(".codex").join("config.toml"),
+        repo_root.join(PROJECT_CONFIG_DIRECTORY).join("config.toml"),
         r#"[mcp_servers.mixedTransport]
 url = "https://example.com/mixed-transport"
 "#,
@@ -107,7 +109,10 @@ url = "https://example.com/mixed-transport"
             description: format!(
                 "Migrate MCP servers from {} into {}",
                 repo_root.display(),
-                repo_root.join(".codex").join("config.toml").display()
+                repo_root
+                    .join(PROJECT_CONFIG_DIRECTORY)
+                    .join("config.toml")
+                    .display()
             ),
             cwd: Some(repo_root),
             details: Some(MigrationDetails {
@@ -130,7 +135,7 @@ async fn import_home_migrates_supported_config_fields_skills_and_agents_md() {
     fs::create_dir_all(external_agent_home.join("skills").join("skill-a")).expect("create skills");
     fs::write(
             external_agent_home.join("settings.json"),
-            format!(r#"{{"model":"{SOURCE_EXTERNAL_AGENT_NAME}","permissions":{{"ask":["git push"]}},"env":{{"FOO":"bar","CI":false,"MAX_RETRIES":3,"MY_TEAM":"codex","IGNORED":null,"LIST":["a","b"],"MAP":{{"x":1}}}},"sandbox":{{"enabled":true,"network":{{"allowLocalBinding":true}}}}}}"#),
+            format!(r#"{{"model":"{SOURCE_EXTERNAL_AGENT_NAME}","permissions":{{"ask":["git push"]}},"env":{{"OPENAI_API_KEY":"private","FOO":"bar","CI":false,"MAX_RETRIES":3,"MY_TEAM":"codex","IGNORED":null,"LIST":["a","b"],"MAP":{{"x":1}}}},"sandbox":{{"enabled":true,"network":{{"allowLocalBinding":true}}}}}}"#),
         )
         .expect("write settings");
     fs::write(
@@ -183,19 +188,11 @@ async fn import_home_migrates_supported_config_fields_skills_and_agents_md() {
     let expected: TomlValue = toml::from_str(
         r#"
 sandbox_mode = "workspace-write"
-
-[shell_environment_policy]
-inherit = "core"
-
-[shell_environment_policy.set]
-CI = "false"
-FOO = "bar"
-MAX_RETRIES = "3"
-MY_TEAM = "codex"
 "#,
     )
     .expect("parse expected config");
     assert_eq!(config, expected);
+    assert!(!config.to_string().contains("OPENAI_API_KEY"));
     assert_eq!(
         fs::read_to_string(agents_skills.join("skill-a").join("SKILL.md"))
             .expect("read copied skill"),
@@ -204,7 +201,7 @@ MY_TEAM = "codex"
 }
 
 #[tokio::test]
-async fn import_home_config_uses_local_settings_over_project_settings() {
+async fn import_home_config_drops_environment_values_from_all_settings_layers() {
     let (_root, external_agent_home, codex_home) = fixture_paths();
     fs::create_dir_all(&external_agent_home).expect("create external agent home");
     fs::write(
@@ -227,24 +224,11 @@ async fn import_home_config_uses_local_settings_over_project_settings() {
         }])
         .await;
 
-    let config: TomlValue =
-        toml::from_str(&fs::read_to_string(codex_home.join("config.toml")).expect("read config"))
-            .expect("parse config");
-    let expected: TomlValue = toml::from_str(
-        r#"
-sandbox_mode = "workspace-write"
-
-[shell_environment_policy]
-inherit = "core"
-
-[shell_environment_policy.set]
-FOO = "local"
-LOCAL_ONLY = "true"
-PROJECT_ONLY = "yes"
-"#,
-    )
-    .expect("parse expected config");
-    assert_eq!(config, expected);
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    assert_eq!(config.trim(), "sandbox_mode = \"workspace-write\"");
+    assert!(!config.contains("FOO"));
+    assert!(!config.contains("PROJECT_ONLY"));
+    assert!(!config.contains("LOCAL_ONLY"));
 }
 
 #[tokio::test]
@@ -271,10 +255,7 @@ async fn import_home_config_ignores_invalid_local_settings() {
         }])
         .await;
 
-    assert_eq!(
-        fs::read_to_string(codex_home.join("config.toml")).expect("read config"),
-        "[shell_environment_policy]\ninherit = \"core\"\n\n[shell_environment_policy.set]\nFOO = \"project\"\n"
-    );
+    assert!(!codex_home.join("config.toml").exists());
 }
 
 #[tokio::test]
@@ -401,69 +382,6 @@ async fn import_local_plugins_returns_completed_status() {
 }
 
 #[tokio::test]
-async fn import_git_plugins_returns_pending_async_status() {
-    let (_root, external_agent_home, codex_home) = fixture_paths();
-    fs::create_dir_all(&external_agent_home).expect("create external agent home");
-    fs::write(
-        external_agent_home.join("settings.json"),
-        r#"{
-          "enabledPlugins": {
-            "formatter@acme-tools": true
-          },
-          "extraKnownMarketplaces": {
-            "acme-tools": {
-              "source": "owner/debug-marketplace"
-            }
-          }
-        }"#,
-    )
-    .expect("write settings");
-
-    let outcome = service_for_paths(external_agent_home, codex_home.clone())
-        .import(vec![ExternalAgentConfigMigrationItem {
-            item_type: ExternalAgentConfigMigrationItemType::Plugins,
-            description: String::new(),
-            cwd: None,
-            details: Some(MigrationDetails {
-                plugins: vec![PluginsMigration {
-                    marketplace_name: "acme-tools".to_string(),
-                    plugin_names: vec!["formatter".to_string()],
-                }],
-                ..Default::default()
-            }),
-        }])
-        .await;
-
-    assert_eq!(
-        outcome.pending_plugin_imports,
-        vec![PendingPluginImport {
-            cwd: None,
-            description: String::new(),
-            details: MigrationDetails {
-                plugins: vec![PluginsMigration {
-                    marketplace_name: "acme-tools".to_string(),
-                    plugin_names: vec!["formatter".to_string()],
-                }],
-                ..Default::default()
-            },
-        }]
-    );
-    assert_eq!(
-        outcome.item_results,
-        vec![ExternalAgentConfigImportItemResult {
-            item_type: ExternalAgentConfigMigrationItemType::Plugins,
-            description: String::new(),
-            cwd: None,
-            success_count: 0,
-            error_count: 0,
-            successes: Vec::new(),
-            raw_errors: Vec::new(),
-        }]
-    );
-    assert!(!codex_home.join("config.toml").exists());
-}
-
-#[tokio::test]
 async fn detect_home_skips_config_when_target_already_has_supported_fields() {
     let (_root, external_agent_home, codex_home) = fixture_paths();
     fs::create_dir_all(&external_agent_home).expect("create external agent home");
@@ -519,4 +437,35 @@ async fn detect_home_skips_skills_when_all_skill_directories_exist() {
         .expect("detect");
 
     assert_eq!(items, Vec::<ExternalAgentConfigMigrationItem>::new());
+}
+
+#[tokio::test]
+async fn import_home_skills_skips_sensitive_packages_without_copying_them() {
+    let (_root, external_agent_home, codex_home) = fixture_paths();
+    let source_skills = external_agent_home.join("skills");
+    fs::create_dir_all(source_skills.join("safe-skill")).expect("create safe skill");
+    fs::create_dir_all(source_skills.join("credential-skill")).expect("create unsafe skill");
+    fs::write(source_skills.join("safe-skill/SKILL.md"), "# Safe\n").expect("write safe skill");
+    fs::write(
+        source_skills.join("credential-skill/SKILL.md"),
+        "OPENAI_API_KEY=private\n",
+    )
+    .expect("write unsafe skill");
+
+    let outcome = service_for_paths(external_agent_home, codex_home.clone())
+        .import(vec![ExternalAgentConfigMigrationItem {
+            item_type: ExternalAgentConfigMigrationItemType::Skills,
+            description: String::new(),
+            cwd: None,
+            details: None,
+        }])
+        .await;
+
+    assert_eq!(outcome.item_results[0].success_count, 1);
+    let target_skills = codex_home
+        .parent()
+        .expect("codex home parent")
+        .join(".agents/skills");
+    assert!(target_skills.join("safe-skill/SKILL.md").is_file());
+    assert!(!target_skills.join("credential-skill").exists());
 }

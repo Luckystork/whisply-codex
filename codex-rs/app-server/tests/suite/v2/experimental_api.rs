@@ -1,8 +1,9 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
 use app_test_support::DEFAULT_CLIENT_NAME;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
-use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientInfo;
@@ -262,9 +263,8 @@ async fn realtime_webrtc_start_requires_experimental_api_capability() -> Result<
 
 #[tokio::test]
 async fn thread_start_mock_field_requires_experimental_api_capability() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -305,9 +305,8 @@ async fn thread_start_mock_field_requires_experimental_api_capability() -> Resul
 #[tokio::test]
 async fn thread_start_without_dynamic_tools_allows_without_experimental_api_capability()
 -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -347,9 +346,8 @@ async fn thread_start_without_dynamic_tools_allows_without_experimental_api_capa
 #[tokio::test]
 async fn thread_start_granular_approval_policy_requires_experimental_api_capability() -> Result<()>
 {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

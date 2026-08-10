@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout_with_text_elements;
@@ -97,11 +97,31 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+fn write_managed_thread_store_config(codex_home: &Path, store_id: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)?;
+    let config_path = codex_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        config_path,
+        format!(
+            "{config}\nexperimental_thread_store = {{ type = \"in_memory\", id = \"{store_id}\" }}\n"
+        ),
+    )
+}
+
+fn write_managed_config(codex_home: &Path) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)
+}
+
+#[cfg(target_os = "macos")]
+fn write_managed_response_config(codex_home: &Path, _server_uri: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)
+}
+
 #[tokio::test]
 async fn thread_read_returns_summary_without_turns() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let preview = "Saved user message";
     let text_elements = [TextElement::new(
@@ -117,7 +137,7 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
             .iter()
             .map(|elem| serde_json::to_value(elem).expect("serialize text element"))
             .collect(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -138,7 +158,7 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
 
     assert_eq!(thread.id, conversation_id);
     assert_eq!(thread.preview, preview);
-    assert_eq!(thread.model_provider, "mock_provider");
+    assert_eq!(thread.model_provider, "whisply");
     assert!(!thread.ephemeral, "stored rollouts should not be ephemeral");
     assert!(thread.path.as_ref().expect("thread path").is_absolute());
     assert_eq!(thread.cwd, test_absolute_path("/"));
@@ -153,9 +173,8 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
 
 #[tokio::test]
 async fn thread_read_can_include_turns() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let preview = "Saved user message";
     let text_elements = vec![TextElement::new(
@@ -171,7 +190,7 @@ async fn thread_read_can_include_turns() -> Result<()> {
             .iter()
             .map(|elem| serde_json::to_value(elem).expect("serialize text element"))
             .collect(),
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -214,16 +233,15 @@ async fn thread_read_can_include_turns() -> Result<()> {
 
 #[tokio::test]
 async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -250,7 +268,7 @@ async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
             limit: Some(50),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -297,9 +315,8 @@ async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
 
 #[tokio::test]
 async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_rollout_with_text_elements(
@@ -308,7 +325,7 @@ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
         "2025-01-05T12:00:00Z",
         "first",
         vec![],
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -376,9 +393,8 @@ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
 
 #[tokio::test]
 async fn thread_turns_list_supports_requested_items_view() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_rollout_with_text_elements(
@@ -387,7 +403,7 @@ async fn thread_turns_list_supports_requested_items_view() -> Result<()> {
         "2025-01-05T12:00:00Z",
         "first",
         vec![],
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -445,20 +461,20 @@ async fn thread_turns_list_supports_requested_items_view() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
     let thread_id = codex_protocol::ThreadId::default();
     let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
-    let state_db =
-        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+    let state_db = codex_state::StateRuntime::init(sqlite.clone(), "whisply".to_string()).await?;
     let store = LocalThreadStore::new(
         LocalThreadStoreConfig {
             codex_home: codex_home.path().to_path_buf(),
             sqlite,
-            default_model_provider_id: "mock_provider".to_string(),
+            default_model_provider_id: "whisply".to_string(),
         },
         Some(state_db),
     );
@@ -482,7 +498,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
-                model_provider: "mock_provider".to_string(),
+                model_provider: "whisply".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
         })
@@ -553,7 +569,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
         .await?;
     store.shutdown_thread(thread_id).await?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -702,11 +718,7 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
     let codex_home = TempDir::new()?;
     let thread_id = codex_protocol::ThreadId::from_string("00000000-0000-4000-8000-000000000123")?;
     let store_id = Uuid::new_v4().to_string();
-    MockResponsesConfig::new("http://127.0.0.1:1")
-        .with_root_config(&format!(
-            r#"experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}"#
-        ))
-        .write(codex_home.path())?;
+    write_managed_thread_store_config(codex_home.path(), &store_id)?;
     let store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
     seed_pathless_store_thread(&store, thread_id).await?;
@@ -730,6 +742,7 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         log_db: None,
         state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
         enable_codex_api_key_env: false,
@@ -773,11 +786,7 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
 async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_path() -> Result<()> {
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
-    MockResponsesConfig::new("http://127.0.0.1:1")
-        .with_root_config(&format!(
-            r#"experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}"#
-        ))
-        .write(codex_home.path())?;
+    write_managed_thread_store_config(codex_home.path(), &store_id)?;
     let store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
 
@@ -800,6 +809,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
         log_db: None,
         state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
         enable_codex_api_key_env: false,
@@ -880,11 +890,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
     let codex_home = TempDir::new()?;
     let thread_id = codex_protocol::ThreadId::from_string("00000000-0000-4000-8000-000000000124")?;
     let store_id = Uuid::new_v4().to_string();
-    MockResponsesConfig::new("http://127.0.0.1:1")
-        .with_root_config(&format!(
-            r#"experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}"#
-        ))
-        .write(codex_home.path())?;
+    write_managed_thread_store_config(codex_home.path(), &store_id)?;
     let store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
     seed_pathless_store_thread(&store, thread_id).await?;
@@ -908,6 +914,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
         log_db: None,
         state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
         enable_codex_api_key_env: false,
@@ -962,9 +969,8 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
 
 #[tokio::test]
 async fn thread_read_can_return_archived_threads_by_id() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let preview = "Archived saved user message";
@@ -974,7 +980,7 @@ async fn thread_read_can_return_archived_threads_by_id() -> Result<()> {
         "2025-01-05T12:00:00Z",
         preview,
         vec![],
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let active_rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -1009,9 +1015,8 @@ async fn thread_read_can_return_archived_threads_by_id() -> Result<()> {
 
 #[tokio::test]
 async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_rollout_with_text_elements(
@@ -1020,7 +1025,7 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
         "2025-01-05T12:00:00Z",
         "first",
         vec![],
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -1078,9 +1083,8 @@ async fn thread_resume_initial_turns_page_matches_requested_turns_list_page() ->
 
 #[tokio::test]
 async fn thread_turns_list_rejects_cursor_when_anchor_turn_is_rolled_back() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_rollout_with_text_elements(
@@ -1089,7 +1093,7 @@ async fn thread_turns_list_rejects_cursor_when_anchor_turn_is_rolled_back() -> R
         "2025-01-05T12:00:00Z",
         "first",
         vec![],
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -1147,9 +1151,8 @@ async fn thread_turns_list_rejects_cursor_when_anchor_turn_is_rolled_back() -> R
 
 #[tokio::test]
 async fn thread_read_returns_forked_from_id_for_forked_threads() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_text_elements(
         codex_home.path(),
@@ -1157,7 +1160,7 @@ async fn thread_read_returns_forked_from_id_for_forked_threads() -> Result<()> {
         "2025-01-05T12:00:00Z",
         "Saved user message",
         vec![],
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1192,9 +1195,8 @@ async fn thread_read_returns_forked_from_id_for_forked_threads() -> Result<()> {
 
 #[tokio::test]
 async fn thread_read_loaded_thread_returns_precomputed_path_before_materialization() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1235,16 +1237,15 @@ async fn thread_read_loaded_thread_returns_precomputed_path_before_materializati
 
 #[tokio::test]
 async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1313,7 +1314,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
             limit: Some(50),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -1394,9 +1395,8 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
 
 #[tokio::test]
 async fn thread_read_include_turns_rejects_unmaterialized_loaded_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1443,9 +1443,8 @@ async fn thread_read_include_turns_rejects_unmaterialized_loaded_thread() -> Res
 
 #[tokio::test]
 async fn thread_turns_list_rejects_unmaterialized_loaded_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1493,20 +1492,20 @@ async fn thread_turns_list_rejects_unmaterialized_loaded_thread() -> Result<()> 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
     let thread_id = codex_protocol::ThreadId::default();
     let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
-    let state_db =
-        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+    let state_db = codex_state::StateRuntime::init(sqlite.clone(), "whisply".to_string()).await?;
     let store = LocalThreadStore::new(
         LocalThreadStoreConfig {
             codex_home: codex_home.path().to_path_buf(),
             sqlite,
-            default_model_provider_id: "mock_provider".to_string(),
+            default_model_provider_id: "whisply".to_string(),
         },
         Some(state_db),
     );
@@ -1530,7 +1529,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
-                model_provider: "mock_provider".to_string(),
+                model_provider: "whisply".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
         })
@@ -1596,7 +1595,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
         .await?;
     store.shutdown_thread(thread_id).await?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -1928,9 +1927,8 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
 
 #[tokio::test]
 async fn thread_items_list_returns_unsupported() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1962,6 +1960,7 @@ async fn thread_items_list_returns_unsupported() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -1971,9 +1970,9 @@ async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Resul
     )
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;

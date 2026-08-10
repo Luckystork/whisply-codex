@@ -132,14 +132,11 @@ use core_test_support::test_codex::test_env;
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use tokio::process::Command;
-use wiremock::Mock;
-use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
 
 use crate::json_logging::JsonLogCapture;
 use crate::local_websocket_exec_server::LocalWebsocketExecServer;
+#[cfg(target_os = "macos")]
+use crate::managed_whisply_gateway::ManagedWhisplyGatewayFixture;
 use crate::rpc_delay::WebsocketDelayInterposer;
 
 pub struct TestAppServer {
@@ -155,11 +152,12 @@ pub struct TestAppServer {
     auto_env: Option<TestEnv>,
     json_logs: JsonLogCapture,
     // Fields drop in declaration order. Tear down the delayed child before
-    // removing an owned CODEX_HOME that may still be its cwd on Windows.
+    // removing an owned WHISPLY_HOME that may still be its cwd on Windows.
     _delayed_exec_server: Option<(LocalWebsocketExecServer, WebsocketDelayInterposer)>,
-    _attribution_settings_server: Option<MockServer>,
     _owned_install_dir: Option<TempDir>,
     _owned_codex_home: Option<TempDir>,
+    #[cfg(target_os = "macos")]
+    _managed_whisply_gateway: Option<ManagedWhisplyGatewayFixture>,
 }
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
@@ -171,7 +169,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl TestAppServer {
-    /// Starts building a server with a temporary CODEX_HOME and the standard
+    /// Starts building a server with a temporary WHISPLY_HOME and the standard
     /// automatic test environment.
     pub fn builder() -> TestAppServerBuilder {
         TestAppServerBuilder {
@@ -181,6 +179,8 @@ impl TestAppServer {
             env_overrides: Vec::new(),
             args: vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG.to_string()],
             exec_server_delay: None,
+            #[cfg(target_os = "macos")]
+            managed_whisply_gateway: None,
         }
     }
 
@@ -192,6 +192,27 @@ impl TestAppServer {
     pub async fn shutdown_gracefully(&mut self) -> std::io::Result<ExitStatus> {
         drop(self.stdin.take());
         self.process.wait().await
+    }
+
+    /// Returns broker operations observed by the attached managed Whisply
+    /// fixture, if this test server was built with one.
+    #[cfg(target_os = "macos")]
+    pub fn managed_whisply_broker_operations(&self) -> Option<Vec<String>> {
+        self._managed_whisply_gateway
+            .as_ref()
+            .map(ManagedWhisplyGatewayFixture::operations)
+    }
+
+    /// Fails when the attached managed Whisply fixture rejected a protocol
+    /// request from the app-server child.
+    #[cfg(target_os = "macos")]
+    pub fn assert_managed_whisply_gateway_healthy(&self) -> anyhow::Result<()> {
+        match self._managed_whisply_gateway.as_ref() {
+            Some(gateway) => gateway.assert_healthy(),
+            None => Err(anyhow::anyhow!(
+                "managed Whisply gateway fixture is unavailable"
+            )),
+        }
     }
 
     /// Returns the automatically selected test environment retained by this server.
@@ -229,6 +250,7 @@ impl TestAppServer {
         program: &Path,
         env_overrides: &[(&str, Option<&str>)],
         args: &[&str],
+        managed_whisply_descriptor_fds: Option<[i32; 3]>,
     ) -> anyhow::Result<Self> {
         let mut cmd = Command::new(program);
 
@@ -236,7 +258,8 @@ impl TestAppServer {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.current_dir(codex_home);
-        cmd.env("CODEX_HOME", codex_home);
+        cmd.env("WHISPLY_HOME", codex_home);
+        cmd.env_remove("CODEX_HOME");
         cmd.env("RUST_LOG", "warn");
         // Keep integration tests isolated from host managed configuration.
         cmd.env(
@@ -256,6 +279,13 @@ impl TestAppServer {
                 }
             }
         }
+
+        #[cfg(target_os = "macos")]
+        if let Some(descriptor_fds) = managed_whisply_descriptor_fds {
+            ManagedWhisplyGatewayFixture::configure_child_command(&mut cmd, descriptor_fds)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = managed_whisply_descriptor_fds;
 
         let mut process = cmd
             .kill_on_drop(true)
@@ -279,8 +309,8 @@ impl TestAppServer {
             let mut stderr_reader = BufReader::new(stderr).lines();
             tokio::spawn(async move {
                 while let Ok(Some(line)) = stderr_reader.next_line().await {
-                    json_logs.record(line.clone());
-                    eprintln!("[mcp stderr] {line}");
+                    let redacted_line = json_logs.record_mcp_child_stderr(&line);
+                    eprintln!("[mcp stderr] {redacted_line}");
                 }
             });
         }
@@ -293,9 +323,10 @@ impl TestAppServer {
             auto_env: None,
             json_logs,
             _delayed_exec_server: None,
-            _attribution_settings_server: None,
             _owned_install_dir: None,
             _owned_codex_home: None,
+            #[cfg(target_os = "macos")]
+            _managed_whisply_gateway: None,
         })
     }
 
@@ -1794,6 +1825,8 @@ pub struct TestAppServerBuilder {
     env_overrides: Vec<(String, Option<String>)>,
     args: Vec<String>,
     exec_server_delay: Option<Duration>,
+    #[cfg(target_os = "macos")]
+    managed_whisply_gateway: Option<ManagedWhisplyGatewayFixture>,
 }
 
 enum TestAppServerEnvironment {
@@ -1802,7 +1835,7 @@ enum TestAppServerEnvironment {
 }
 
 impl TestAppServerBuilder {
-    /// Uses this existing CODEX_HOME instead of a temporary one.
+    /// Uses this existing WHISPLY_HOME instead of a temporary one.
     pub fn with_codex_home(mut self, codex_home: &Path) -> Self {
         self.codex_home = Some(codex_home.to_path_buf());
         self
@@ -1811,6 +1844,17 @@ impl TestAppServerBuilder {
     /// Starts app-server without the standard automatic test environment.
     pub fn without_auto_env(mut self) -> Self {
         self.environment = TestAppServerEnvironment::None;
+        self
+    }
+
+    /// Attaches a test-only managed broker transport for a BrokerOnly Whisply
+    /// provider fixture. The child receives only inherited descriptors.
+    #[cfg(target_os = "macos")]
+    pub fn with_managed_whisply_gateway(
+        mut self,
+        managed_whisply_gateway: ManagedWhisplyGatewayFixture,
+    ) -> Self {
+        self.managed_whisply_gateway = Some(managed_whisply_gateway);
         self
     }
 
@@ -1886,7 +1930,7 @@ impl TestAppServerBuilder {
         Ok(server)
     }
 
-    /// Builds a server with a temporary CODEX_HOME and automatic environment
+    /// Builds a server with a temporary WHISPLY_HOME and automatic environment
     /// by default.
     pub async fn build(self) -> anyhow::Result<TestAppServer> {
         let Self {
@@ -1896,6 +1940,8 @@ impl TestAppServerBuilder {
             mut env_overrides,
             args,
             exec_server_delay,
+            #[cfg(target_os = "macos")]
+            managed_whisply_gateway,
         } = self;
         let (codex_home, owned_codex_home) = match codex_home {
             Some(codex_home) => (codex_home, None),
@@ -1907,35 +1953,13 @@ impl TestAppServerBuilder {
                 )
             }
         };
-        let attribution_settings_server = if codex_home.join("auth.json").is_file() {
-            let config_path = codex_home.join("config.toml");
-            let config = std::fs::read_to_string(&config_path)?;
-            if config
-                .lines()
-                .any(|line| line.trim_start().starts_with("chatgpt_base_url"))
-            {
-                None
-            } else {
-                let settings_server = MockServer::start().await;
-                Mock::given(method("GET"))
-                    .and(path("/backend-api/wham/settings/user"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "commit_attribution_enabled": false,
-                    })))
-                    .mount(&settings_server)
-                    .await;
-                std::fs::write(
-                    &config_path,
-                    format!(
-                        "chatgpt_base_url = \"{}/backend-api\"\n{config}",
-                        settings_server.uri()
-                    ),
-                )?;
-                Some(settings_server)
-            }
-        } else {
-            None
-        };
+        #[cfg(target_os = "macos")]
+        let managed_whisply_descriptor_fds = managed_whisply_gateway.as_ref().map(|gateway| {
+            env_overrides.extend(gateway.environment_overrides());
+            gateway.inherited_descriptor_fds()
+        });
+        #[cfg(not(target_os = "macos"))]
+        let managed_whisply_descriptor_fds = None;
         let (auto_env, delayed_exec_server) = match environment {
             TestAppServerEnvironment::Auto => {
                 let environments_toml = codex_home.join("environments.toml");
@@ -2054,13 +2078,17 @@ impl TestAppServerBuilder {
             &program,
             &env_overrides,
             &args,
+            managed_whisply_descriptor_fds,
         )
         .await?;
         app_server.auto_env = auto_env;
         app_server._owned_install_dir = owned_install_dir;
         app_server._owned_codex_home = owned_codex_home;
         app_server._delayed_exec_server = delayed_exec_server;
-        app_server._attribution_settings_server = attribution_settings_server;
+        #[cfg(target_os = "macos")]
+        {
+            app_server._managed_whisply_gateway = managed_whisply_gateway;
+        }
         Ok(app_server)
     }
 }

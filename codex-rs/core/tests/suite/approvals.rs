@@ -1726,7 +1726,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
             approval_policy: OnRequest,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             action: ActionKind::RunUnifiedExecCommand {
-                command: "python3 -c 'print('\"'\"'escalated unified exec'\"'\"')'",
+                command: "echo \"escalated unified exec\"",
                 justification: Some(DEFAULT_UNIFIED_EXEC_JUSTIFICATION),
             },
             sandbox_permissions: SandboxPermissions::RequireEscalated,

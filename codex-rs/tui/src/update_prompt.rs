@@ -26,7 +26,7 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 use tokio_stream::StreamExt;
 
-const RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
+const RELEASE_NOTES_URL: &str = "https://whisply.app";
 
 pub(crate) enum UpdatePromptOutcome {
     Continue,
@@ -243,30 +243,23 @@ impl WidgetRef for &UpdatePromptScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_backend::VT100Backend;
     use crate::tui::FrameRequester;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
-    use ratatui::Terminal;
-    use ratatui::widgets::FrameExt;
 
     fn new_prompt() -> UpdatePromptScreen {
         UpdatePromptScreen::new(
             FrameRequester::test_dummy(),
             "9.9.9".into(),
-            UpdateAction::NpmGlobalLatest,
+            UpdateAction::ManagedAppBundle,
         )
     }
 
     #[test]
-    fn update_prompt_snapshot() {
+    fn update_prompt_only_describes_the_managed_app_update() {
         let screen = new_prompt();
-        let mut terminal = Terminal::new(VT100Backend::new(80, 12)).expect("terminal");
-        terminal
-            .draw(|frame| frame.render_widget_ref(&screen, frame.area()))
-            .expect("render update prompt");
-        insta::assert_snapshot!("update_prompt_modal", terminal.backend());
+        assert_eq!(screen.update_action.command_str(), "Whisply app update");
     }
 
     #[test]

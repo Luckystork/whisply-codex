@@ -191,11 +191,12 @@ use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
 use codex_config::types::McpServerConfig;
-use codex_model_provider::create_model_provider;
+use codex_model_provider::create_model_provider_with_managed_gateway;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
+use codex_whisply::ManagedGatewayClient;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
@@ -424,6 +425,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
+    pub(crate) managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) skills_service: Arc<HostSkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
@@ -520,6 +522,7 @@ impl Session {
             installation_id,
             auth_manager,
             models_manager,
+            managed_gateway_client,
             environment_manager,
             skills_service,
             plugins_manager,
@@ -681,10 +684,12 @@ impl Session {
         let service_tier =
             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
         let session_configuration = SessionConfiguration {
-            provider: create_model_provider(
+            provider: create_model_provider_with_managed_gateway(
                 config.model_provider.clone(),
                 Some(Arc::clone(&auth_manager)),
+                managed_gateway_client.clone(),
             ),
+            managed_gateway_client,
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
             service_tier,
@@ -1648,9 +1653,9 @@ impl Session {
     }
 
     pub(crate) async fn refresh_runtime_config(&self, next_config: Config) {
-        // Refresh only the user layer from the incoming snapshot. Preserve thread-local
-        // layers such as request/session overrides that were present when this session
-        // was created.
+        // Refresh user and trust-gated project layers from the incoming snapshot.
+        // Preserve thread-local layers such as request/session overrides that
+        // were present when this session was created.
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let (previous_config, new_config, config) = {
             let mut state = self.state.lock().await;
@@ -1659,7 +1664,7 @@ impl Session {
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             config.config_layer_stack = config
                 .config_layer_stack
-                .with_user_layer_from(&next_config.config_layer_stack);
+                .with_user_and_project_layers_from(&next_config.config_layer_stack);
             config.tool_suggest =
                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
             config.mcp_servers = next_config.mcp_servers.clone();
@@ -3429,14 +3434,15 @@ impl Session {
             && (features.enabled(Feature::ToolSuggest)
                 || features.enabled(Feature::RecommendedPlugins))
         {
-            let auth = self.services.auth_manager.auth().await;
             let plugins_config = turn_context.config.plugins_config_input();
             self.services
                 .plugins_manager
                 .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                     plugins_config: &plugins_config,
                     loaded_plugins: &loaded_plugins,
-                    auth: auth.as_ref(),
+                    // BrokerOnly has no direct authority for endpoint-backed
+                    // recommendations, even when legacy credentials persist.
+                    auth: None,
                     disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
                     app_server_client_name: turn_context.app_server_client_name.as_deref(),
                 })

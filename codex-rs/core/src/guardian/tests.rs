@@ -95,6 +95,13 @@ const GUARDIAN_MEMORY_CONTEXT_PROBE: &str = "guardian memory context probe";
 const GUARDIAN_SKILL_NAME: &str = "guardian-context-probe";
 const GUARDIAN_SKILL_BODY_PROBE: &str = "guardian skill body probe";
 
+fn guardian_mock_provider(base_url: &str) -> ModelProviderInfo {
+    ModelProviderInfo::create_openai_provider(Some(format!(
+        "{}/v1",
+        base_url.trim_end_matches('/')
+    )))
+}
+
 // The memories extension depends on codex-core, so this probe verifies the nested Guardian config
 // at request assembly without introducing a circular test dependency.
 struct GuardianMemoryContextEnabled(bool);
@@ -241,7 +248,8 @@ async fn guardian_test_session_turn_and_rx(
         .expect("session should be uniquely owned")
         .thread_id = fixed_guardian_parent_session_id();
     let mut config = (*turn.config).clone();
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = guardian_mock_provider(&server.uri());
     let config = Arc::new(config);
     let models_manager = test_support::models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -277,7 +285,8 @@ async fn guardian_test_session_and_turn_with_base_url(
     let (mut session, mut turn) = crate::session::tests::make_session_and_context().await;
     session.thread_id = fixed_guardian_parent_session_id();
     let mut config = (*turn.config).clone();
-    config.model_provider.base_url = Some(format!("{base_url}/v1"));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = guardian_mock_provider(base_url);
     let config = Arc::new(config);
     let models_manager = test_support::models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -1776,7 +1785,8 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
     let temp_cwd = TempDir::new()?;
     let mut config = (*turn.config).clone();
     config.cwd = temp_cwd.abs();
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = guardian_mock_provider(&server.uri());
     config.memories.use_memories = true;
     config
         .features
@@ -2444,7 +2454,8 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     let (mut session, mut turn, rx) =
         crate::session::tests::make_session_and_context_with_rx().await;
     let mut config = (*turn.config).clone();
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = guardian_mock_provider(&server.uri());
     let config = Arc::new(config);
     let models_manager = test_support::models_manager_with_provider(
         config.codex_home.to_path_buf(),

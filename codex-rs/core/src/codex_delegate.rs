@@ -105,6 +105,7 @@ pub(crate) async fn run_codex_thread_interactive(
         installation_id: parent_session.installation_id.clone(),
         auth_manager,
         models_manager,
+        managed_gateway_client: parent_session.services.managed_gateway_client.clone(),
         environment_manager: parent_session
             .services
             .turn_environments

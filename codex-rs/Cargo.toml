@@ -93,6 +93,7 @@ members = [
     "tools",
     "v8-poc",
     "websocket-client",
+    "whisply-runtime",
     "utils/absolute-path",
     "utils/audio",
     "utils/path-uri",
@@ -174,6 +175,7 @@ codex-code-mode-runtime = { path = "code-mode-runtime" }
 codex-home = { path = "codex-home" }
 codex-http-client = { path = "http-client" }
 codex-websocket-client = { path = "websocket-client" }
+codex-whisply = { path = "whisply-runtime" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-agent-extension = { path = "ext/agent" }

@@ -6,6 +6,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::whisply_provider_info;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
@@ -294,6 +295,15 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
     update_config(turn, |config| {
         config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn use_whisply_provider(turn: &mut TurnContext) {
+    let provider_info = whisply_provider_info();
+    update_config(turn, |config| {
+        config.model_provider_id = "whisply".to_string();
         config.model_provider = provider_info.clone();
     });
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
@@ -2464,6 +2474,33 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_whisply_worker_exposes_spawn_agent_when_signed_catalog_supports_tools() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+        });
+        use_whisply_provider(turn);
+        // `WhisplyCatalogModelsEndpoint` sets this only from the verified
+        // catalog's `supportsToolCalls` capability.
+        turn.model_info.slug = "gpt-5.6-sol".to_string();
+        turn.model_info.multi_agent_version = Some(MultiAgentVersion::V2);
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(AgentPath::try_from("/root/worker").expect("valid agent path")),
+            agent_nickname: None,
+            agent_role: None,
+        });
+    })
+    .await;
+
+    let spawn_agent_name = ToolName::namespaced("agents", "spawn_agent").to_string();
+    plan.assert_visible_contains(&["agents"]);
+    plan.assert_registered_contains(&[&spawn_agent_name]);
+}
+
+#[tokio::test]
 async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
     let plan = probe(|turn| {
         set_features(
@@ -2483,14 +2520,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
 
     assert_eq!(
         plan.visible_names,
-        vec![
-            "exec",
-            "wait",
-            "request_user_input",
-            "agents",
-            // Hosted Responses tool.
-            "web_search",
-        ]
+        vec!["exec", "wait", "request_user_input", "agents",]
     );
     assert!(
         !plan
@@ -2517,7 +2547,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
 }
 
 #[tokio::test]
-async fn hosted_web_search_fallback_follows_winning_browser_runtime() {
+async fn broker_only_hides_hosted_web_search_without_hiding_browser_runtime() {
     let plan = probe_with(
         |turn| {
             set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
@@ -2543,11 +2573,11 @@ async fn hosted_web_search_fallback_follows_winning_browser_runtime() {
         panic!("expected the winning browser namespace");
     };
     assert_eq!(namespace.description, "Tools from browser_collision.");
-    plan.assert_visible_contains(&["web_search"]);
+    plan.assert_visible_lacks(&["web_search"]);
 }
 
 #[tokio::test]
-async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates() {
+async fn broker_only_hides_hosted_tools_without_hiding_local_web_tools() {
     let image_generation_tool = Arc::new(TestNamespaceExtensionTool {
         namespace: "image_gen",
         tool_name: "imagegen",
@@ -2563,7 +2593,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         },
     )
     .await;
-    image_generation.assert_visible_contains(&["image_gen"]);
+    image_generation.assert_visible_lacks(&["image_gen"]);
 
     let extension_disabled = probe_with(
         |turn| {
@@ -2610,17 +2640,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         turn.model_info.web_search_tool_type = WebSearchToolType::TextAndImage;
     })
     .await;
-    assert_eq!(
-        live_web_search.visible_spec("web_search"),
-        &ToolSpec::WebSearch {
-            external_web_access: Some(true),
-            indexed_web_access: None,
-            filters: None,
-            user_location: None,
-            search_context_size: None,
-            search_content_types: Some(vec!["text".to_string(), "image".to_string()]),
-        }
-    );
+    live_web_search.assert_visible_lacks(&["web_search"]);
 
     let code_mode_only = probe(|turn| {
         use_chatgpt_auth(turn);
@@ -2638,8 +2658,6 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             "request_user_input",
             // Multi-agent v2 tools.
             MULTI_AGENT_V2_NAMESPACE,
-            // Hosted Responses tools.
-            "web_search",
         ]
     );
 
@@ -2648,7 +2666,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         set_web_search_mode(turn, WebSearchMode::Live);
     })
     .await;
-    standalone_web_search_without_web_run.assert_visible_contains(&["web_search"]);
+    standalone_web_search_without_web_run.assert_visible_lacks(&["web_search"]);
 
     let standalone_web_search_with_dynamic_web_run = probe_with(
         |turn| {
@@ -2665,7 +2683,8 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         },
     )
     .await;
-    standalone_web_search_with_dynamic_web_run.assert_visible_contains(&["web", "web_search"]);
+    standalone_web_search_with_dynamic_web_run.assert_visible_contains(&["web"]);
+    standalone_web_search_with_dynamic_web_run.assert_visible_lacks(&["web_search"]);
 
     let standalone_web_search_with_mcp_web_run = probe_with(
         |turn| {
@@ -2683,9 +2702,10 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         },
     )
     .await;
-    standalone_web_search_with_mcp_web_run.assert_visible_contains(&["web", "web_search"]);
+    standalone_web_search_with_mcp_web_run.assert_visible_contains(&["web"]);
+    standalone_web_search_with_mcp_web_run.assert_visible_lacks(&["web_search"]);
 
-    let standalone_web_search = probe_with(
+    let local_web_extension = probe_with(
         |turn| {
             set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
             set_web_search_mode(turn, WebSearchMode::Live);
@@ -2693,13 +2713,14 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         ToolPlanInputs {
             extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
                 namespace: "web",
-                tool_name: "run",
+                tool_name: "local_run",
             })],
             ..Default::default()
         },
     )
     .await;
-    standalone_web_search.assert_visible_lacks(&["web_search"]);
+    local_web_extension.assert_visible_lacks(&["web_search"]);
+    local_web_extension.assert_visible_contains(&["web"]);
 
     let bedrock_cached_web_search = probe(|turn| {
         use_bedrock_provider(turn);

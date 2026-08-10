@@ -3029,11 +3029,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
 // Skipped on arm because the ctor logic to handle arg0 doesn't work on ARM
 #[cfg(not(target_arch = "arm"))]
 async fn unified_exec_formats_large_output_summary() -> Result<()> {
-    // TODO(anp): Remove after output fixtures use target-native commands.
-    skip_if_target_windows!(
-        Ok(()),
-        "requires Python and POSIX heredoc support in the target"
-    );
+    skip_if_target_windows!(Ok(()), "requires a POSIX shell target");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
@@ -3054,13 +3050,7 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
     let expected_original_token_count =
         usize::try_from(approx_tokens_from_byte_count(original_output_bytes)).unwrap_or(usize::MAX);
     let script = format!(
-        r#"python3 - <<'PY'
-import sys
-sys.stdout.write("HEAD\n")
-sys.stdout.write("token token \n" * {output_repetitions})
-sys.stdout.write("TAIL\n")
-PY
-"#
+        "printf '%s\\n' 'HEAD'; i=0; while [ \"$i\" -lt {output_repetitions} ]; do printf '%s\\n' 'token token '; i=$((i + 1)); done; printf '%s\\n' 'TAIL'"
     );
 
     let call_id = "uexec-large-output";
@@ -3360,16 +3350,8 @@ async fn unified_exec_enforces_glob_deny_read_policy() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
+async fn unified_exec_interactive_shell_prompt_under_seatbelt() -> Result<()> {
     skip_if_no_network!(Ok(()));
-
-    let python = match which::which("python").or_else(|_| which::which("python3")) {
-        Ok(path) => path,
-        Err(_) => {
-            eprintln!("python not found in PATH, skipping test.");
-            return Ok(());
-        }
-    };
 
     let server = start_mock_server().await;
 
@@ -3387,16 +3369,16 @@ async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
         ..
     } = builder.build(&server).await?;
 
-    let startup_call_id = "uexec-python-seatbelt";
+    let startup_call_id = "uexec-shell-seatbelt";
     let startup_args = serde_json::json!({
-        "cmd": format!("{} -i", python.display()),
+        "cmd": "PS1='whisply-seatbelt> ' /bin/sh -i",
         "yield_time_ms": 1_500,
         "tty": true,
     });
 
-    let exit_call_id = "uexec-python-exit";
+    let exit_call_id = "uexec-shell-exit";
     let exit_args = serde_json::json!({
-        "chars": "exit()\n",
+        "chars": "exit\n",
         "session_id": 1000,
         "yield_time_ms": 1_500,
     });
@@ -3436,7 +3418,7 @@ async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
     codex
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
-                text: "start python under seatbelt".into(),
+                text: "start an interactive shell under seatbelt".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
@@ -3472,19 +3454,19 @@ async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
     let outputs = collect_tool_outputs(&bodies)?;
     let startup_output = outputs
         .get(startup_call_id)
-        .expect("missing python startup output");
+        .expect("missing interactive shell startup output");
 
     let output_text = startup_output.output.replace("\r\n", "\n");
-    // This assert that we are in a TTY.
+    // This asserts that the command receives a TTY under the real Seatbelt path.
     assert!(
-        output_text.contains(">>>"),
-        "python prompt missing from seatbelt output: {output_text:?}"
+        output_text.contains("whisply-seatbelt>"),
+        "interactive shell prompt missing from seatbelt output: {output_text:?}"
     );
 
     assert_eq!(
         startup_output.process_id.as_deref(),
         Some("1000"),
-        "python session should stay alive for follow-up input"
+        "interactive shell session should stay alive for follow-up input"
     );
 
     let exit_output = outputs
@@ -3494,7 +3476,7 @@ async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
     assert_eq!(
         exit_output.exit_code,
         Some(0),
-        "python should exit cleanly after exit()"
+        "interactive shell should exit cleanly after exit"
     );
 
     Ok(())

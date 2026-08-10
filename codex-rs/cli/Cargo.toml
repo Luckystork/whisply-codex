@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
-default-run = "codex"
+default-run = "whisply"
 
 [[bin]]
-name = "codex"
+name = "whisply"
 path = "src/main.rs"
 
 [[bin]]
@@ -24,6 +24,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
@@ -34,7 +35,6 @@ codex-app-server-test-client = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-api = { workspace = true }
 codex-chatgpt = { workspace = true }
-codex-cloud-config = { workspace = true }
 codex-cloud-tasks = { path = "../cloud-tasks" }
 codex-utils-cli = { workspace = true }
 codex-config = { workspace = true }
@@ -58,7 +58,6 @@ codex-model-provider = { workspace = true }
 codex-models-manager = { workspace = true }
 codex-plugin = { workspace = true }
 codex-protocol = { workspace = true }
-codex-responses-api-proxy = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-rollout = { workspace = true }
 codex-rollout-trace = { workspace = true }
@@ -70,14 +69,17 @@ codex-terminal-detection = { workspace = true }
 codex-tui = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path = { workspace = true }
+codex-whisply = { workspace = true }
 crossterm = { workspace = true }
 http = { workspace = true }
+hmac = { workspace = true }
 libc = { workspace = true }
 os_info = { workspace = true }
 owo-colors = { workspace = true }
 regex-lite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 supports-color = { workspace = true }
 sys-locale = { workspace = true }
 tempfile = { workspace = true }
@@ -96,7 +98,9 @@ tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 which = { workspace = true }
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }

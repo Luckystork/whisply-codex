@@ -1566,6 +1566,23 @@ server_request_definitions! {
         response: v2::DynamicToolCallResponse,
     },
 
+    /// Execute a first-party Whisply tool through the trusted native/server
+    /// owner. This is intentionally distinct from `item/tool/call`: only this
+    /// route carries the separately authenticated execution envelope and
+    /// strictest-wins policy inputs.
+    WhisplyToolExecute => "whisply/tool/execute" {
+        params: v2::WhisplyToolAppServerExecuteRequest,
+        response: v2::WhisplyToolResult,
+    },
+
+    /// Cancel a first-party Whisply tool execution. Cancellation retains the
+    /// same trusted envelope so a model-visible execution id alone cannot
+    /// target another account, task, or broker generation.
+    WhisplyToolCancel => "whisply/tool/cancel" {
+        params: v2::WhisplyToolAppServerCancelRequest,
+        response: v2::WhisplyToolAppServerCancelAcknowledgement,
+    },
+
     ChatgptAuthTokensRefresh => "account/chatgptAuthTokens/refresh" {
         params: v2::ChatgptAuthTokensRefreshParams,
         response: v2::ChatgptAuthTokensRefreshResponse,
@@ -1733,6 +1750,13 @@ server_notification_definitions! {
     FileChangePatchUpdated => "item/fileChange/patchUpdated" (v2::FileChangePatchUpdatedNotification),
     ServerRequestResolved => "serverRequest/resolved" (v2::ServerRequestResolvedNotification),
     McpToolCallProgress => "item/mcpToolCall/progress" (v2::McpToolCallProgressNotification),
+    /// Progress for an owner-validated first-party Whisply tool. This is a
+    /// normal event projection and carries no trusted execution envelope.
+    WhisplyToolProgress => "whisply/tool/progress" (v2::WhisplyToolProgress),
+    /// Terminal result for an owner-validated first-party Whisply tool. This
+    /// is distinct from generic dynamic tools so setup/confirmation suspension
+    /// cannot be projected as an automatic success.
+    WhisplyToolResult => "whisply/tool/result" (v2::WhisplyToolResult),
     McpServerOauthLoginCompleted => "mcpServer/oauthLogin/completed" (v2::McpServerOauthLoginCompletedNotification),
     McpServerStatusUpdated => "mcpServer/startupStatus/updated" (v2::McpServerStatusUpdatedNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),

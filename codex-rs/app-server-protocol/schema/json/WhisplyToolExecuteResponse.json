@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "WhisplyToolTerminalStatus": {
+      "description": "Terminal execution states. Setup and confirmation are suspension points, not successful authority escalation.",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "setup_required",
+        "confirmation_required",
+        "unavailable"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Terminal result delivered through the normal typed item/event path.",
+  "properties": {
+    "content": true,
+    "executionID": {
+      "type": "string"
+    },
+    "receiptID": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "safeSummary": {
+      "type": "string"
+    },
+    "setupRoute": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "$ref": "#/definitions/WhisplyToolTerminalStatus"
+    }
+  },
+  "required": [
+    "executionID",
+    "safeSummary",
+    "status"
+  ],
+  "title": "WhisplyToolResult",
+  "type": "object"
+}

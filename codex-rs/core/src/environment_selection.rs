@@ -1019,9 +1019,17 @@ url = "ws://127.0.0.1:8765"
 
     #[tokio::test]
     async fn failed_resolution_is_replaced_from_the_environment_manager() {
+        let unavailable_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unavailable listener");
+        let unavailable_endpoint = format!(
+            "ws://{}",
+            unavailable_listener.local_addr().expect("listener address")
+        );
+        drop(unavailable_listener);
         let manager = Arc::new(
             EnvironmentManager::create_for_tests(
-                Some("http://example.com".to_string()),
+                Some(unavailable_endpoint),
                 Some(test_runtime_paths()),
             )
             .await,

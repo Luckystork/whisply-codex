@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::write_models_cache;
 use codex_app_server_protocol::ClientRequest;
@@ -149,17 +152,19 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             );
     }
     let codex_home = TempDir::new()?;
-    let mut config = MockResponsesConfig::new(&server.uri()).with_model("gpt-5.4");
+    let mut config = ManagedWhisplyConfig::new().with_model("gpt-5.4");
     if role_has_instructions {
         config =
-            config.with_root_config(&format!("developer_instructions = {ROLE_INSTRUCTIONS:?}"));
+            config.with_additional_config(&format!("developer_instructions = {ROLE_INSTRUCTIONS:?}"));
     }
     config
-        .with_extra_config(&feature_config)
+        .with_additional_config(&feature_config)
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
     let ThreadStartResponse { thread, .. } = app_server
@@ -316,19 +321,21 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_model("gpt-5.4")
-        .with_root_config(&format!(
+        .with_additional_config(&format!(
             "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100\nmodel_auto_compact_token_limit = 90\ncompact_prompt = {COMPACT_PROMPT:?}"
         ))
-        .with_extra_config(&format!(
+        .with_additional_config(&format!(
             "[features.multi_agent_v2]\nenabled = true\nsubagent_developer_instructions = {CHILD_INSTRUCTIONS:?}"
         ))
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
     let ThreadStartResponse { thread, .. } = app_server
@@ -515,16 +522,18 @@ async fn cold_resume_preserves_effective_developer_instructions_for_roleless_wor
         None => "[features.multi_agent_v2]\nenabled = true".to_string(),
     };
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_model("gpt-5.4")
-        .with_root_config(&format!("developer_instructions = {PARENT_INSTRUCTIONS:?}"))
-        .with_extra_config(&feature_config)
+        .with_additional_config(&format!("developer_instructions = {PARENT_INSTRUCTIONS:?}"))
+        .with_additional_config(&feature_config)
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
 
     let thread_id = {
+        let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
         let mut app_server = TestAppServer::builder()
             .with_codex_home(codex_home.path())
+            .with_managed_whisply_gateway(managed_gateway)
             .build_initialized()
             .await?;
         let ThreadStartResponse { thread, .. } = app_server
@@ -618,8 +627,10 @@ async fn cold_resume_preserves_effective_developer_instructions_for_roleless_wor
     )
     .await;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
     let _: ThreadResumeResponse = app_server

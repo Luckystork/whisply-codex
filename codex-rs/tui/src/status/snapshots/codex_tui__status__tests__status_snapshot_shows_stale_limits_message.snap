@@ -1,16 +1,15 @@
 ---
 source: tui/src/status/tests.rs
+assertion_line: 2050
 expression: sanitized
 ---
 /status
 
 ╭─────────────────────────────────────────────────────────────────────────────╮
-│  >_ OpenAI Codex (v0.0.0)                                                   │
-│                                                                             │
-│ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
-│ information on rate limits and credits                                      │
+│  >_ Whisply (v0.147.0-wsply.1)                                              │
 │                                                                             │
 │  Model:            gpt-5.1-codex-max (reasoning none, summaries auto)       │
+│  Model provider:   Whisply                                                  │
 │  Directory: [[workspace]]                                                   │
 │  Permissions:      Custom (workspace with network access, Ask for approval) │
 │  Agents.md:        <none>                                                   │

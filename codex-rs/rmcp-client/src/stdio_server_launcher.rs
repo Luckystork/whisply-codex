@@ -36,6 +36,7 @@ use codex_exec_server::ExecEnvPolicy;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecProcess;
 use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
+use codex_secrets::redact_mcp_stderr;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -320,7 +321,8 @@ impl LocalStdioServerLauncher {
                 loop {
                     match reader.next_line().await {
                         Ok(Some(line)) => {
-                            info!("MCP server stderr ({program_name}): {line}");
+                            let redacted_line = redact_mcp_stderr(&line);
+                            info!("MCP server stderr ({program_name}): {redacted_line}");
                         }
                         Ok(None) => break,
                         Err(error) => {

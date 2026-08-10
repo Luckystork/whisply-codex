@@ -303,6 +303,33 @@ fn test_built_in_model_providers_include_amazon_bedrock() {
 }
 
 #[test]
+fn oss_base_url_keeps_only_local_overrides() {
+    let default = "http://localhost:11434/v1".to_string();
+
+    assert_eq!(
+        resolve_local_oss_base_url(
+            Some("https://127.0.0.1:8443/v1".to_string()),
+            default.clone(),
+        ),
+        "https://127.0.0.1:8443/v1"
+    );
+    assert_eq!(
+        resolve_local_oss_base_url(
+            Some("http://[::1]:11434/v1".to_string()),
+            default.clone(),
+        ),
+        "http://[::1]:11434/v1"
+    );
+    assert_eq!(
+        resolve_local_oss_base_url(
+            Some("https://models.example.test/v1".to_string()),
+            default.clone(),
+        ),
+        default
+    );
+}
+
+#[test]
 fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
         name: "Custom".to_string(),

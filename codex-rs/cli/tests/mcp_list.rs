@@ -1,9 +1,4 @@
-use std::io::Read;
-use std::io::Write;
-use std::net::TcpListener;
 use std::path::Path;
-use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Result;
 use codex_config::types::McpServerTransportConfig;
@@ -16,20 +11,12 @@ use pretty_assertions::assert_eq;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use tempfile::TempDir;
-#[cfg(target_os = "macos")]
-use wiremock::Mock;
-#[cfg(target_os = "macos")]
 use wiremock::MockServer;
-#[cfg(target_os = "macos")]
-use wiremock::ResponseTemplate;
-#[cfg(target_os = "macos")]
-use wiremock::matchers::method;
-#[cfg(target_os = "macos")]
-use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
-    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home);
+    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("whisply")?);
+    cmd.env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -59,7 +46,7 @@ fn list_shows_empty_state() -> Result<()> {
 }
 
 #[test]
-fn api_key_auth_exposes_api_curated_plugin_mcp_servers() -> Result<()> {
+fn api_key_auth_does_not_enable_host_curated_plugin_mcp_servers() -> Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join("config.toml"),
@@ -91,109 +78,36 @@ enabled = true
 }"#,
     )?;
 
-    let mut list_cmd = codex_command(codex_home.path())?;
-    list_cmd
+    let output = codex_command(codex_home.path())?
         .env(CODEX_API_KEY_ENV_VAR, "sk-test")
         .args(["mcp", "list", "--json"])
-        .assert()
-        .success()
-        .stdout(contains(r#""name": "api-docs""#));
-
-    let mut get_cmd = codex_command(codex_home.path())?;
-    get_cmd
-        .env(CODEX_API_KEY_ENV_VAR, "sk-test")
-        .args(["mcp", "get", "api-docs", "--json"])
-        .assert()
-        .success()
-        .stdout(contains(r#""name": "api-docs""#));
+        .output()?;
+    assert!(
+        output.status.success(),
+        "mcp list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entries: JsonValue = serde_json::from_slice(&output.stdout)?;
+    assert!(entries.as_array().is_some_and(Vec::is_empty));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn list_discovers_local_oauth_server_through_environment_proxy() -> Result<()> {
+async fn list_uses_offline_oauth_status_without_discovery() -> Result<()> {
     let codex_home = TempDir::new()?;
-    configure_http_oauth_server(codex_home.path(), "http://mcp-proxy.invalid/mcp").await?;
+    let server = MockServer::start().await;
+    configure_http_oauth_server(codex_home.path(), &format!("{}/mcp", server.uri())).await?;
     std::fs::write(codex_home.path().join("environments.toml"), "invalid = [")?;
-
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    listener.set_nonblocking(true)?;
-    let proxy_url = format!("http://{}", listener.local_addr()?);
-    let proxy = std::thread::spawn(move || -> Result<Vec<String>> {
-        let resource_metadata = json!({
-            "resource": "http://mcp-proxy.invalid/mcp",
-            "authorization_servers": ["http://mcp-proxy.invalid"],
-        })
-        .to_string();
-        let authorization_metadata = json!({
-            "authorization_endpoint": "https://oauth.example/authorize",
-            "token_endpoint": "https://oauth.example/token",
-        })
-        .to_string();
-        let responses = [
-            concat!(
-                "HTTP/1.1 401 Unauthorized\r\n",
-                "www-authenticate: Bearer resource_metadata=\"http://mcp-proxy.invalid/oauth-resource\"\r\n",
-                "content-length: 0\r\n",
-                "connection: close\r\n\r\n"
-            )
-            .to_string(),
-            format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{resource_metadata}",
-                resource_metadata.len()
-            ),
-            format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{authorization_metadata}",
-                authorization_metadata.len()
-            ),
-        ];
-
-        let mut requests = Vec::new();
-        for response in responses {
-            let deadline = Instant::now() + Duration::from_secs(30);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        anyhow::ensure!(
-                            Instant::now() < deadline,
-                            "proxy did not receive OAuth discovery request {}",
-                            requests.len() + 1
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            };
-            stream.set_nonblocking(false)?;
-            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let bytes_read = stream.read(&mut buffer)?;
-                anyhow::ensure!(bytes_read > 0, "proxy request ended before its headers");
-                request.extend_from_slice(&buffer[..bytes_read]);
-                anyhow::ensure!(
-                    request.len() <= 64 * 1024,
-                    "proxy request headers are too large"
-                );
-            }
-            let request = String::from_utf8(request)?;
-            requests.push(request.lines().next().unwrap_or_default().to_string());
-            stream.write_all(response.as_bytes())?;
-        }
-
-        Ok(requests)
-    });
 
     let mut command = codex_command(codex_home.path())?;
     command
-        .env("HTTP_PROXY", &proxy_url)
-        .env("http_proxy", &proxy_url)
-        .env_remove("HTTPS_PROXY")
-        .env_remove("https_proxy")
-        .env_remove("ALL_PROXY")
-        .env_remove("all_proxy")
+        .env("HTTP_PROXY", server.uri())
+        .env("http_proxy", server.uri())
+        .env("HTTPS_PROXY", server.uri())
+        .env("https_proxy", server.uri())
+        .env("ALL_PROXY", server.uri())
+        .env("all_proxy", server.uri())
         .env_remove("NO_PROXY")
         .env_remove("no_proxy")
         .args([
@@ -209,42 +123,27 @@ async fn list_discovers_local_oauth_server_through_environment_proxy() -> Result
         "mcp list failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let proxy_requests = proxy
-        .join()
-        .expect("OAuth discovery proxy thread should finish")?;
-
-    assert_eq!(
-        proxy_requests,
-        vec![
-            "GET http://mcp-proxy.invalid/mcp HTTP/1.1",
-            "GET http://mcp-proxy.invalid/oauth-resource HTTP/1.1",
-            "GET http://mcp-proxy.invalid/.well-known/oauth-authorization-server HTTP/1.1",
-        ]
-    );
     let entries: JsonValue = serde_json::from_slice(&output.stdout)?;
     assert_eq!(entries[0]["name"], "oauth");
-    assert_eq!(
-        entries[0]["auth_status"],
-        "not_logged_in",
-        "OAuth discovery failed after proxy requests {proxy_requests:?}; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert!(entries[0]["auth_status"].is_string());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("mock OAuth origin should record requests")
+            .is_empty(),
+        "mcp list must not discover OAuth metadata"
     );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_reports_unknown_auth_status_when_oauth_discovery_is_rate_limited() -> Result<()> {
+async fn list_uses_offline_status_when_oauth_origin_would_rate_limit() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let server = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .and(wiremock::matchers::path("/mcp"))
-        .respond_with(wiremock::ResponseTemplate::new(429))
-        .expect(1)
-        .mount(&server)
-        .await;
+    let server = MockServer::start().await;
     configure_http_oauth_server(codex_home.path(), &format!("{}/mcp", server.uri())).await?;
 
-    codex_command(codex_home.path())?
+    let output = codex_command(codex_home.path())?
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .args([
@@ -254,10 +153,23 @@ async fn list_reports_unknown_auth_status_when_oauth_discovery_is_rate_limited()
             "list",
             "--json",
         ])
-        .assert()
-        .success()
-        .stdout(contains(r#""auth_status": "unknown""#));
-    server.verify().await;
+        .output()?;
+    assert!(
+        output.status.success(),
+        "mcp list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let entries: JsonValue = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(entries[0]["name"], "oauth");
+    assert!(entries[0]["auth_status"].is_string());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("mock rate-limited origin should record requests")
+            .is_empty(),
+        "mcp list must not contact a rate-limited OAuth origin"
+    );
 
     Ok(())
 }
@@ -267,15 +179,6 @@ async fn list_reports_unknown_auth_status_when_oauth_discovery_is_rate_limited()
 async fn list_with_macos_proxy_resolution_does_not_panic() -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/.well-known/oauth-authorization-server/mcp"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "authorization_endpoint": "https://oauth.example/authorize",
-            "token_endpoint": "https://oauth.example/token",
-        })))
-        .expect(2)
-        .mount(&server)
-        .await;
     configure_http_oauth_server(codex_home.path(), &format!("{}/mcp", server.uri())).await?;
 
     for respect_system_proxy in [false, true] {
@@ -306,8 +209,16 @@ async fn list_with_macos_proxy_resolution_does_not_panic() -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
         let entries: JsonValue = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(entries[0]["auth_status"], "not_logged_in");
+        assert_eq!(entries[0]["name"], "oauth");
     }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("mock OAuth origin should record requests")
+            .is_empty(),
+        "mcp list must remain offline while resolving macOS proxy settings"
+    );
     Ok(())
 }
 

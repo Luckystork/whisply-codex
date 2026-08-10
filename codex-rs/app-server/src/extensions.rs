@@ -19,7 +19,6 @@ use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_goal_extension::GoalService;
-use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -42,8 +41,6 @@ pub(crate) struct ThreadExtensionDependencies {
     pub(crate) goal_service: Arc<GoalService>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) executor_skill_provider: Arc<dyn codex_skills_extension::SkillProvider>,
-    pub(crate) git_attribution_base_url: String,
-    pub(crate) http_client_factory: HttpClientFactory,
     /// Process-scoped persistence backend for extensions that need stored thread history.
     pub(crate) thread_store: Arc<dyn ThreadStore>,
 }
@@ -64,8 +61,6 @@ where
         goal_service,
         environment_manager,
         executor_skill_provider,
-        git_attribution_base_url,
-        http_client_factory,
         thread_store: _thread_store,
     } = dependencies;
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(event_sink);
@@ -80,12 +75,9 @@ where
             |config: &Config| config.features.enabled(codex_features::Feature::Goals),
         );
     }
-    codex_git_attribution::install(
-        &mut builder,
-        auth_manager.clone(),
-        git_attribution_base_url,
-        http_client_factory,
-    );
+    // Keep local Git behavior intact, but do not register the legacy
+    // attribution contributor: its policy is fetched from remote user settings
+    // using ambient Codex credentials, which BrokerOnly does not possess.
     codex_guardian::install(&mut builder, guardian_agent_spawner);
     codex_memories_extension::install(&mut builder, codex_otel::global());
     codex_mcp_extension::install(&mut builder);

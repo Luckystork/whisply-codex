@@ -5,7 +5,6 @@ use codex_core_plugins::CommandMigrationProfile;
 use codex_core_plugins::CommandRewriteProfile;
 use codex_core_plugins::count_missing_commands_with_profile;
 use codex_core_plugins::import_commands_with_profile;
-use codex_core_plugins::marketplace_add::is_local_marketplace_source;
 use codex_core_plugins::missing_command_names_with_profile;
 use codex_plugin::PluginId;
 use serde_json::Value as JsonValue;
@@ -150,14 +149,7 @@ pub(crate) fn extract_plugin_migration_details(
     configured_plugin_ids: &HashSet<String>,
     configured_marketplace_plugins: &BTreeMap<String, HashSet<String>>,
 ) -> Option<MigrationDetails> {
-    let loadable_marketplaces = import_sources
-        .iter()
-        .filter_map(|(marketplace_name, source)| {
-            is_local_marketplace_source(&source.source, source.ref_name.clone())
-                .ok()
-                .map(|_| marketplace_name.clone())
-        })
-        .collect::<HashSet<_>>();
+    let loadable_marketplaces = import_sources.keys().cloned().collect::<HashSet<_>>();
     let mut plugins = BTreeMap::new();
     for plugin_id in collect_enabled_plugins(settings)
         .into_iter()

@@ -40,6 +40,7 @@ use crate::utils::is_missing_or_empty_text_file;
 pub(super) use crate::utils::read_json_file as read_external_settings;
 use crate::utils::rewrite_external_agent_terms;
 use codex_analytics::AnalyticsEventsClient;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_core::config::Config;
 use codex_core_plugins::PluginsManager;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
@@ -256,27 +257,8 @@ impl ExternalAgentConfigService {
                                 return Err(err);
                             }
                         };
-                        let (local_details, remote_details) = match self
-                            .partition_plugin_migration_details(cwd.as_deref(), details)
-                        {
-                            Ok(details) => details,
-                            Err(err) => {
-                                record_import_error(
-                                    &mut item_result,
-                                    "plugin_import",
-                                    /*sub_error_type*/ None,
-                                    err.to_string(),
-                                    /*source*/ None,
-                                );
-                                return Err(err);
-                            }
-                        };
-
-                        if let Some(local_details) = local_details {
-                            let plugin_outcome = match self
-                                .import_plugins(cwd.as_deref(), Some(local_details))
-                                .await
-                            {
+                        let plugin_outcome =
+                            match self.import_plugins(cwd.as_deref(), Some(details)).await {
                                 Ok(plugin_outcome) => plugin_outcome,
                                 Err(err) => {
                                     record_import_error(
@@ -289,23 +271,15 @@ impl ExternalAgentConfigService {
                                     return Err(err);
                                 }
                             };
-                            for plugin_id in plugin_outcome.succeeded_plugin_ids {
-                                item_result.record_success(
-                                    Some(plugin_id.clone()),
-                                    Some(plugin_id),
-                                    /*title*/ None,
-                                );
-                            }
-                            for raw_error in plugin_outcome.raw_errors {
-                                item_result.record_error(raw_error);
-                            }
+                        for plugin_id in plugin_outcome.succeeded_plugin_ids {
+                            item_result.record_success(
+                                Some(plugin_id.clone()),
+                                Some(plugin_id),
+                                /*title*/ None,
+                            );
                         }
-                        if let Some(remote_details) = remote_details {
-                            outcome.pending_plugin_imports.push(PendingPluginImport {
-                                cwd,
-                                description: description.clone(),
-                                details: remote_details,
-                            });
+                        for raw_error in plugin_outcome.raw_errors {
+                            item_result.record_error(raw_error);
                         }
                         emit_migration_metric(
                             EXTERNAL_AGENT_CONFIG_IMPORT_METRIC,
@@ -549,7 +523,9 @@ impl ExternalAgentConfigService {
         let source_settings = self.source_settings(&scope);
         let target_config = match &scope {
             MigrationScope::Home => self.codex_home.join("config.toml"),
-            MigrationScope::Repository { root } => root.join(".codex").join("config.toml"),
+            MigrationScope::Repository { root } => {
+                root.join(PROJECT_CONFIG_DIRECTORY).join("config.toml")
+            }
         };
         let Some(settings) = self.effective_source_settings(&scope)? else {
             return Ok(None);
@@ -597,7 +573,9 @@ impl ExternalAgentConfigService {
         };
         let target_config = match &scope {
             MigrationScope::Home => self.codex_home.join("config.toml"),
-            MigrationScope::Repository { root } => root.join(".codex").join("config.toml"),
+            MigrationScope::Repository { root } => {
+                root.join(PROJECT_CONFIG_DIRECTORY).join("config.toml")
+            }
         };
         let settings = self.effective_source_settings(&scope)?;
         let migrated = self.build_mcp_config(&scope, settings)?;
@@ -640,7 +618,7 @@ impl ExternalAgentConfigService {
             ),
             MigrationScope::Repository { root } => (
                 root.join(self.source.config_dir()).join("agents"),
-                root.join(".codex").join("agents"),
+                root.join(PROJECT_CONFIG_DIRECTORY).join("agents"),
             ),
         };
 
@@ -653,7 +631,9 @@ impl ExternalAgentConfigService {
         };
         let target_hooks = match &scope {
             MigrationScope::Home => self.codex_home.join("hooks.json"),
-            MigrationScope::Repository { root } => root.join(".codex").join("hooks.json"),
+            MigrationScope::Repository { root } => {
+                root.join(PROJECT_CONFIG_DIRECTORY).join("hooks.json")
+            }
         };
         let source_external_agent_dir = self.source_config_dir(&scope);
 
@@ -729,8 +709,17 @@ impl ExternalAgentConfigService {
                     continue;
                 }
 
-                copy_dir_recursive(&entry.path(), &target, self.source.rewrite_profile())?;
-                copied_names.push(entry.file_name().to_string_lossy().to_string());
+                match copy_dir_recursive(&entry.path(), &target, self.source.rewrite_profile()) {
+                    Ok(()) => copied_names.push(entry.file_name().to_string_lossy().to_string()),
+                    Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                        tracing::warn!(
+                            skill = %entry.path().display(),
+                            error = %err,
+                            "skipping unsafe external agent skill package"
+                        );
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
 

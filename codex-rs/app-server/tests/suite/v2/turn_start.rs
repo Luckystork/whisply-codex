@@ -1,6 +1,11 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_apply_patch_sse_response;
 use app_test_support::create_exec_command_sse_response;
@@ -11,7 +16,6 @@ use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::create_request_user_input_sse_response;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::format_with_current_shell_display;
-use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use app_test_support::write_models_cache;
 use codex_app_server::INPUT_TOO_LARGE_ERROR_CODE;
 use codex_app_server::INVALID_PARAMS_ERROR_CODE;
@@ -20,9 +24,6 @@ use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ByteRange;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::CollabAgentStatus;
-use codex_app_server_protocol::CollabAgentTool;
-use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionStatus;
@@ -62,7 +63,6 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_app_server_protocol::WarningNotification;
-use codex_core::test_support::all_model_presets;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
@@ -88,16 +88,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use wiremock::ResponseTemplate;
-
-use super::analytics::mount_analytics_capture;
-use super::analytics::wait_for_analytics_event;
 
 #[cfg(windows)]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const TEST_ORIGINATOR: &str = "codex_vscode";
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 const TINY_PNG_BYTES: &[u8] = &[
@@ -113,6 +108,54 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
         .is_some_and(|body| body.contains(text))
 }
 
+async fn wait_for_v2_spawned_subagent(
+    mcp: &mut TestAppServer,
+    call_id: &str,
+) -> Result<(String, String)> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed: ItemCompletedNotification =
+                mcp.read_notification("item/completed").await?;
+            if let ThreadItem::SubAgentActivity {
+                id,
+                kind: SubAgentActivityKind::Started,
+                agent_thread_id,
+                agent_path,
+            } = completed.item
+                && id == call_id
+            {
+                return Ok::<(String, String), anyhow::Error>((agent_thread_id, agent_path));
+            }
+        }
+    })
+    .await?
+}
+
+async fn response_request_payload_for_child(
+    server: &wiremock::MockServer,
+    child_prompt: &str,
+    spawn_call_id: &str,
+) -> Result<Value> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let requests = server
+                .received_requests()
+                .await
+                .context("managed response fixture should retain recorded requests")?;
+            if let Some(request) = requests.iter().find(|request| {
+                request.url.path().ends_with("/responses")
+                    && body_contains(request, child_prompt)
+                    && !body_contains(request, spawn_call_id)
+            }) {
+                return serde_json::from_slice(&request.body)
+                    .context("child response request should be valid JSON");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?
+}
+
 async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>> {
     // Two Codex turns hit the mock model (session start + turn/start).
     let responses = vec![
@@ -124,9 +167,9 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -203,16 +246,19 @@ async fn received_response_input_images(server: &wiremock::MockServer) -> Result
     Ok(input_images)
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 
@@ -266,7 +312,36 @@ async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
         .filter(|request| request.url.path().ends_with("/responses"))
         .collect::<Vec<_>>();
     assert_eq!(response_requests.len(), 1);
-    let body = response_requests[0]
+    let response_request = response_requests[0];
+    assert_eq!(
+        response_request
+            .headers
+            .get("authorization")
+            .context("managed response request should include a broker bearer")?
+            .to_str()
+            .context("managed response authorization should be valid ASCII")?,
+        "Bearer test-managed-broker-bearer",
+        "the response request must use the refreshed broker descriptor rather than the initial launch descriptor"
+    );
+    assert_eq!(
+        response_request
+            .headers
+            .get("x-whisply-runtime")
+            .context("managed response request should include the direct runtime marker")?
+            .to_str()
+            .context("direct runtime marker should be valid ASCII")?,
+        "direct"
+    );
+    assert_eq!(
+        response_request
+            .headers
+            .get("x-whisply-protocol-version")
+            .context("managed response request should include the direct protocol marker")?
+            .to_str()
+            .context("direct protocol marker should be valid ASCII")?,
+        "1"
+    );
+    let body = response_request
         .body_json::<Value>()
         .context("request body should be JSON")?;
     let input = body
@@ -284,6 +359,22 @@ async fn turn_start_with_empty_input_runs_model_request() -> Result<()> {
         }),
         "empty turn/start should not synthesize an empty user message: {input:?}"
     );
+    mcp.assert_managed_whisply_gateway_healthy()?;
+    let operations = mcp
+        .managed_whisply_broker_operations()
+        .context("managed Whisply broker fixture should be attached")?;
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation == "broker.hello"),
+        "managed Whisply provider should initialize through broker.hello: {operations:?}"
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation == "runtime.descriptors"),
+        "model response I/O should refresh through runtime.descriptors: {operations:?}"
+    );
 
     Ok(())
 }
@@ -294,9 +385,9 @@ async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -355,23 +446,23 @@ async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_sends_originator_header() -> Result<()> {
+async fn turn_start_omits_client_originator_header_for_managed_gateway() -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build()
         .await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.initialize_with_client_info(ClientInfo {
-            name: TEST_ORIGINATOR.to_string(),
+            name: "codex_vscode".to_string(),
             title: Some("Codex VS Code Extension".to_string()),
             version: "0.1.0".to_string(),
         }),
@@ -413,11 +504,10 @@ async fn turn_start_sends_originator_header() -> Result<()> {
         .expect("failed to fetch received requests");
     assert!(!requests.is_empty());
     for request in requests {
-        let originator = request
-            .headers
-            .get("originator")
-            .expect("originator header missing");
-        assert_eq!(originator.to_str()?, TEST_ORIGINATOR);
+        assert!(
+            request.headers.get("originator").is_none(),
+            "managed gateway requests must not forward the client originator"
+        );
     }
 
     Ok(())
@@ -429,11 +519,11 @@ async fn turn_start_emits_user_message_item_with_text_elements() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -507,36 +597,16 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
+        .with_model("gpt-5.6-terra")
         .enable_feature(Feature::Personality)
+        .with_additional_config("model_context_window = 100")
         .write(codex_home.path())?;
-    write_models_cache(codex_home.path())?;
-    let cache_path = codex_home.path().join("models_cache.json");
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&cache_path)?)?;
-    let models = cache["models"]
-        .as_array_mut()
-        .expect("models_cache.json models should be an array");
-    let entry = models
-        .first_mut()
-        .expect("models cache should not be empty");
-    let model = entry["slug"]
-        .as_str()
-        .expect("model slug should be present")
-        .to_string();
-    entry["context_window"] = serde_json::Value::from(100);
-    std::fs::write(&cache_path, serde_json::to_string_pretty(&cache)?)?;
-    let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?;
-    std::fs::write(
-        &config_path,
-        config.replace("model = \"mock-model\"", &format!("model = \"{model}\"")),
-    )?;
     write_test_skill(codex_home.path(), "alpha-skill")?;
     write_test_skill(codex_home.path(), "beta-skill")?;
 
     let isolated_home = codex_home.path().to_string_lossy();
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[
             ("HOME", Some(isolated_home.as_ref())),
@@ -596,7 +666,7 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
 }
 
 #[tokio::test]
-async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
+async fn turn_start_omits_unadvertised_service_tier_from_managed_model_request() -> Result<()> {
     let server = responses::start_mock_server().await;
     let body = responses::sse(vec![
         responses::ev_response_created("resp-1"),
@@ -606,22 +676,18 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
-    write_models_cache(codex_home.path())?;
-    let service_tier_model = all_model_presets()
-        .iter()
-        .find(|preset| preset.show_in_picker && !preset.service_tiers.is_empty())
-        .expect("bundled model catalog should include a picker model with service tiers");
-    let service_tier_id = service_tier_model.service_tiers[0].id.clone();
+    const MODEL_ID: &str = "gpt-5.6-terra";
+    const UNADVERTISED_SERVICE_TIER: &str = "priority";
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            model: Some(service_tier_model.id.clone()),
+            model: Some(MODEL_ID.to_string()),
             ..Default::default()
         })
         .await?;
@@ -631,7 +697,7 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
             request_id,
             params: TurnStartParams {
                 thread_id: thread.id,
-                service_tier: Some(Some(service_tier_id.clone())),
+                service_tier: Some(Some(UNADVERTISED_SERVICE_TIER.to_string())),
                 input: vec![V2UserInput::Text {
                     text: "Hello".to_string(),
                     text_elements: Vec::new(),
@@ -646,9 +712,11 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
     )
     .await??;
 
-    assert_eq!(
-        response_mock.single_request().body_json()["service_tier"],
-        json!(service_tier_id)
+    let request = response_mock.single_request().body_json();
+    assert_eq!(request["model"], json!(MODEL_ID));
+    assert!(
+        request.get("service_tier").is_none(),
+        "unadvertised service tier must not reach the managed gateway: {request:#?}"
     );
 
     Ok(())
@@ -677,10 +745,10 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
     responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -749,9 +817,9 @@ async fn thread_start_omits_empty_instruction_overrides_from_model_request() -> 
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -819,318 +887,16 @@ async fn thread_start_omits_empty_instruction_overrides_from_model_request() -> 
 }
 
 #[tokio::test]
-async fn turn_start_tracks_thread_originator_in_analytics() -> Result<()> {
-    let server = responses::start_mock_server().await;
-    let response_mock = responses::mount_response_sequence(
-        &server,
-        vec![
-            ResponseTemplate::new(500).set_body_json(json!({
-                "error": {
-                    "type": "server_error",
-                    "message": "synthetic retryable error"
-                }
-            })),
-            responses::sse_response(create_final_assistant_message_sse_response("Done")?),
-        ],
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &server.uri(),
-        &server.uri(),
-    )?;
-    let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?
-        .replace("stream_max_retries = 0", "stream_max_retries = 1");
-    std::fs::write(config_path, config)?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized()
-        .await?;
-
-    let ThreadStartResponse { thread, .. } = mcp
-        .start_thread(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            thread_source: Some(ThreadSource::User),
-            service_name: Some("codex_work_desktop".to_string()),
-            ..Default::default()
-        })
-        .await?;
-
-    let TurnStartResponse { turn } = mcp
-        .request(|request_id| ClientRequest::TurnStart {
-            request_id,
-            params: TurnStartParams {
-                thread_id: thread.id.clone(),
-                client_user_message_id: None,
-                input: vec![V2UserInput::Image {
-                    url: TINY_PNG_DATA_URL.to_string(),
-                    detail: None,
-                }],
-                responsesapi_client_metadata: Some(HashMap::from([(
-                    "workspace_kind".to_string(),
-                    "projectless".to_string(),
-                )])),
-                ..Default::default()
-            },
-        })
-        .await?;
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let event = wait_for_analytics_event(&server, DEFAULT_READ_TIMEOUT, "codex_turn_event").await?;
-    assert_eq!(event["event_params"]["thread_id"], thread.id);
-    assert_eq!(event["event_params"]["session_id"], thread.session_id);
-    assert_eq!(event["event_params"]["turn_id"], turn.id);
-    assert_eq!(
-        event["event_params"]["app_server_client"]["product_client_id"],
-        "codex_work_desktop"
-    );
-    assert_eq!(event["event_params"]["model"], "mock-model");
-    assert_eq!(event["event_params"]["model_provider"], "mock_provider");
-    assert_eq!(event["event_params"]["sandbox_policy"], "read_only");
-    assert_eq!(event["event_params"]["workspace_kind"], "projectless");
-    assert_eq!(event["event_params"]["ephemeral"], false);
-    assert_eq!(event["event_params"]["thread_source"], "user");
-    assert_eq!(event["event_params"]["initialization_mode"], "new");
-    assert_eq!(
-        event["event_params"]["subagent_source"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        event["event_params"]["parent_thread_id"],
-        serde_json::Value::Null
-    );
-    assert_eq!(event["event_params"]["num_input_images"], 1);
-    assert_eq!(
-        event["event_params"]["image_preparations"],
-        json!([{
-            "message_role": "user",
-            "item_id": null,
-            "effective_detail": "high",
-            "source_width": 1,
-            "source_height": 1,
-            "prepared_width": 1,
-            "prepared_height": 1,
-        }])
-    );
-    assert_eq!(event["event_params"]["status"], "completed");
-    assert!(event["event_params"]["started_at"].as_u64().is_some());
-    assert!(event["event_params"]["completed_at"].as_u64().is_some());
-    assert!(event["event_params"]["duration_ms"].as_u64().is_some());
-    assert_eq!(event["event_params"]["input_tokens"], 0);
-    assert_eq!(event["event_params"]["cached_input_tokens"], 0);
-    assert_eq!(event["event_params"]["output_tokens"], 0);
-    assert_eq!(event["event_params"]["reasoning_output_tokens"], 0);
-    assert_eq!(event["event_params"]["total_tokens"], 0);
-    let params = &event["event_params"];
-    let timings_are_numbers = [
-        "before_first_sampling_ms",
-        "sampling_ms",
-        "between_sampling_overhead_ms",
-        "tool_blocking_ms",
-        "after_last_sampling_ms",
-    ]
-    .into_iter()
-    .all(|field| params[field].as_u64().is_some());
-    assert_eq!(
-        json!({
-            "timingsAreNumbers": timings_are_numbers,
-            "toolBlockingMs": params["tool_blocking_ms"],
-            "samplingRequestCount": params["sampling_request_count"],
-            "samplingRetryCount": params["sampling_retry_count"],
-            "responseRequestCount": response_mock.requests().len(),
-        }),
-        json!({
-            "timingsAreNumbers": true,
-            "toolBlockingMs": 0,
-            "samplingRequestCount": 2,
-            "samplingRetryCount": 1,
-            "responseRequestCount": 2,
-        })
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_exec_emits_correlated_production_analytics() -> Result<()> {
-    let server = responses::start_mock_server().await;
-    let _responses = responses::mount_sse_sequence(
-        &server,
-        vec![
-            responses::sse(vec![
-                responses::ev_response_created("resp-1"),
-                responses::ev_custom_tool_call("exec-1", "exec", "text('analytics');"),
-                responses::ev_completed("resp-1"),
-            ]),
-            responses::sse(vec![responses::ev_completed("resp-2")]),
-        ],
-    )
-    .await;
-    let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::CodeModeOnly)
-        .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let mut app_server = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized()
-        .await?;
-    let params = ThreadStartParams::default();
-    let thread = app_server.start_thread(params).await?;
-    app_server
-        .start_turn_and_wait_for_completion(TurnStartParams {
-            thread_id: thread.thread.id,
-            input: vec![V2UserInput::Text {
-                text: "run exec".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-
-    let event = wait_for_analytics_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "codex_dynamic_tool_call_event",
-    )
-    .await?;
-    assert_eq!(
-        json!({
-            "tool": event["event_params"]["tool_name"],
-            "origin": event["event_params"]["originating_response_id"],
-            "subsequent": event["event_params"]["subsequent_response_id"],
-            "hasCell": event["event_params"]["cell_id"].as_str().is_some(),
-        }),
-        json!({"tool":"exec","origin":"resp-1","subsequent":"resp-2","hasCell":true})
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn turn_profile_tracks_blocking_tool_and_follow_up_sampling() -> Result<()> {
-    let responses = vec![
-        create_request_user_input_sse_response("call1")?,
-        create_final_assistant_message_sse_response("Done")?,
-    ];
-    let server = create_mock_responses_server_sequence(responses).await;
-
-    let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &server.uri(),
-        &server.uri(),
-    )?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized()
-        .await?;
-
-    let ThreadStartResponse { thread, .. } = mcp
-        .start_thread(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-
-    let _: TurnStartResponse = mcp
-        .request(|request_id| ClientRequest::TurnStart {
-            request_id,
-            params: TurnStartParams {
-                thread_id: thread.id.clone(),
-                client_user_message_id: None,
-                input: vec![V2UserInput::Text {
-                    text: "ask something".to_string(),
-                    text_elements: Vec::new(),
-                }],
-                collaboration_mode: Some(CollaborationMode {
-                    mode: ModeKind::Plan,
-                    settings: Settings {
-                        model: "mock-model".to_string(),
-                        reasoning_effort: Some(ReasoningEffort::Medium),
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            },
-        })
-        .await?;
-
-    let server_req = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_request_message(),
-    )
-    .await??;
-    let ServerRequest::ToolRequestUserInput { request_id, .. } = server_req else {
-        panic!("expected ToolRequestUserInput request, got: {server_req:?}");
-    };
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    mcp.send_response(
-        request_id,
-        json!({
-            "answers": {
-                "confirm_path": { "answers": ["yes"] }
-            }
-        }),
-    )
-    .await?;
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let event = wait_for_analytics_event(&server, DEFAULT_READ_TIMEOUT, "codex_turn_event").await?;
-    let params = &event["event_params"];
-    assert_eq!(
-        json!({
-            "toolBlockingIsPositive": params["tool_blocking_ms"]
-                .as_u64()
-                .is_some_and(|duration| duration > 0),
-            "samplingRequestCount": params["sampling_request_count"],
-            "samplingRetryCount": params["sampling_retry_count"],
-            "status": params["status"],
-        }),
-        json!({
-            "toolBlockingIsPositive": true,
-            "samplingRequestCount": 2,
-            "samplingRetryCount": 0,
-            "status": "completed",
-        })
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1176,7 +942,7 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
 #[tokio::test]
 async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new("http://localhost/unused")
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
@@ -1245,7 +1011,7 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
 #[tokio::test]
 async fn turn_start_rejects_invalid_permission_selection_before_starting_turn() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new("http://localhost/unused")
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
     std::fs::write(
@@ -1310,13 +1076,14 @@ async fn turn_start_rejects_invalid_permission_selection_before_starting_turn() 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn turn_start_accepts_managed_network_profile_from_requirements() -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::NetworkProxy)
         .write(codex_home.path())?;
     std::fs::write(
@@ -1340,7 +1107,7 @@ allow_local_binding = false
 "#,
     )?;
 
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1391,9 +1158,9 @@ allow_local_binding = false
 async fn turn_start_rejects_unknown_environment_before_starting_turn() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1458,11 +1225,11 @@ async fn turn_start_emits_notifications_and_accepts_model_override() -> Result<(
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1566,9 +1333,9 @@ async fn turn_start_accepts_collaboration_mode_override_v2() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1640,9 +1407,9 @@ async fn turn_start_uses_thread_feature_overrides_for_request_user_input_tool_de
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1713,11 +1480,11 @@ async fn turn_start_accepts_personality_override_v2() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1780,11 +1547,11 @@ async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1847,11 +1614,11 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -1925,11 +1692,11 @@ async fn turn_start_change_personality_mid_thread_v2() -> Result<()> {
     let response_mock = responses::mount_sse_sequence(&server, vec![sse1, sse2]).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -2081,11 +1848,11 @@ async fn turn_start_exec_approval_toggle_v2() -> Result<()> {
     ];
     let server = create_mock_responses_server_sequence(responses).await;
     // Default approval is untrusted to force elicitation on first turn.
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .write(codex_home.as_path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.as_path())
         .build_initialized()
         .await?;
@@ -2283,11 +2050,11 @@ async fn run_turn_start_exec_approval_rejection_v2(
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .write(codex_home.as_path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.as_path())
         .build_initialized()
         .await?;
@@ -2444,11 +2211,11 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
         create_final_assistant_message_sse_response("done second")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -2617,30 +2384,18 @@ async fn turn_start_permission_profile_rebinds_runtime_workspace_roots_between_t
         ],
     )
     .await;
-    let server_uri = server.uri();
-    std::fs::write(
-        codex_home.join("config.toml"),
-        format!(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
             r#"
-model = "mock-model"
-approval_policy = "never"
 default_permissions = "dev"
-model_provider = "mock_provider"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{server_uri}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
 
 [permissions.dev.filesystem.":workspace_roots"]
 "." = "write"
-"#
-        ),
-    )?;
+"#,
+        )
+        .write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -2733,7 +2488,7 @@ async fn turn_start_resolves_sticky_thread_local_environment_and_turn_overrides(
     std::fs::create_dir(&workspace)?;
 
     let server = create_mock_responses_server_repeating_assistant("done").await;
-    MockResponsesConfig::new(&server.uri()).write(&codex_home)?;
+    ManagedWhisplyConfig::new().write(&codex_home)?;
     std::fs::write(
         codex_home.join("environments.toml"),
         r#"
@@ -2743,7 +2498,7 @@ url = "ws://127.0.0.1:1"
 "#,
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         // This test owns environments.toml and explicitly compares local selections
         // with a configured remote environment, so auto env would change its subject.
@@ -2883,13 +2638,13 @@ async fn turn_start_file_change_approval_v2() -> Result<()> {
         create_final_assistant_message_sse_response("patch applied")?,
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         // Snapshot startup is unrelated to the file-approval behavior under test.
         .disable_feature(Feature::ShellSnapshot)
         .write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -3086,9 +2841,9 @@ async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v
         create_final_assistant_message_sse_response("patch applied")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri()).write(&codex_home)?;
+    ManagedWhisplyConfig::new().write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -3132,141 +2887,48 @@ async fn turn_start_does_not_stream_apply_patch_change_updates_without_feature_v
 }
 
 #[tokio::test]
-async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
-    // TODO(anp): Materialize apply-patch workspaces in the selected remote environment.
-    skip_if_remote!(
-        Ok(()),
-        "apply-patch workspace fixture is only materialized on the host"
-    );
+async fn turn_start_does_not_offer_apply_patch_when_catalog_does_not_advertise_it() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let tmp = TempDir::new()?;
-    let codex_home = tmp.path().join("codex_home");
-    std::fs::create_dir(&codex_home)?;
-    let workspace = tmp.path().join("workspace");
-    std::fs::create_dir(&workspace)?;
-
-    let call_id = "patch-call";
-    let item_id = "fc-patch-call";
-    let patch = "*** Begin Patch\n*** Add File: live.txt\n+live line\n*** End Patch\n";
-    let patch_delta_1 = "*** Begin Patch\n*** Add File: live.txt\n+live";
-    let patch_delta_2 = " line\n*** End Patch\n";
-    let responses = vec![
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {
-                    "type": "function_call",
-                    "id": "fc-other-call",
-                    "call_id": "other-call",
-                    "name": "not_apply_patch",
-                    "arguments": "",
-                    "status": "in_progress"
-                }
-            }),
-            serde_json::json!({
-                "type": "response.function_call_arguments.delta",
-                "item_id": "fc-other-call",
-                "delta": r#"{"input":"*** Begin Patch\n*** Add File: ignored.txt\n+ignored"#,
-            }),
-            serde_json::json!({
-                "type": "response.output_item.added",
-                "item": {
-                    "type": "custom_tool_call",
-                    "id": item_id,
-                    "call_id": call_id,
-                    "name": "apply_patch",
-                    "input": "",
-                    "status": "in_progress"
-                }
-            }),
-            serde_json::json!({
-                "type": "response.custom_tool_call_input.delta",
-                "item_id": item_id,
-                "call_id": call_id,
-                "delta": patch_delta_1,
-            }),
-            serde_json::json!({
-                "type": "response.custom_tool_call_input.delta",
-                "item_id": item_id,
-                "call_id": call_id,
-                "delta": patch_delta_2,
-            }),
-            responses::ev_apply_patch_custom_tool_call(call_id, patch),
-            responses::ev_completed("resp-1"),
-        ]),
-        create_final_assistant_message_sse_response("patch applied")?,
-    ];
-    let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("done")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    ManagedWhisplyConfig::new()
+        .with_model("gpt-5.6-terra")
         .enable_feature(Feature::ApplyPatchStreamingEvents)
         .disable_feature(Feature::Plugins)
         .disable_feature(Feature::RemoteModels)
         .disable_feature(Feature::ShellSnapshot)
-        .write(&codex_home)?;
-    write_models_cache(&codex_home)?;
-    let cache_path = codex_home.join("models_cache.json");
-    let mut cache: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&cache_path)?)?;
-    let models = cache["models"]
-        .as_array_mut()
-        .expect("models_cache.json models should be an array");
-    let model = models
-        .first_mut()
-        .expect("models_cache.json should contain at least one model");
-    model["slug"] = serde_json::Value::from("mock-model");
-    model["display_name"] = serde_json::Value::from("mock-model");
-    model["apply_patch_tool_type"] = serde_json::Value::from("freeform");
-    std::fs::write(&cache_path, serde_json::to_string_pretty(&cache)?)?;
+        .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(&codex_home)
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
+        .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            cwd: Some(workspace.to_string_lossy().into_owned()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..Default::default()
         })
         .await?;
 
-    let TurnStartResponse { turn } = mcp
+    let _: TurnStartResponse = mcp
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
             params: TurnStartParams {
-                thread_id: thread.id.clone(),
+                thread_id: thread.id,
                 client_user_message_id: None,
                 input: vec![V2UserInput::Text {
-                    text: "apply patch".into(),
+                    text: "confirm managed tool projection".into(),
                     text_elements: Vec::new(),
                 }],
-                cwd: Some(workspace.clone()),
                 ..Default::default()
             },
         })
         .await?;
-
-    let mut streamed_content = String::new();
-    while streamed_content != "live line\n" {
-        let delta: FileChangePatchUpdatedNotification = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_notification("item/fileChange/patchUpdated"),
-        )
-        .await??;
-        assert_eq!(delta.thread_id, thread.id);
-        assert_eq!(delta.turn_id, turn.id);
-        assert_eq!(delta.item_id, call_id);
-        let change = delta
-            .changes
-            .iter()
-            .find(|change| change.path == "live.txt")
-            .expect("live.txt change");
-        assert!(matches!(change.kind, PatchChangeKind::Add));
-        streamed_content = change.diff.clone();
-    }
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -3274,22 +2936,46 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
     )
     .await??;
 
+    let requests = server
+        .received_requests()
+        .await
+        .expect("managed response mock should receive a request");
+    let request = requests.last().expect("expected a managed model request");
+    let request_body = request
+        .body_json::<Value>()
+        .context("managed model request body should be JSON")?;
+    let tools = request_body["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        tools.iter().all(|tool| tool["name"] != "apply_patch"),
+        "the signed managed catalog did not advertise apply_patch: {tools:#?}"
+    );
+    assert!(
+        !mcp.pending_notification_methods()
+            .iter()
+            .any(|method| method == "item/fileChange/patchUpdated")
+    );
+
     Ok(())
 }
 
 #[tokio::test]
-async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()> {
+async fn turn_start_spawns_agent_with_model_metadata_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CHILD_PROMPT: &str = "child: do work";
     const PARENT_PROMPT: &str = "spawn a child and continue";
     const SPAWN_CALL_ID: &str = "spawn-call-1";
-    const REQUESTED_MODEL: &str = "gpt-5.2";
+    const REQUESTED_MODEL: &str = "gpt-5.6-luna";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "fork_turns": "none",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
     }))?;
@@ -3300,7 +2986,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             responses::ev_response_created("resp-turn1-1"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "multi_agent_v1",
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -3332,18 +3018,18 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Collab)
+    ManagedWhisplyConfig::new()
+        .enable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..Default::default()
         })
         .await?;
@@ -3363,82 +3049,10 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         })
         .await?;
 
-    let spawn_started = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &started.item
-                && id == SPAWN_CALL_ID
-            {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
-            }
-        }
-    })
-    .await??;
-    assert_eq!(
-        spawn_started,
-        ThreadItem::CollabAgentToolCall {
-            id: SPAWN_CALL_ID.to_string(),
-            tool: CollabAgentTool::SpawnAgent,
-            status: CollabAgentToolCallStatus::InProgress,
-            sender_thread_id: thread.id.clone(),
-            receiver_thread_ids: Vec::new(),
-            prompt: Some(CHILD_PROMPT.to_string()),
-            model: Some(REQUESTED_MODEL.to_string()),
-            reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
-            agents_states: HashMap::new(),
-        }
-    );
-
-    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let completed: ItemCompletedNotification =
-                mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
-                && id == SPAWN_CALL_ID
-            {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
-            }
-        }
-    })
-    .await??;
-    let ThreadItem::CollabAgentToolCall {
-        id,
-        tool,
-        status,
-        sender_thread_id,
-        receiver_thread_ids,
-        prompt,
-        model,
-        reasoning_effort,
-        agents_states,
-    } = spawn_completed
-    else {
-        unreachable!("loop ensures we break on collab agent tool call items");
-    };
-    let receiver_thread_id = receiver_thread_ids
-        .first()
-        .cloned()
-        .expect("spawn completion should include child thread id");
-    assert_eq!(id, SPAWN_CALL_ID);
-    assert_eq!(tool, CollabAgentTool::SpawnAgent);
-    assert_eq!(status, CollabAgentToolCallStatus::Completed);
-    assert_eq!(sender_thread_id, thread.id);
-    assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
-    assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
-    let agent_state = agents_states
-        .get(&receiver_thread_id)
-        .expect("spawn completion should include child agent state");
-    assert!(
-        matches!(
-            agent_state.status,
-            CollabAgentStatus::PendingInit | CollabAgentStatus::Running
-        ),
-        "child agent should still be initializing or already running, got {:?}",
-        agent_state.status
-    );
-    assert_eq!(agent_state.message, None);
+    let (receiver_thread_id, agent_path) =
+        wait_for_v2_spawned_subagent(&mut mcp, SPAWN_CALL_ID).await?;
+    assert_eq!(agent_path, "/root/worker");
+    assert_ne!(receiver_thread_id, thread.id);
 
     let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -3452,6 +3066,14 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
     assert_eq!(turn_completed.turn.id, turn.turn.id);
+
+    let child_request =
+        response_request_payload_for_child(&server, CHILD_PROMPT, SPAWN_CALL_ID).await?;
+    assert_eq!(child_request["model"], json!(REQUESTED_MODEL));
+    assert_eq!(
+        child_request["reasoning"]["effort"],
+        json!(REQUESTED_REASONING_EFFORT)
+    );
 
     // Reuse this live spawn setup to cover thread/delete's ThreadManager descendant path.
     let _: ThreadDeleteResponse = mcp
@@ -3517,12 +3139,12 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
     )
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -3647,20 +3269,22 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2() -> Result<()> {
+async fn turn_start_spawns_agent_with_effective_role_model_metadata_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CHILD_PROMPT: &str = "child: do work";
     const PARENT_PROMPT: &str = "spawn a child and continue";
     const SPAWN_CALL_ID: &str = "spawn-call-1";
-    const REQUESTED_MODEL: &str = "gpt-5.2";
+    const REQUESTED_MODEL: &str = "gpt-5.6-luna";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
-    const ROLE_MODEL: &str = "gpt-5.4";
+    const ROLE_MODEL: &str = "gpt-5.6-sol";
     const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "fork_turns": "none",
         "agent_type": "custom",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
@@ -3672,7 +3296,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
             responses::ev_response_created("resp-turn1-1"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "multi_agent_v1",
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -3704,8 +3328,8 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Collab)
+    ManagedWhisplyConfig::new()
+        .enable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     std::fs::write(
         codex_home.path().join("custom-role.toml"),
@@ -3725,14 +3349,14 @@ config_file = "./custom-role.toml"
         ),
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..Default::default()
         })
         .await?;
@@ -3752,56 +3376,10 @@ config_file = "./custom-role.toml"
         })
         .await?;
 
-    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let completed: ItemCompletedNotification =
-                mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
-                && id == SPAWN_CALL_ID
-            {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
-            }
-        }
-    })
-    .await??;
-    let ThreadItem::CollabAgentToolCall {
-        id,
-        tool,
-        status,
-        sender_thread_id,
-        receiver_thread_ids,
-        prompt,
-        model,
-        reasoning_effort,
-        agents_states,
-    } = spawn_completed
-    else {
-        unreachable!("loop ensures we break on collab agent tool call items");
-    };
-    let receiver_thread_id = receiver_thread_ids
-        .first()
-        .cloned()
-        .expect("spawn completion should include child thread id");
-    assert_eq!(id, SPAWN_CALL_ID);
-    assert_eq!(tool, CollabAgentTool::SpawnAgent);
-    assert_eq!(status, CollabAgentToolCallStatus::Completed);
-    assert_eq!(sender_thread_id, thread.id);
-    assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
-    assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(ROLE_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
-    let agent_state = agents_states
-        .get(&receiver_thread_id)
-        .expect("spawn completion should include child agent state");
-    assert!(
-        matches!(
-            agent_state.status,
-            CollabAgentStatus::PendingInit | CollabAgentStatus::Running
-        ),
-        "child agent should still be initializing or already running, got {:?}",
-        agent_state.status
-    );
-    assert_eq!(agent_state.message, None);
+    let (receiver_thread_id, agent_path) =
+        wait_for_v2_spawned_subagent(&mut mcp, SPAWN_CALL_ID).await?;
+    assert_eq!(agent_path, "/root/worker");
+    assert_ne!(receiver_thread_id, thread.id);
 
     let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -3814,6 +3392,14 @@ config_file = "./custom-role.toml"
     })
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
+
+    let child_request =
+        response_request_payload_for_child(&server, CHILD_PROMPT, SPAWN_CALL_ID).await?;
+    assert_eq!(child_request["model"], json!(ROLE_MODEL));
+    assert_eq!(
+        child_request["reasoning"]["effort"],
+        json!(ROLE_REASONING_EFFORT)
+    );
 
     Ok(())
 }
@@ -3853,11 +3439,11 @@ async fn turn_start_file_change_approval_accept_for_session_persists_v2() -> Res
         create_final_assistant_message_sse_response("patch 2 applied")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -4081,11 +3667,11 @@ async fn run_turn_start_file_change_approval_rejection_v2(
         create_final_assistant_message_sse_response("patch declined")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -4216,12 +3802,12 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     ];
     let server = create_mock_responses_server_sequence(responses).await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::UnifiedExec)
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -4373,15 +3959,15 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::Plugins)
         .disable_feature(Feature::RemotePlugin)
-        .with_extra_config("[plugins.\"google-calendar@openai-curated\"]\nenabled = true")
+        .with_additional_config("[plugins.\"google-calendar@openai-curated\"]\nenabled = true")
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -4473,13 +4059,13 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::Personality)
         .write(codex_home.path())?;
 
     let workspace = TempDir::new()?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;

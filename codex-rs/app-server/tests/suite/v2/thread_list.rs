@@ -1,11 +1,12 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
 use app_test_support::create_fake_rollout_with_source;
+#[cfg(target_os = "macos")]
 use app_test_support::create_final_assistant_message_sse_response;
-use app_test_support::create_mock_responses_server_repeating_assistant;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::rollout_path;
 use app_test_support::test_absolute_path;
@@ -28,11 +29,16 @@ use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_app_server_protocol::ThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_git_utils::GitSha;
@@ -47,6 +53,7 @@ use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::read_session_meta_line;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_utils_absolute_path::test_support::PathExt;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use std::cmp::Reverse;
@@ -62,6 +69,17 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 async fn init_mcp(codex_home: &Path) -> Result<TestAppServer> {
     TestAppServer::builder()
+        .with_codex_home(codex_home)
+        .build_initialized()
+        .await
+}
+
+#[cfg(target_os = "macos")]
+async fn init_mcp_with_managed_gateway(
+    codex_home: &Path,
+    gateway_base_url: &str,
+) -> Result<TestAppServer> {
+    app_test_support::managed_whisply_app_server_builder!(gateway_base_url)
         .with_codex_home(codex_home)
         .build_initialized()
         .await
@@ -239,7 +257,7 @@ async fn thread_list_basic_empty() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -250,6 +268,7 @@ async fn thread_list_basic_empty() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_list_reports_system_error_idle_flag_after_failed_turn() -> Result<()> {
     let responses = vec![
@@ -260,7 +279,7 @@ async fn thread_list_reports_system_error_idle_flag_after_failed_turn() -> Resul
 
     let codex_home = TempDir::new()?;
     create_runtime_config(codex_home.path(), &server.uri())?;
-    let mut mcp = init_mcp(codex_home.path()).await?;
+    let mut mcp = init_mcp_with_managed_gateway(codex_home.path(), &server.uri()).await?;
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
@@ -311,7 +330,7 @@ async fn thread_list_reports_system_error_idle_flag_after_failed_turn() -> Resul
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![
             ThreadSourceKind::AppServer,
             ThreadSourceKind::Cli,
@@ -341,8 +360,8 @@ approval_policy = "never"
     )
 }
 
-fn create_runtime_config(codex_home: &std::path::Path, server_uri: &str) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri).write(codex_home)
+fn create_runtime_config(codex_home: &std::path::Path, _server_uri: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)
 }
 
 #[tokio::test]
@@ -356,7 +375,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         "2025-01-02T12-00-00",
         "2025-01-02T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let _b = create_fake_rollout(
@@ -364,7 +383,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         "2025-01-01T13-00-00",
         "2025-01-01T13:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let _c = create_fake_rollout(
@@ -372,7 +391,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         "2025-01-01T12-00-00",
         "2025-01-01T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -387,7 +406,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(2),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -395,7 +414,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
     assert_eq!(data1.len(), 2);
     for thread in &data1 {
         assert_eq!(thread.preview, "Hello");
-        assert_eq!(thread.model_provider, "mock_provider");
+        assert_eq!(thread.model_provider, "whisply");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
         assert_eq!(thread.cwd, test_absolute_path("/"));
@@ -415,7 +434,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         &mut mcp,
         Some(cursor1),
         Some(2),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -423,7 +442,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
     assert!(data2.len() <= 2);
     for thread in &data2 {
         assert_eq!(thread.preview, "Hello");
-        assert_eq!(thread.model_provider, "mock_provider");
+        assert_eq!(thread.model_provider, "whisply");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
         assert_eq!(thread.cwd, test_absolute_path("/"));
@@ -448,9 +467,9 @@ async fn thread_list_respects_provider_filter() -> Result<()> {
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "X",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
-    )?; // mock_provider
+    )?; // whisply
     let _b = create_fake_rollout(
         codex_home.path(),
         "2025-01-02T11-00-00",
@@ -500,7 +519,7 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "first filtered",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let second_filtered_id = create_fake_rollout(
@@ -508,7 +527,7 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
         "2025-01-02T12-00-00",
         "2025-01-02T12:00:00Z",
         "second filtered",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let unfiltered_id = create_fake_rollout(
@@ -516,7 +535,7 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
         "2025-01-02T11-00-00",
         "2025-01-02T11:00:00Z",
         "unfiltered",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -545,7 +564,7 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
             limit: Some(10),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -596,7 +615,7 @@ sqlite = true
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "match: needle",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let _non_match = create_fake_rollout(
@@ -604,7 +623,7 @@ sqlite = true
         "2025-01-02T11-00-00",
         "2025-01-02T11:00:00Z",
         "no hit here",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let newer_match = create_fake_rollout(
@@ -612,7 +631,7 @@ sqlite = true
         "2025-01-02T12-00-00",
         "2025-01-02T12:00:00Z",
         "needle suffix",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -621,7 +640,7 @@ sqlite = true
     // list large enough to repair every rollout the searched list should find.
     let state_db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -631,7 +650,7 @@ sqlite = true
         codex_home: codex_home.path().to_path_buf(),
         sqlite: codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         cwd: codex_home.path().to_path_buf(),
-        model_provider_id: "mock_provider".to_string(),
+        model_provider_id: "whisply".to_string(),
         generate_memories: false,
     };
     let repaired_page = codex_core::RolloutRecorder::list_threads(
@@ -644,7 +663,7 @@ sqlite = true
         &[],
         /*model_providers*/ None,
         /*cwd_filters*/ None,
-        "mock_provider",
+        "whisply",
         /*search_term*/ None,
     )
     .await?;
@@ -657,7 +676,7 @@ sqlite = true
             limit: Some(10),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -689,7 +708,7 @@ async fn thread_search_returns_content_matches() -> Result<()> {
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "match: needle",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let _non_match = create_fake_rollout(
@@ -697,7 +716,7 @@ async fn thread_search_returns_content_matches() -> Result<()> {
         "2025-01-02T11-00-00",
         "2025-01-02T11:00:00Z",
         "no hit here",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let unsectioned_match = create_fake_rollout(
@@ -705,7 +724,7 @@ async fn thread_search_returns_content_matches() -> Result<()> {
         "2025-01-02T11-30-00",
         "2025-01-02T11:30:00Z",
         "unsectioned needle",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let newer_match = create_fake_rollout(
@@ -713,7 +732,7 @@ async fn thread_search_returns_content_matches() -> Result<()> {
         "2025-01-02T12-00-00",
         "2025-01-02T12:00:00Z",
         "mixed NEEDLE suffix",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -830,7 +849,7 @@ async fn thread_search_matches_json_escaped_content() -> Result<()> {
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         search_term,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -866,7 +885,7 @@ async fn thread_search_filters_by_source_kind() -> Result<()> {
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "shared needle",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let exec_id = create_fake_rollout_with_source(
@@ -874,7 +893,7 @@ async fn thread_search_filters_by_source_kind() -> Result<()> {
         "2025-02-01T11-00-00",
         "2025-02-01T11:00:00Z",
         "shared needle",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::Exec,
     )?;
@@ -924,12 +943,12 @@ sqlite = true
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "state db only should not see this before repair",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let state_db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -943,7 +962,7 @@ sqlite = true
             limit: Some(10),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -978,7 +997,7 @@ sqlite = true
             limit: Some(10),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -1006,7 +1025,7 @@ sqlite = true
             limit: Some(10),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,
@@ -1037,7 +1056,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
     let grandchild_id = ThreadId::new();
     let state_db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".to_string(),
+        "whisply".to_string(),
     )
     .await?;
     for (thread_id, created_at, source, model_provider) in [
@@ -1051,13 +1070,13 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
             newer_child_id,
             "2025-02-01T11:00:00Z",
             CoreSessionSource::Cli,
-            "mock_provider",
+            "whisply",
         ),
         (
             grandchild_id,
             "2025-02-01T12:00:00Z",
             CoreSessionSource::SubAgent(SubAgentSource::Other("custom:worker-2".to_string())),
-            "mock_provider",
+            "whisply",
         ),
     ] {
         let created_at = DateTime::parse_from_rfc3339(created_at)?.with_timezone(&Utc);
@@ -1250,7 +1269,7 @@ async fn thread_list_empty_source_kinds_defaults_to_interactive_only() -> Result
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "CLI",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let exec_id = create_fake_rollout_with_source(
@@ -1258,7 +1277,7 @@ async fn thread_list_empty_source_kinds_defaults_to_interactive_only() -> Result
         "2025-02-01T11-00-00",
         "2025-02-01T11:00:00Z",
         "Exec",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::Exec,
     )?;
@@ -1271,7 +1290,7 @@ async fn thread_list_empty_source_kinds_defaults_to_interactive_only() -> Result
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(Vec::new()),
         /*archived*/ None,
     )
@@ -1288,15 +1307,14 @@ async fn thread_list_empty_source_kinds_defaults_to_interactive_only() -> Result
 
 #[tokio::test]
 async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
     let cli_id = create_fake_rollout(
         codex_home.path(),
         "2025-02-01T09-00-00",
         "2025-02-01T09:00:00Z",
         "CLI",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let parent_thread_id = ThreadId::from_string(&cli_id)?;
@@ -1331,7 +1349,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             filename_ts,
             timestamp,
             "Subagent",
-            Some("mock_provider"),
+            Some("whisply"),
             /*git_info*/ None,
             CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -1367,7 +1385,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![
             ThreadSourceKind::Cli,
             ThreadSourceKind::SubAgentThreadSpawn,
@@ -1427,7 +1445,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
 
     let state_db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".to_string(),
+        "whisply".to_string(),
     )
     .await?;
     for (thread_id, _, _) in &expected_subagents {
@@ -1451,7 +1469,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
                 limit: Some(10),
                 sort_key: None,
                 sort_direction: None,
-                model_providers: Some(vec!["mock_provider".to_string()]),
+                model_providers: Some(vec!["whisply".to_string()]),
                 source_kinds: Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
                 archived: None,
                 section_id: None,
@@ -1498,7 +1516,7 @@ async fn thread_list_filters_by_source_kind_subagent_thread_spawn() -> Result<()
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "CLI",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1508,7 +1526,7 @@ async fn thread_list_filters_by_source_kind_subagent_thread_spawn() -> Result<()
         "2025-02-01T11-00-00",
         "2025-02-01T11:00:00Z",
         "SubAgent",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
@@ -1527,7 +1545,7 @@ async fn thread_list_filters_by_source_kind_subagent_thread_spawn() -> Result<()
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
         /*archived*/ None,
     )
@@ -1555,7 +1573,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         "2025-02-02T09-00-00",
         "2025-02-02T09:00:00Z",
         "Review",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::SubAgent(SubAgentSource::Review),
         parent_thread_id.into(),
@@ -1566,7 +1584,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         "2025-02-02T10-00-00",
         "2025-02-02T10:00:00Z",
         "Compact",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::SubAgent(SubAgentSource::Compact),
     )?;
@@ -1575,7 +1593,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         "2025-02-02T11-00-00",
         "2025-02-02T11:00:00Z",
         "Spawn",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
@@ -1590,7 +1608,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         "2025-02-02T12-00-00",
         "2025-02-02T12:00:00Z",
         "Other",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         CoreSessionSource::SubAgent(SubAgentSource::Other("custom".to_string())),
     )?;
@@ -1601,7 +1619,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![ThreadSourceKind::SubAgentReview]),
         /*archived*/ None,
     )
@@ -1621,7 +1639,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![ThreadSourceKind::SubAgentCompact]),
         /*archived*/ None,
     )
@@ -1637,7 +1655,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
         /*archived*/ None,
     )
@@ -1649,7 +1667,7 @@ async fn thread_list_filters_by_subagent_variant() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         Some(vec![ThreadSourceKind::SubAgentOther]),
         /*archived*/ None,
     )
@@ -1732,7 +1750,7 @@ async fn thread_list_enforces_max_limit() -> Result<()> {
     create_fake_rollouts(
         codex_home.path(),
         /*count*/ 105,
-        |_| "mock_provider",
+        |_| "whisply",
         |i| {
             let month = 5 + (i / 28);
             let day = (i % 28) + 1;
@@ -1756,7 +1774,7 @@ async fn thread_list_enforces_max_limit() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(200),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -1852,7 +1870,7 @@ async fn thread_list_includes_git_info() -> Result<()> {
         "2025-02-01T09-00-00",
         "2025-02-01T09:00:00Z",
         "Git info preview",
-        Some("mock_provider"),
+        Some("whisply"),
         Some(git_info),
     )?;
 
@@ -1862,7 +1880,7 @@ async fn thread_list_includes_git_info() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -1895,7 +1913,7 @@ async fn thread_list_default_sorts_by_created_at() -> Result<()> {
         "2025-01-02T12-00-00",
         "2025-01-02T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_b = create_fake_rollout(
@@ -1903,7 +1921,7 @@ async fn thread_list_default_sorts_by_created_at() -> Result<()> {
         "2025-01-01T13-00-00",
         "2025-01-01T13:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_c = create_fake_rollout(
@@ -1911,7 +1929,7 @@ async fn thread_list_default_sorts_by_created_at() -> Result<()> {
         "2025-01-01T12-00-00",
         "2025-01-01T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1921,7 +1939,7 @@ async fn thread_list_default_sorts_by_created_at() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*sort_key*/ None,
         /*archived*/ None,
@@ -1944,7 +1962,7 @@ async fn thread_list_sort_updated_at_orders_by_mtime() -> Result<()> {
         "2025-01-01T10-00-00",
         "2025-01-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_mid = create_fake_rollout(
@@ -1952,7 +1970,7 @@ async fn thread_list_sort_updated_at_orders_by_mtime() -> Result<()> {
         "2025-01-01T11-00-00",
         "2025-01-01T11:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_new = create_fake_rollout(
@@ -1960,7 +1978,7 @@ async fn thread_list_sort_updated_at_orders_by_mtime() -> Result<()> {
         "2025-01-01T12-00-00",
         "2025-01-01T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1983,7 +2001,7 @@ async fn thread_list_sort_updated_at_orders_by_mtime() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(ThreadSortKey::UpdatedAt),
         /*archived*/ None,
@@ -2006,7 +2024,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         "2025-01-01T10-00-00",
         "2025-01-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_new = create_fake_rollout(
@@ -2014,7 +2032,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         "2025-01-01T11-00-00",
         "2025-01-01T11:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     set_rollout_mtime(
@@ -2024,7 +2042,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
 
     let state_db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -2034,7 +2052,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         codex_home: codex_home.path().to_path_buf(),
         sqlite: codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         cwd: codex_home.path().to_path_buf(),
-        model_provider_id: "mock_provider".to_string(),
+        model_provider_id: "whisply".to_string(),
         generate_memories: false,
     };
     codex_core::RolloutRecorder::list_threads(
@@ -2047,7 +2065,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         codex_core::INTERACTIVE_SESSION_SOURCES.as_slice(),
         /*model_providers*/ None,
         /*cwd_filters*/ None,
-        "mock_provider",
+        "whisply",
         /*search_term*/ None,
     )
     .await?;
@@ -2063,7 +2081,7 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(ThreadSortKey::RecencyAt),
         /*archived*/ None,
@@ -2091,7 +2109,7 @@ async fn thread_list_updated_at_paginates_with_cursor() -> Result<()> {
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_b = create_fake_rollout(
@@ -2099,7 +2117,7 @@ async fn thread_list_updated_at_paginates_with_cursor() -> Result<()> {
         "2025-02-01T11-00-00",
         "2025-02-01T11:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_c = create_fake_rollout(
@@ -2107,7 +2125,7 @@ async fn thread_list_updated_at_paginates_with_cursor() -> Result<()> {
         "2025-02-01T12-00-00",
         "2025-02-01T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2134,7 +2152,7 @@ async fn thread_list_updated_at_paginates_with_cursor() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(2),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(ThreadSortKey::UpdatedAt),
         /*archived*/ None,
@@ -2152,7 +2170,7 @@ async fn thread_list_updated_at_paginates_with_cursor() -> Result<()> {
         &mut mcp,
         Some(cursor1),
         Some(2),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(ThreadSortKey::UpdatedAt),
         /*archived*/ None,
@@ -2175,7 +2193,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_watermark = create_fake_rollout(
@@ -2183,7 +2201,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
         "2025-02-01T11-00-00",
         "2025-02-01T11:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2209,7 +2227,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
                 limit: Some(1),
                 sort_key: Some(ThreadSortKey::UpdatedAt),
                 sort_direction: Some(SortDirection::Desc),
-                model_providers: Some(vec!["mock_provider".to_string()]),
+                model_providers: Some(vec!["whisply".to_string()]),
                 source_kinds: None,
                 archived: None,
                 section_id: None,
@@ -2232,7 +2250,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
         "2025-02-01T12-00-00",
         "2025-02-01T12:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     set_rollout_mtime(
@@ -2249,7 +2267,7 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
                 limit: Some(10),
                 sort_key: Some(ThreadSortKey::UpdatedAt),
                 sort_direction: Some(SortDirection::Asc),
-                model_providers: Some(vec!["mock_provider".to_string()]),
+                model_providers: Some(vec!["whisply".to_string()]),
                 source_kinds: None,
                 archived: None,
                 section_id: None,
@@ -2278,7 +2296,7 @@ async fn thread_list_created_at_tie_breaks_by_uuid() -> Result<()> {
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_b = create_fake_rollout(
@@ -2286,7 +2304,7 @@ async fn thread_list_created_at_tie_breaks_by_uuid() -> Result<()> {
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2296,7 +2314,7 @@ async fn thread_list_created_at_tie_breaks_by_uuid() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -2321,7 +2339,7 @@ async fn thread_list_updated_at_tie_breaks_by_uuid() -> Result<()> {
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let id_b = create_fake_rollout(
@@ -2329,7 +2347,7 @@ async fn thread_list_updated_at_tie_breaks_by_uuid() -> Result<()> {
         "2025-02-01T11-00-00",
         "2025-02-01T11:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2349,7 +2367,7 @@ async fn thread_list_updated_at_tie_breaks_by_uuid() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(ThreadSortKey::UpdatedAt),
         /*archived*/ None,
@@ -2375,7 +2393,7 @@ async fn thread_list_updated_at_uses_mtime() -> Result<()> {
         "2025-02-01T10-00-00",
         "2025-02-01T10:00:00Z",
         "Hello",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2390,7 +2408,7 @@ async fn thread_list_updated_at_uses_mtime() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(ThreadSortKey::UpdatedAt),
         /*archived*/ None,
@@ -2421,7 +2439,7 @@ async fn thread_list_archived_filter() -> Result<()> {
         "2025-03-01T10-00-00",
         "2025-03-01T10:00:00Z",
         "Active",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let archived_id = create_fake_rollout(
@@ -2429,7 +2447,7 @@ async fn thread_list_archived_filter() -> Result<()> {
         "2025-03-01T09-00-00",
         "2025-03-01T09:00:00Z",
         "Archived",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -2449,7 +2467,7 @@ async fn thread_list_archived_filter() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         /*archived*/ None,
     )
@@ -2461,7 +2479,7 @@ async fn thread_list_archived_filter() -> Result<()> {
         &mut mcp,
         /*cursor*/ None,
         Some(10),
-        Some(vec!["mock_provider".to_string()]),
+        Some(vec!["whisply".to_string()]),
         /*source_kinds*/ None,
         Some(true),
     )
@@ -2485,7 +2503,7 @@ async fn thread_list_invalid_cursor_returns_error() -> Result<()> {
             limit: Some(2),
             sort_key: None,
             sort_direction: None,
-            model_providers: Some(vec!["mock_provider".to_string()]),
+            model_providers: Some(vec!["whisply".to_string()]),
             source_kinds: None,
             archived: None,
             section_id: None,

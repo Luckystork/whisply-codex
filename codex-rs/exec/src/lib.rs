@@ -51,7 +51,6 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_arg0::Arg0DispatchPaths;
-use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
@@ -63,7 +62,6 @@ use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigTomlLoadResult;
-use codex_core::config::bootstrap_auth_config;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_toml_with_layer_stack;
 use codex_core::config::resolve_oss_provider;
@@ -221,7 +219,7 @@ struct ExecRunArgs {
 
 fn exec_root_span() -> tracing::Span {
     info_span!(
-        "codex.exec",
+        "whisply.exec",
         otel.kind = "internal",
         thread.id = field::Empty,
         turn.id = field::Empty,
@@ -237,8 +235,11 @@ fn exec_stderr_env_filter() -> EnvFilter {
 }
 
 pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
-    if let Err(err) = set_default_originator("codex_exec".to_string()) {
-        tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
+    if let Err(err) = set_default_originator("whisply_exec".to_string()) {
+        tracing::warn!(
+            ?err,
+            "Failed to set Whisply exec originator override {err:?}"
+        );
     }
 
     let Cli {
@@ -315,7 +316,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let codex_home = match find_codex_home() {
         Ok(codex_home) => codex_home,
         Err(err) => {
-            eprintln!("Error finding codex home: {err}");
+            eprintln!("Error finding Whisply home: {err}");
             std::process::exit(1);
         }
     };
@@ -340,36 +341,16 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        bootstrap_auth_config(&codex_home, &bootstrap_config)?,
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await;
+    // Whisply deliberately keeps all runtime configuration local. The default
+    // loader resolves to no cloud bundle while retaining static local, MDM,
+    // and project configuration layers.
+    let cloud_config_bundle = CloudConfigBundleLoader::default();
     let run_cli_overrides = cli_kv_overrides.clone();
     let run_loader_overrides = loader_overrides.clone();
     let run_cloud_config_bundle = cloud_config_bundle.clone();
 
     let model_provider = if oss {
-        let bootstrap_config_with_cloud_config;
-        let config_toml_for_oss = if oss_provider.is_none() {
-            // The first load intentionally skips cloud config so we can read
-            // auth/base-url settings needed to fetch the bundle. If OSS mode
-            // needs a default provider from config, reload with the bundle.
-            bootstrap_config_with_cloud_config = load_bootstrap_config_or_exit(
-                &codex_home,
-                Some(&config_cwd),
-                cli_kv_overrides.clone(),
-                loader_overrides.clone(),
-                strict_config,
-                cloud_config_bundle.clone(),
-            )
-            .await;
-            &bootstrap_config_with_cloud_config.config_toml
-        } else {
-            bootstrap_config_toml
-        };
-
-        let resolved = resolve_oss_provider(oss_provider.as_deref(), config_toml_for_oss);
+        let resolved = resolve_oss_provider(oss_provider.as_deref(), bootstrap_config_toml);
 
         if let Some(provider) = resolved {
             Some(provider)
@@ -482,8 +463,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             None
         }
     };
-    codex_core::otel_init::record_process_start(otel.as_ref(), "codex_exec");
-    codex_core::otel_init::install_sqlite_telemetry(otel.as_ref(), "codex_exec");
+    codex_core::otel_init::record_process_start(otel.as_ref(), "whisply_exec");
+    codex_core::otel_init::install_sqlite_telemetry(otel.as_ref(), "whisply_exec");
 
     let otel_logger_layer = otel.as_ref().and_then(|o| o.logger_layer());
 
@@ -536,10 +517,11 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         log_db: None,
         state_db: state_db.clone(),
         environment_manager: std::sync::Arc::new(environment_manager),
+        managed_gateway_client: None,
         config_warnings,
         session_source: SessionSource::Exec,
-        enable_codex_api_key_env: true,
-        client_name: "codex_exec".to_string(),
+        enable_codex_api_key_env: false,
+        client_name: "whisply_exec".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
         mcp_server_openai_form_elicitation: false,
@@ -835,7 +817,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     exec_span.record("thread.id", primary_thread_id_for_span.as_str());
 
-    // Print the effective configuration and initial request so users can see what Codex
+    // Print the effective configuration and initial request so users can see what Whisply
     // is using.
     event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
     if !json_mode
@@ -845,7 +827,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         event_processor.process_warning(message);
     }
 
-    info!("Codex initialized with event: {session_configured:?}");
+    info!("Whisply initialized with event: {session_configured:?}");
 
     let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
     tokio::spawn(async move {
@@ -1712,6 +1694,20 @@ async fn handle_server_request(
                     "dynamic tool calls are not supported in exec mode for thread `{}`",
                     params.thread_id
                 ),
+            )
+            .await
+        }
+        ServerRequest::WhisplyToolExecute { request_id, .. }
+        | ServerRequest::WhisplyToolCancel { request_id, .. } => {
+            // The non-interactive executor has no authenticated native owner
+            // transport. Reject rather than treating a model-visible call id
+            // as authority or silently falling back to an upstream tool path.
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                "first-party Whisply tools are unavailable in non-interactive exec mode"
+                    .to_string(),
             )
             .await
         }

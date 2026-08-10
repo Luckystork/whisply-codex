@@ -192,6 +192,8 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ServerRequestResolved(_)
+            | ServerNotification::WhisplyToolProgress(_)
+            | ServerNotification::WhisplyToolResult(_)
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
             | ServerNotification::ThreadStarted(_)

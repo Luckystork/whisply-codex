@@ -1704,7 +1704,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn process_start_propagates_caller_trace_context_across_background_task() {
+    async fn process_start_preserves_caller_trace_context_across_background_task() {
         let (client_stdin, server_reader) = duplex(1 << 20);
         let (mut server_writer, client_stdout) = duplex(1 << 20);
         let server = tokio::spawn(async move {
@@ -1812,12 +1812,29 @@ mod tests {
         let expected_traceparent = expected_trace
             .traceparent
             .as_deref()
-            .expect("parent traceparent");
-        let traceparent = trace.traceparent.as_deref().expect("request traceparent");
-        let expected_parts = expected_traceparent.split('-').collect::<Vec<_>>();
-        let parts = traceparent.split('-').collect::<Vec<_>>();
-        assert_eq!(parts[1], expected_parts[1]);
-        assert_ne!(parts[2], expected_parts[2]);
+            .expect("parent traceparent")
+            .split('-')
+            .collect::<Vec<_>>();
+        let traceparent = trace
+            .traceparent
+            .as_deref()
+            .expect("request traceparent")
+            .split('-')
+            .collect::<Vec<_>>();
+        assert_eq!(
+            traceparent.len(),
+            4,
+            "request traceparent must be W3C-shaped"
+        );
+        assert_eq!(
+            expected_traceparent.len(),
+            4,
+            "parent traceparent must be W3C-shaped"
+        );
+        assert_eq!(traceparent[0], expected_traceparent[0]);
+        assert_eq!(traceparent[1], expected_traceparent[1]);
+        assert_ne!(traceparent[2], "0000000000000000");
+        assert_eq!(traceparent[3], expected_traceparent[3]);
         assert_eq!(trace.tracestate, expected_trace.tracestate);
     }
 

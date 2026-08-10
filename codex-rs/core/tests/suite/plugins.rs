@@ -12,7 +12,6 @@ use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
-use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_plugin::PluginId;
@@ -24,8 +23,6 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::SkillsExtensionConfig;
 use codex_skills_extension::install;
-use core_test_support::apps_test_server::AppsTestServer;
-use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
@@ -59,9 +56,7 @@ const SAMPLE_REMOTE_PLUGIN_CONFIG_NAME: &str = "sample@openai-curated-remote";
 const SAMPLE_PLUGIN_DISPLAY_NAME: &str = "sample";
 const SAMPLE_PLUGIN_DESCRIPTION: &str = "inspect sample data";
 const SAMPLE_REMOTE_PLUGIN_ID: &str = "plugins~Plugin_sample";
-const SAMPLE_PLUGIN_APP_NAMESPACE: &str = "mcp__codex_apps__google_calendar";
 const SAMPLE_PLUGIN_MCP_NAMESPACE: &str = "mcp__sample";
-const PLUGIN_APP_SEARCH_CALL_ID: &str = "plugin-app-search";
 const PLUGIN_MCP_SEARCH_CALL_ID: &str = "plugin-mcp-search";
 const REMOTE_PLUGIN_CONFIG_NAME: &str = "sample@openai-curated-remote";
 
@@ -238,27 +233,6 @@ fn block_plugin_mcp_startup(home: &TempDir, command: &str) -> std::path::PathBuf
     barrier
 }
 
-fn write_plugin_app_plugin(home: &TempDir) {
-    write_plugin_app_plugin_with_name(home, "sample");
-}
-
-fn write_plugin_app_plugin_with_name(home: &TempDir, app_name: &str) {
-    let plugin_root = write_sample_plugin_manifest_and_config(home);
-    std::fs::write(
-        plugin_root.join(".app.json"),
-        format!(
-            r#"{{
-  "apps": {{
-    "{app_name}": {{
-      "id": "calendar"
-    }}
-  }}
-}}"#
-        ),
-    )
-    .expect("write plugin app config");
-}
-
 async fn build_analytics_plugin_test_codex(
     server: &MockServer,
     codex_home: Arc<TempDir>,
@@ -277,37 +251,12 @@ async fn build_analytics_plugin_test_codex(
         .expect("create new conversation"))
 }
 
-async fn build_apps_enabled_plugin_test_codex(
-    server: &MockServer,
-    codex_home: Arc<TempDir>,
-    chatgpt_base_url: String,
-) -> Result<TestCodex> {
-    let mut builder = test_codex()
-        .with_home(codex_home)
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::Apps)
-                .expect("test config should allow feature update");
-            config.chatgpt_base_url = chatgpt_base_url;
-        });
-    Ok(builder
-        .build(server)
-        .await
-        .expect("create new conversation"))
-}
-
 async fn mount_plugin_tool_search_turn(server: &MockServer) -> ResponseMock {
     mount_sse_sequence(
         server,
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_tool_search_call(
-                    PLUGIN_APP_SEARCH_CALL_ID,
-                    &serde_json::json!({"query": "create calendar event"}),
-                ),
                 ev_tool_search_call(
                     PLUGIN_MCP_SEARCH_CALL_ID,
                     &serde_json::json!({"query": "echo"}),
@@ -331,20 +280,9 @@ fn assert_plugin_provenance(tool: &serde_json::Value) {
     );
 }
 
-fn searched_plugin_tools(
-    request: &ResponsesRequest,
-) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
-    let app_output = request.tool_search_output(PLUGIN_APP_SEARCH_CALL_ID);
+fn searched_plugin_mcp_tool(request: &ResponsesRequest) -> Option<serde_json::Value> {
     let mcp_output = request.tool_search_output(PLUGIN_MCP_SEARCH_CALL_ID);
-    (
-        namespace_child_tool(
-            &app_output,
-            SAMPLE_PLUGIN_APP_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .cloned(),
-        namespace_child_tool(&mcp_output, SAMPLE_PLUGIN_MCP_NAMESPACE, "echo").cloned(),
-    )
+    namespace_child_tool(&mcp_output, SAMPLE_PLUGIN_MCP_NAMESPACE, "echo").cloned()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -925,15 +863,10 @@ enabled = true
     Ok(())
 }
 
-#[test_case(true; "enabled app")]
-#[test_case(false; "disabled app")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_plugin_mentions_use_apps_for_chatgpt_dual_surface_plugins(
-    app_enabled: bool,
-) -> Result<()> {
+async fn explicit_local_plugin_mention_keeps_prebuilt_skill_and_mcp_noncolliding() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
-    let apps_server = AppsTestServer::mount_with_connector_name(&server, "Google Calendar").await?;
     let mock = mount_plugin_tool_search_turn(&server).await;
 
     let codex_home = Arc::new(TempDir::new()?);
@@ -944,112 +877,31 @@ async fn explicit_plugin_mentions_use_apps_for_chatgpt_dual_surface_plugins(
             return Ok(());
         }
     };
-    write_plugin_skill_plugin(codex_home.as_ref());
+    let skill_path = std::fs::canonicalize(write_plugin_skill_plugin(codex_home.as_ref()))?;
+    assert!(
+        skill_path.is_file(),
+        "local prebuilt plugin skill should be materialized at its plugin root"
+    );
     write_plugin_mcp_plugin(codex_home.as_ref(), &rmcp_test_server_bin);
-    write_plugin_app_plugin(codex_home.as_ref());
-    let config_path = codex_home.path().join("config.toml");
-    let config = std::fs::read_to_string(&config_path)?;
-    std::fs::write(
-        config_path,
-        format!("{config}\n[apps.calendar]\nenabled = {app_enabled}\n"),
-    )?;
-
-    let test_codex =
-        build_apps_enabled_plugin_test_codex(&server, codex_home, apps_server.chatgpt_base_url)
-            .await?;
-    let codex = Arc::clone(&test_codex.codex);
-    wait_for_mcp_server(&codex, CODEX_APPS_MCP_SERVER_NAME).await?;
-
-    codex
-        .submit(Op::UserInput {
-            items: vec![codex_protocol::user_input::UserInput::Mention {
-                name: "sample".into(),
-                path: format!("plugin://{SAMPLE_PLUGIN_CONFIG_NAME}"),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
-        .await?;
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    let requests = mock.requests();
-    let request = &requests[0];
-    let developer_messages = request.message_input_texts("developer");
-    assert!(
-        developer_messages
-            .iter()
-            .any(|text| text.contains("Skills from this plugin")),
-        "expected plugin skills guidance: {developer_messages:?}"
-    );
-    assert!(
-        !developer_messages
-            .iter()
-            .any(|text| text.contains("MCP servers from this plugin")),
-        "expected plugin MCP guidance to be suppressed for ChatGPT auth: {developer_messages:?}"
-    );
-    assert_eq!(
-        developer_messages
-            .iter()
-            .any(|text| text.contains("Apps from this plugin")),
-        app_enabled,
-        "plugin app guidance should match app enablement: {developer_messages:?}"
-    );
-    assert!(
-        request
-            .tool_by_name(SAMPLE_PLUGIN_MCP_NAMESPACE, "echo")
-            .is_none(),
-        "plugin MCP tool should not leak into the request for ChatGPT auth"
-    );
-    let (calendar_tool, echo_tool) = searched_plugin_tools(&requests[1]);
-    assert_eq!(
-        calendar_tool.is_some(),
-        app_enabled,
-        "plugin app tool search should match app enablement"
-    );
-    if let Some(calendar_tool) = calendar_tool {
-        assert_plugin_provenance(&calendar_tool);
-    }
-    assert!(
-        echo_tool.is_none(),
-        "plugin MCP tool should be suppressed for ChatGPT auth"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_plugin_mentions_keep_non_conflicting_mcp_for_chatgpt_auth() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-    let server = start_mock_server().await;
-    let apps_server = AppsTestServer::mount_with_connector_name(&server, "Google Calendar").await?;
-    let mock = mount_plugin_tool_search_turn(&server).await;
-
-    let codex_home = Arc::new(TempDir::new()?);
-    let rmcp_test_server_bin = match stdio_server_bin() {
-        Ok(bin) => bin,
-        Err(err) => {
-            eprintln!("test_stdio_server binary not available, skipping test: {err}");
-            return Ok(());
-        }
-    };
-    write_plugin_skill_plugin(codex_home.as_ref());
-    write_plugin_mcp_plugin(codex_home.as_ref(), &rmcp_test_server_bin);
-    write_plugin_app_plugin_with_name(codex_home.as_ref(), "sample_app");
-
-    let test_codex =
-        build_apps_enabled_plugin_test_codex(&server, codex_home, apps_server.chatgpt_base_url)
-            .await?;
+    let mut builder = test_codex()
+        .with_home(codex_home)
+        .with_auth(CodexAuth::from_api_key("Test API Key"));
+    let test_codex = builder.build(&server).await?;
     let codex = Arc::clone(&test_codex.codex);
     wait_for_mcp_server(&codex, "sample").await?;
 
     codex
         .submit(Op::UserInput {
-            items: vec![codex_protocol::user_input::UserInput::Mention {
-                name: "sample".into(),
-                path: format!("plugin://{SAMPLE_PLUGIN_CONFIG_NAME}"),
-            }],
+            items: vec![
+                codex_protocol::user_input::UserInput::Mention {
+                    name: "sample".into(),
+                    path: format!("plugin://{SAMPLE_PLUGIN_CONFIG_NAME}"),
+                },
+                codex_protocol::user_input::UserInput::Skill {
+                    name: "sample:sample-search".into(),
+                    path: skill_path,
+                },
+            ],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -1065,21 +917,24 @@ async fn explicit_plugin_mentions_keep_non_conflicting_mcp_for_chatgpt_auth() ->
         developer_messages
             .iter()
             .any(|text| text.contains("MCP servers from this plugin")),
-        "expected plugin MCP guidance to remain visible for non-conflicting app declaration: {developer_messages:?}"
+        "expected local plugin MCP guidance: {developer_messages:?}"
     );
     assert!(
         developer_messages
             .iter()
-            .any(|text| text.contains("Apps from this plugin")),
-        "expected plugin app guidance: {developer_messages:?}"
+            .any(|text| text.contains("Skills from this plugin")),
+        "expected prebuilt plugin skill guidance: {developer_messages:?}"
     );
-    let (calendar_tool, echo_tool) = searched_plugin_tools(&requests[1]);
-    assert!(
-        calendar_tool.is_some(),
-        "plugin app tool should be searchable"
-    );
-    let echo_tool = echo_tool.expect("plugin MCP tool should remain searchable");
+    let echo_tool = searched_plugin_mcp_tool(&requests[1])
+        .expect("local plugin MCP tool should remain searchable");
     assert_plugin_provenance(&echo_tool);
+    assert!(
+        request
+            .message_input_texts("user")
+            .iter()
+            .any(|message| message.contains("sample:sample-search")),
+        "explicit local plugin skill should reach the model request"
+    );
 
     Ok(())
 }
@@ -1097,7 +952,9 @@ enum ExplicitMcpRequest {
 #[test_case(ExplicitMcpRequest::ServerMention; "MCP server mention")]
 #[test_case(ExplicitMcpRequest::LinkedServerMention; "linked MCP server mention")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicitly_requested_mcp_waits_for_startup(request: ExplicitMcpRequest) -> Result<()> {
+async fn explicitly_requested_local_plugin_mcp_waits_for_startup(
+    request: ExplicitMcpRequest,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let mock = mount_plugin_tool_search_turn(&server).await;
@@ -1112,18 +969,11 @@ async fn explicitly_requested_mcp_waits_for_startup(request: ExplicitMcpRequest)
     };
     let skill_path = std::fs::canonicalize(write_plugin_skill_plugin(codex_home.as_ref()))?;
     write_plugin_mcp_plugin(codex_home.as_ref(), &rmcp_test_server_bin);
-    write_plugin_app_plugin(codex_home.as_ref());
     let initialize_barrier = block_plugin_mcp_startup(codex_home.as_ref(), &rmcp_test_server_bin);
 
     let mut builder = test_codex()
         .with_home(codex_home)
-        .with_auth(CodexAuth::from_api_key("Test API Key"))
-        .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::Apps)
-                .expect("test config should allow feature update");
-        });
+        .with_auth(CodexAuth::from_api_key("Test API Key"));
     let test_codex = builder
         .build(&server)
         .await
@@ -1191,24 +1041,8 @@ async fn explicitly_requested_mcp_waits_for_startup(request: ExplicitMcpRequest)
             "expected explicitly requested skill instructions: {user_messages:?}"
         );
     }
-    assert!(
-        !developer_messages
-            .iter()
-            .any(|text| text.contains("Apps from this plugin")),
-        "expected plugin app guidance to be suppressed for API-key auth: {developer_messages:?}"
-    );
-    assert!(
-        model_request
-            .tool_by_name(SAMPLE_PLUGIN_APP_NAMESPACE, SEARCH_CALENDAR_CREATE_TOOL)
-            .is_none(),
-        "plugin app tool should not leak into the request for API-key auth"
-    );
-    let (calendar_tool, echo_tool) = searched_plugin_tools(&requests[1]);
-    assert!(
-        calendar_tool.is_none(),
-        "plugin app tool should be hidden for API-key auth"
-    );
-    let echo_tool = echo_tool.expect("plugin MCP tool should be searchable");
+    let echo_tool =
+        searched_plugin_mcp_tool(&requests[1]).expect("local plugin MCP tool should be searchable");
     assert_plugin_provenance(&echo_tool);
 
     Ok(())

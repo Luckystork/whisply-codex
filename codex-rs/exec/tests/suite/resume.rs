@@ -135,7 +135,7 @@ async fn exec_resume_last_appends_to_existing_file() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = responses::mount_sse_sequence(
         &server,
         vec![
@@ -210,7 +210,7 @@ async fn exec_resume_last_repairs_rollout_missing_from_state_db() -> anyhow::Res
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
     let repo_root = exec_repo_root()?;
 
@@ -262,7 +262,7 @@ async fn exec_resume_last_trusts_usable_state_db_candidate() -> anyhow::Result<(
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 3).await;
     let repo_root = exec_repo_root()?;
     let sessions_dir = test.home_path().join("sessions");
@@ -333,7 +333,7 @@ async fn exec_resume_last_skips_mismatched_state_db_candidate() -> anyhow::Resul
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 3).await;
     let repo_root = exec_repo_root()?;
     let sessions_dir = test.home_path().join("sessions");
@@ -397,7 +397,7 @@ async fn exec_resume_last_accepts_prompt_after_flag_in_json_mode() -> anyhow::Re
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
     let repo_root = exec_repo_root()?;
 
@@ -450,7 +450,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 5).await;
 
     let dir_a = TempDir::new()?;
@@ -555,7 +555,7 @@ async fn exec_resume_accepts_global_flags_after_subcommand() -> anyhow::Result<(
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
 
     // Seed a session.
@@ -566,13 +566,9 @@ async fn exec_resume_accepts_global_flags_after_subcommand() -> anyhow::Result<(
         .success();
 
     // Resume while passing global flags after the subcommand to ensure clap accepts them.
-    let base = format!("{}/v1", server.uri());
-    let base_config = format!("openai_base_url={}", serde_json::to_string(&base)?);
-    test.cmd()
+    test.cmd_with_server(&server)
         .arg("resume")
         .arg("--last")
-        .arg("--config")
-        .arg(base_config)
         .arg("--json")
         .arg("--model")
         .arg("gpt-5.2-codex")
@@ -592,7 +588,7 @@ async fn exec_resume_includes_output_schema_in_request() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let response_mock = mount_exec_responses(&server, /*count*/ 2).await;
 
     let schema_contents = serde_json::json!({
@@ -648,7 +644,7 @@ async fn exec_resume_by_id_appends_to_existing_file() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
     let repo_root = exec_repo_root()?;
 
@@ -704,7 +700,7 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
     let repo_root = exec_repo_root()?;
 
@@ -779,7 +775,7 @@ async fn exec_resume_accepts_images_after_subcommand() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = responses::start_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
     let repo_root = exec_repo_root()?;
 

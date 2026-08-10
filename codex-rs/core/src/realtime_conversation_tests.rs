@@ -3,9 +3,11 @@ use super::HANDOFF_STREAM_TRUNCATION_MARKER;
 use super::RealtimeHandoffState;
 use super::RealtimeSessionKind;
 use super::RealtimeStreamedItem;
+use super::WHISPLY_REALTIME_UNAVAILABLE_ERROR;
 use super::realtime_delegation_from_handoff;
 use super::realtime_request_headers;
 use super::realtime_text_from_handoff_request;
+use super::reject_direct_realtime_authority;
 use super::wrap_realtime_delegation_input;
 use crate::context::RealtimeDelegationSource;
 use async_channel::bounded;
@@ -19,6 +21,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
+
+#[test]
+fn broker_only_runtime_rejects_realtime_before_direct_provider_resolution() {
+    let error =
+        reject_direct_realtime_authority().expect_err("Whisply has no brokered realtime authority");
+
+    assert_eq!(error.to_string(), WHISPLY_REALTIME_UNAVAILABLE_ERROR);
+}
 
 #[test]
 fn prefers_handoff_input_transcript_over_active_transcript() {

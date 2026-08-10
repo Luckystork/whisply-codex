@@ -30,16 +30,12 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
-use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
-use codex_protocol::protocol::RealtimeEvent;
-use codex_protocol::protocol::RealtimeOutputModality;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::user_input::UserInput;
@@ -213,6 +209,10 @@ fn test_codex() -> TestCodexBuilder {
     })
 }
 
+// Direct realtime transport is unavailable in Whisply's BrokerOnly runtime.
+// Keep these historical remote-compaction fixtures out of the Whisply test
+// target while retaining the non-realtime compaction coverage in this module.
+#[cfg(any())]
 fn remote_realtime_test_codex_builder(
     realtime_server: &responses::WebSocketTestServer,
 ) -> TestCodexBuilder {
@@ -224,6 +224,7 @@ fn remote_realtime_test_codex_builder(
         })
 }
 
+#[cfg(any())]
 async fn start_remote_realtime_server() -> responses::WebSocketTestServer {
     start_websocket_server(vec![vec![
         vec![json!({
@@ -244,6 +245,7 @@ async fn start_remote_realtime_server() -> responses::WebSocketTestServer {
     .await
 }
 
+#[cfg(any())]
 async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<()> {
     codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
@@ -292,6 +294,7 @@ async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
     Ok(())
 }
 
+#[cfg(any())]
 async fn close_realtime_conversation(codex: &codex_core::CodexThread) -> Result<()> {
     codex.submit(Op::RealtimeConversationClose).await?;
     wait_for_event_match(codex, |msg| match msg {
@@ -302,6 +305,7 @@ async fn close_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
     Ok(())
 }
 
+#[cfg(any())]
 fn assert_request_contains_realtime_start(request: &responses::ResponsesRequest) {
     let body = request.body_json().to_string();
     assert!(
@@ -310,6 +314,7 @@ fn assert_request_contains_realtime_start(request: &responses::ResponsesRequest)
     );
 }
 
+#[cfg(any())]
 fn assert_request_contains_custom_realtime_start(
     request: &responses::ResponsesRequest,
     instructions: &str,
@@ -329,6 +334,7 @@ fn assert_request_contains_custom_realtime_start(
     );
 }
 
+#[cfg(any())]
 fn assert_request_contains_realtime_end(request: &responses::ResponsesRequest) {
     let body = request.body_json().to_string();
     assert!(
@@ -3232,6 +3238,7 @@ async fn remote_compact_refreshes_stale_developer_instructions_without_resume() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(any())]
 async fn snapshot_request_shape_remote_pre_turn_compaction_restates_realtime_start() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3324,6 +3331,7 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_restates_realtime_sta
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(any())]
 async fn remote_request_uses_custom_experimental_realtime_start_instructions() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3374,6 +3382,7 @@ async fn remote_request_uses_custom_experimental_realtime_start_instructions() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(any())]
 async fn active_realtime_does_not_diff_changed_start_instructions_after_resume() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3446,6 +3455,7 @@ async fn active_realtime_does_not_diff_changed_start_instructions_after_resume()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(any())]
 async fn snapshot_request_shape_remote_manual_compact_restates_realtime_start() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3539,6 +3549,7 @@ async fn snapshot_request_shape_remote_manual_compact_restates_realtime_start() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(any())]
 async fn snapshot_request_shape_remote_mid_turn_compaction_does_not_restate_realtime_end()
 -> Result<()> {
     skip_if_no_network!(Ok(()));

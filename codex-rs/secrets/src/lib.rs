@@ -18,6 +18,7 @@ mod sanitizer;
 
 pub use local::LocalSecretsBackend;
 pub use local::LocalSecretsNamespace;
+pub use sanitizer::redact_mcp_stderr;
 pub use sanitizer::redact_secrets;
 
 const KEYRING_SERVICE: &str = "codex";

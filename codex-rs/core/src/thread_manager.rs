@@ -39,7 +39,9 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use codex_login::default_client::originator;
+use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::create_model_provider_with_managed_gateway;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
@@ -82,6 +84,7 @@ use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
 use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_whisply::ManagedGatewayClient;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
@@ -313,6 +316,7 @@ pub(crate) struct ThreadManagerState {
     thread_created_tx: broadcast::Sender<ThreadId>,
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
+    managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
     skills_service: Arc<HostSkillsService>,
@@ -336,7 +340,21 @@ pub fn build_models_manager(
     config: &Config,
     auth_manager: Arc<AuthManager>,
 ) -> SharedModelsManager {
-    let provider = create_model_provider(config.model_provider.clone(), Some(auth_manager));
+    build_models_manager_with_managed_gateway(config, auth_manager, None)
+}
+
+/// Builds models without requiring an embedded runtime to initialize the
+/// process-global launch-descriptor client.
+pub fn build_models_manager_with_managed_gateway(
+    config: &Config,
+    auth_manager: Arc<AuthManager>,
+    managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
+) -> SharedModelsManager {
+    let provider = create_model_provider_with_managed_gateway(
+        config.model_provider.clone(),
+        Some(auth_manager),
+        managed_gateway_client,
+    );
     provider.models_manager(
         config.codex_home.to_path_buf(),
         config.model_catalog.clone(),
@@ -422,6 +440,7 @@ impl ThreadManager {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
                 models_manager,
+                managed_gateway_client: None,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
@@ -454,6 +473,19 @@ impl ThreadManager {
             unreachable!("code-mode session provider must be set before thread manager is shared");
         };
         state.code_mode_session_provider = provider;
+        self
+    }
+
+    /// Installs a host-owned managed gateway before this manager is shared
+    /// with threads. Production callers leave this unset.
+    pub fn with_managed_gateway_client(
+        mut self,
+        managed_gateway_client: Arc<ManagedGatewayClient>,
+    ) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!("managed gateway client must be set before thread manager is shared");
+        };
+        state.managed_gateway_client = Some(managed_gateway_client);
         self
     }
 
@@ -555,6 +587,7 @@ impl ThreadManager {
                 thread_created_tx,
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
                     .models_manager(codex_home, /*config_model_catalog*/ None),
+                managed_gateway_client: None,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
@@ -586,6 +619,19 @@ impl ThreadManager {
 
     pub fn auth_manager(&self) -> Arc<AuthManager> {
         self.state.auth_manager.clone()
+    }
+
+    /// Resolves a provider for a detached task owned by this thread manager.
+    ///
+    /// Embedded hosts may install a typed managed gateway on the manager.
+    /// Detached tasks must retain that client instead of rebuilding a provider
+    /// from config and falling back to process launch state.
+    pub fn model_provider_for_config(&self, config: &Config) -> SharedModelProvider {
+        create_model_provider_with_managed_gateway(
+            config.model_provider.clone(),
+            Some(self.auth_manager()),
+            self.state.managed_gateway_client.clone(),
+        )
     }
 
     pub fn skills_service(&self) -> Arc<HostSkillsService> {
@@ -1700,6 +1746,7 @@ impl ThreadManagerState {
             installation_id: self.installation_id.clone(),
             auth_manager,
             models_manager: Arc::clone(&self.models_manager),
+            managed_gateway_client: self.managed_gateway_client.clone(),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: Arc::clone(&self.plugins_manager),

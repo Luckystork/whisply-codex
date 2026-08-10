@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::migration_source::MarketplaceImportSource;
 use crate::source_cla;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -244,6 +245,30 @@ fn marketplace_import_sources_infers_bundled_claude_code_marketplace() {
     );
 }
 
+#[test]
+fn marketplace_import_sources_infers_bundled_claude_official_marketplace() {
+    let (_root, external_agent_home, _codex_home) = fixture_paths();
+    let settings = serde_json::json!({
+        "enabledPlugins": {
+            "sample@claude-plugins-official": true,
+        }
+    });
+
+    let import_sources = source_cla::marketplace_import_sources(
+        &settings,
+        &external_agent_home,
+        &external_agent_home,
+    );
+
+    assert_eq!(
+        import_sources.get("claude-plugins-official"),
+        Some(&MarketplaceImportSource {
+            source: "anthropics/claude-plugins-official".to_string(),
+            ref_name: None,
+        })
+    );
+}
+
 #[tokio::test]
 async fn detect_home_plugins_uses_local_settings_over_project_settings() {
     let (_root, external_agent_home, codex_home) = fixture_paths();
@@ -476,7 +501,7 @@ async fn detect_repo_does_not_skip_plugins_only_configured_in_project_codex() {
     let repo_root = root.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).expect("create git dir");
     fs::create_dir_all(repo_root.join(EXTERNAL_AGENT_DIR)).expect("create repo external agent dir");
-    fs::create_dir_all(repo_root.join(".codex")).expect("create repo codex dir");
+    fs::create_dir_all(repo_root.join(PROJECT_CONFIG_DIRECTORY)).expect("create repo Whisply dir");
     fs::create_dir_all(&codex_home).expect("create codex home");
     fs::write(
         repo_root.join(EXTERNAL_AGENT_DIR).join("settings.json"),
@@ -493,7 +518,7 @@ async fn detect_repo_does_not_skip_plugins_only_configured_in_project_codex() {
     )
     .expect("write repo settings");
     fs::write(
-        repo_root.join(".codex").join("config.toml"),
+        repo_root.join(PROJECT_CONFIG_DIRECTORY).join("config.toml"),
         r#"
 [plugins."formatter@acme-tools"]
 enabled = true

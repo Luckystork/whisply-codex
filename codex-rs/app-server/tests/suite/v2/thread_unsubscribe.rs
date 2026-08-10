@@ -1,5 +1,7 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientRequest;
@@ -39,11 +41,11 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 async fn thread_unsubscribe_keeps_thread_loaded_until_idle_timeout() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -119,11 +121,11 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running() -> Result<()> {
     .await;
     let first_response_completed = completions.remove(0);
     let final_response_completed = completions.remove(0);
-    MockResponsesConfig::new(server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
         .write(&codex_home)?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(&codex_home)
         .build_initialized()
         .await?;
@@ -242,11 +244,11 @@ async fn thread_unsubscribe_preserves_cached_status_before_idle_unload() -> Resu
     )
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -327,11 +329,11 @@ async fn thread_unsubscribe_preserves_cached_status_before_idle_unload() -> Resu
 async fn thread_unsubscribe_reports_not_subscribed_before_idle_unload() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
         .write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;

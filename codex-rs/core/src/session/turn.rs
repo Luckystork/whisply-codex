@@ -1427,11 +1427,9 @@ pub(crate) async fn prepare_tool_recommendations(
         .instrument(trace_span!("built_tools.load_plugins"))
         .await;
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
-    let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
-    } else {
-        None
-    };
+    // BrokerOnly recommendations may enumerate locally configured plugins, but
+    // never use persisted credentials to select the remote catalog.
+    let auth: Option<CodexAuth> = None;
     let endpoint_candidates = if tool_suggest_is_enabled {
         let plugins_config = turn_context.config.plugins_config_input();
         sess.services

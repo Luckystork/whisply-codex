@@ -1,5 +1,7 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -41,9 +43,9 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
     )
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -71,12 +73,12 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
 
     let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     let state_db =
-        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+        codex_state::StateRuntime::init(sqlite.clone(), "whisply".to_string()).await?;
     let store = LocalThreadStore::new(
         LocalThreadStoreConfig {
             codex_home: codex_home.path().to_path_buf(),
             sqlite,
-            default_model_provider_id: "mock_provider".to_string(),
+            default_model_provider_id: "whisply".to_string(),
         },
         Some(state_db),
     );
@@ -91,7 +93,7 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
     assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
     drop(store);
 
-    let mut secondary = TestAppServer::builder()
+    let mut secondary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;

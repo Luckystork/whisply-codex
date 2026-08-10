@@ -43,6 +43,7 @@ use codex_config::types::MemoriesConfig;
 use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::Notice;
 use codex_config::types::OAuthCredentialsStoreMode;
+use codex_config::types::OtelExporterKind;
 use codex_config::types::ResumeCwdMode;
 use codex_config::types::SessionPickerViewMode;
 use codex_config::types::ToolSuggestConfig;
@@ -77,6 +78,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_install_context::InstallContext;
 use codex_login::AuthManagerConfig;
 use codex_login::AuthRouteConfig;
+use codex_login::AuthSourceMode;
 use codex_mcp::McpConfig;
 use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpProtocolMode;
@@ -84,9 +86,12 @@ use codex_mcp::McpServerRegistration;
 use codex_mcp::ResolvedMcpCatalog;
 use codex_memories_read::memory_root;
 use codex_model_provider::ProviderCapabilities;
+use codex_model_provider::whisply_provider_info;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
+use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
+use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -118,7 +123,7 @@ pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_utils_path_uri::PathUri;
-use http::HeaderValue;
+use codex_whisply::WHISPLY_PROVIDER_ID;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::FormElicitationCapability;
 use rmcp::model::UrlElicitationCapability;
@@ -1370,6 +1375,10 @@ impl AuthManagerConfig for Config {
     fn auth_route_config(&self) -> AuthRouteConfig {
         Config::auth_route_config(self)
     }
+
+    fn auth_source_mode(&self) -> AuthSourceMode {
+        AuthSourceMode::BrokerOnly
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1647,12 +1656,11 @@ impl Config {
         } else {
             OutboundProxyPolicy::ReqwestDefault
         };
-        let factory = HttpClientFactory::new(outbound_proxy_policy);
-        if self.psp {
-            factory.with_chatgpt_cookies([HeaderValue::from_static("oai-chat-psp=true")])
-        } else {
-            factory
-        }
+        // `psp` is retained only as a compatibility/session-shape field for
+        // upstream callers. It is never an authentication or route signal in
+        // Whisply, and must not inject an upstream product cookie into managed
+        // gateway, account, or extension traffic.
+        HttpClientFactory::new(outbound_proxy_policy)
     }
 
     /// Build the plugin-manager input from the effective config.
@@ -2612,6 +2620,83 @@ pub struct ConfigOverrides {
     pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
 }
 
+/// Rejects configuration that could route a public Whisply turn through a
+/// user-selected hosted provider. The release-owned broker descriptors are
+/// the only authority for the managed gateway; credentials, base URLs, and
+/// provider maps from configuration must never become an alternate route.
+///
+/// Local OSS providers remain explicit local-only boundaries. They may be
+/// selected by the existing `--oss` / `--local-provider` flow, but are never a
+/// fallback for the managed gateway.
+fn validate_whisply_provider_authority(
+    cfg: &ConfigToml,
+    override_provider: Option<&str>,
+) -> std::io::Result<()> {
+    if cfg.openai_base_url.is_some() || cfg.chatgpt_base_url.is_some() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Whisply does not permit configured hosted provider base URLs; the managed gateway is release-owned",
+        ));
+    }
+    if !cfg.model_providers.is_empty() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Whisply does not permit configured model providers or provider credentials",
+        ));
+    }
+    if cfg.experimental_realtime_ws_base_url.is_some()
+        || cfg.experimental_realtime_webrtc_call_base_url.is_some()
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Whisply does not permit configured realtime endpoint overrides; the managed broker has no realtime contract",
+        ));
+    }
+    if cfg.experimental_thread_config_endpoint.is_some() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Whisply does not permit configured remote thread-config endpoints; thread config remains local in BrokerOnly",
+        ));
+    }
+    if cfg.otel.as_ref().is_some_and(|otel| {
+        [
+            otel.exporter.as_ref(),
+            otel.trace_exporter.as_ref(),
+            otel.metrics_exporter.as_ref(),
+        ]
+        .into_iter()
+        .any(|exporter| exporter.is_some_and(|kind| !matches!(kind, OtelExporterKind::None)))
+    }) {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Whisply does not permit OTEL exporters; telemetry remains local in BrokerOnly",
+        ));
+    }
+
+    for provider in cfg
+        .model_provider
+        .iter()
+        .map(String::as_str)
+        .chain(override_provider)
+    {
+        if !matches!(
+            provider,
+            WHISPLY_PROVIDER_ID
+                | LMSTUDIO_OSS_PROVIDER_ID
+                | OLLAMA_OSS_PROVIDER_ID
+                // Preserve the established migration diagnostic below; this
+                // legacy spelling still never resolves to a provider.
+                | LEGACY_OLLAMA_CHAT_PROVIDER_ID
+        ) {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Whisply supports only the managed gateway or an explicitly selected local OSS provider",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {
     let mut seen = HashSet::new();
     paths.retain(|path| seen.insert(path.clone()));
@@ -3294,6 +3379,7 @@ impl Config {
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
         } = overrides;
+        validate_whisply_provider_authority(&cfg, model_provider.as_deref())?;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
         if bypass_hook_trust {
@@ -3719,18 +3805,18 @@ impl Config {
             agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
                 .await?;
 
-        let openai_base_url = cfg
-            .openai_base_url
-            .clone()
-            .filter(|value| !value.is_empty());
-
-        let model_providers =
-            merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
-                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+        // The public runtime has exactly one hosted route: the managed
+        // Whisply gateway. The only other selectable providers are explicit
+        // local OSS boundaries; user configuration cannot install a remote
+        // base URL, credential source, Bedrock profile, or replacement map.
+        let mut built_in_providers = built_in_model_providers(None);
+        built_in_providers.insert(WHISPLY_PROVIDER_ID.to_string(), whisply_provider_info());
+        let model_providers = merge_configured_model_providers(built_in_providers, cfg.model_providers)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
 
         let model_provider_id = model_provider
             .or(cfg.model_provider)
-            .unwrap_or_else(|| "openai".to_string());
+            .unwrap_or_else(|| WHISPLY_PROVIDER_ID.to_string());
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -4641,16 +4727,23 @@ fn normalize_guardian_policy_config(value: Option<&str>) -> Option<String> {
     })
 }
 
-/// Returns the path to the Codex configuration directory, which can be
-/// specified by the `CODEX_HOME` environment variable. If not set, defaults to
-/// `~/.codex`.
+/// Returns the path to the Whisply configuration directory, which can be
+/// specified by the `WHISPLY_HOME` environment variable. If not set, defaults
+/// to `~/.whisply`.
 ///
-/// - If `CODEX_HOME` is set, the value must exist and be a directory. The
-///   value will be canonicalized and this function will Err otherwise.
-/// - If `CODEX_HOME` is not set, this function does not verify that the
+/// - If `WHISPLY_HOME` is set, the value must exist and be a directory. The
+///   final path must not be a symlink; the value will be canonicalized and this
+///   function will Err otherwise.
+/// - If `WHISPLY_HOME` is not set, this function does not verify that the
 ///   directory exists.
+pub fn find_whisply_home() -> std::io::Result<AbsolutePathBuf> {
+    codex_utils_home_dir::find_whisply_home()
+}
+
+/// Compatibility alias for upstream-internal call sites. New Whisply-owned
+/// code must use [`find_whisply_home`].
 pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
-    codex_utils_home_dir::find_codex_home()
+    find_whisply_home()
 }
 
 /// Returns the path to the folder where Codex logs are stored. Does not verify

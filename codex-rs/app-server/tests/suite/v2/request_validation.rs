@@ -1,6 +1,6 @@
 use anyhow::Result;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
-use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
@@ -23,11 +23,7 @@ const REMOTE_IMAGE_URL_ERROR: &str =
 #[tokio::test]
 async fn request_handlers_reject_remote_image_urls() -> Result<()> {
     let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        "http://localhost/unused",
-        "http://localhost/unused",
-    )?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)

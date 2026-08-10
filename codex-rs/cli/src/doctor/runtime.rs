@@ -1,4 +1,4 @@
-//! Captures how this Codex process was launched.
+//! Captures how this Whisply process was launched.
 //!
 //! Runtime diagnostics answer provenance questions that are hard to infer from
 //! user reports: which binary is running, which install channel it resembles,
@@ -10,6 +10,9 @@ use std::process::Command;
 
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
+use codex_whisply::UPSTREAM_COMMIT;
+use codex_whisply::UPSTREAM_TAG;
+use codex_whisply::WHISPLY_RUNTIME_VERSION;
 
 use super::CheckStatus;
 use super::DoctorCheck;
@@ -17,7 +20,7 @@ use super::describe_install_context;
 use super::doctor_install_context;
 use super::push_path_detail;
 
-/// Builds the process provenance row for the current Codex executable.
+/// Builds the process provenance row for the current Whisply executable.
 ///
 /// This check is informational and should not fail on its own; inconsistent
 /// install state is reported by the installation and update checks instead.
@@ -29,7 +32,9 @@ pub(super) fn runtime_check() -> DoctorCheck {
     let platform = format!("{os}-{arch}");
     let install_method = install_method_name(&install_context);
     let mut details = vec![
-        format!("version: {}", env!("CARGO_PKG_VERSION")),
+        format!("runtime version: {WHISPLY_RUNTIME_VERSION}"),
+        format!("upstream tag: {UPSTREAM_TAG}"),
+        format!("upstream commit: {UPSTREAM_COMMIT}"),
         format!("platform: {platform}"),
         format!(
             "install method: {}",
@@ -111,7 +116,7 @@ pub(super) fn search_check() -> DoctorCheck {
     };
     let mut check = DoctorCheck::new("runtime.search", "search", status, summary).details(details);
     if status != CheckStatus::Ok {
-        check = check.remediation("Install ripgrep or repair the bundled Codex package.");
+        check = check.remediation("Install ripgrep or repair the bundled Whisply Runtime.");
     }
     check
 }

@@ -1,7 +1,6 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
-use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -14,9 +13,8 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 #[tokio::test]
 async fn thread_loaded_list_returns_loaded_thread_ids() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -41,9 +39,8 @@ async fn thread_loaded_list_returns_loaded_thread_ids() -> Result<()> {
 
 #[tokio::test]
 async fn thread_loaded_list_paginates() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

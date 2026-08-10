@@ -17,7 +17,6 @@ use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_login::default_client::originator;
 use codex_model_provider::ModelProvider;
 use codex_model_provider::SharedModelProvider;
-use codex_model_provider::create_model_provider;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::SessionId;
@@ -116,10 +115,7 @@ impl MemoryStartupContext {
         config: &Config,
         source: SessionSource,
     ) -> Self {
-        let provider = create_model_provider(
-            config.model_provider.clone(),
-            Some(Arc::clone(&auth_manager)),
-        );
+        let provider = thread_manager.model_provider_for_config(config);
         Self::new_with_provider(
             thread_manager,
             auth_manager,
@@ -248,11 +244,10 @@ impl MemoryStartupContext {
         let session_source = config_snapshot.session_source;
         let session_id = SessionId::from(self.thread_id);
         let session_id_string = session_id.to_string();
-        let model_client = ModelClient::new(
-            Some(Arc::clone(&self.auth_manager)),
+        let model_client = ModelClient::new_with_model_provider(
+            Arc::clone(&self.provider),
             AgentIdentityAuthPolicy::JwtOnly,
             self.thread_id,
-            config.model_provider.clone(),
             session_source.clone(),
             config_snapshot.originator,
             config.model_verbosity,

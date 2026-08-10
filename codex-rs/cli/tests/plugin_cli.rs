@@ -1,4 +1,5 @@
 use anyhow::Result;
+use anyhow::ensure;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::MarketplaceConfigUpdate;
 use codex_config::record_user_marketplace;
@@ -8,7 +9,9 @@ use predicates::str::contains;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
+use wiremock::MockServer;
 
 const MARKETPLACE_HEADER: &str = "MARKETPLACE";
 const MARKETPLACE_LIST_HEADER: &str = "MARKETPLACE  ROOT";
@@ -22,8 +25,9 @@ fn marketplace_list_row(marketplace_name: &str, root: &Path) -> String {
 }
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
-    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home);
+    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("whisply")?);
+    cmd.env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home);
     cmd.env("HOME", codex_home);
     Ok(cmd)
 }
@@ -127,6 +131,58 @@ fn setup_local_marketplace() -> Result<(TempDir, TempDir)> {
         &configured_local_marketplace(&source_path),
     )?;
     Ok((codex_home, source))
+}
+
+fn setup_local_marketplace_with_git_plugin_source() -> Result<(TempDir, TempDir)> {
+    let codex_home = TempDir::new()?;
+    let source = TempDir::new()?;
+    write_plugins_enabled_config(codex_home.path())?;
+    let git_plugin_source = source.path().join("git-plugin-source");
+    std::fs::create_dir_all(git_plugin_source.join(".codex-plugin"))?;
+    std::fs::write(
+        git_plugin_source.join(".codex-plugin/plugin.json"),
+        r#"{"name":"git-plugin","version":"1.2.3"}"#,
+    )?;
+    initialize_git_repository(&git_plugin_source)?;
+    write_marketplace_source_with_manifest(
+        source.path(),
+        r#"{
+  "name": "debug",
+  "plugins": [
+    {
+      "name": "git-plugin",
+      "source": {
+        "source": "url",
+        "url": "./git-plugin-source"
+      }
+    }
+  ]
+}"#,
+    )?;
+    let source_path = source.path().to_string_lossy().into_owned();
+    record_user_marketplace(
+        codex_home.path(),
+        "debug",
+        &configured_local_marketplace(&source_path),
+    )?;
+    Ok((codex_home, source))
+}
+
+fn initialize_git_repository(repository: &Path) -> Result<()> {
+    for args in [
+        ["init"].as_slice(),
+        ["config", "user.email", "codex-test@example.com"].as_slice(),
+        ["config", "user.name", "Codex Test"].as_slice(),
+        ["add", "."].as_slice(),
+        ["commit", "-m", "initial"].as_slice(),
+    ] {
+        let status = Command::new("git")
+            .current_dir(repository)
+            .args(args)
+            .status()?;
+        ensure!(status.success(), "git {} failed", args.join(" "));
+    }
+    Ok(())
 }
 
 fn setup_unconfigured_local_marketplace() -> Result<(TempDir, TempDir)> {
@@ -367,6 +423,45 @@ async fn marketplace_list_json_prints_configured_marketplaces() -> Result<()> {
         })
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_and_marketplace_cli_use_local_policy_without_network_io() -> Result<()> {
+    let (codex_home, _source) = setup_local_marketplace()?;
+    let outbound_probe = MockServer::start().await;
+    let proxy_uri = outbound_probe.uri();
+
+    for args in [
+        vec!["plugin", "marketplace", "list"],
+        vec!["plugin", "list"],
+        vec!["plugin", "add", "sample@debug"],
+    ] {
+        codex_command(codex_home.path())?
+            .env("HTTP_PROXY", &proxy_uri)
+            .env("http_proxy", &proxy_uri)
+            .env("HTTPS_PROXY", &proxy_uri)
+            .env("https_proxy", &proxy_uri)
+            .env_remove("ALL_PROXY")
+            .env_remove("all_proxy")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("CODEX_ACCESS_TOKEN")
+            .env_remove("CODEX_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .args(args)
+            .assert()
+            .success();
+    }
+
+    assert!(
+        outbound_probe
+            .received_requests()
+            .await
+            .expect("probe should record requests")
+            .is_empty(),
+        "local plugin and marketplace CLI commands must not use the configured proxy"
+    );
     Ok(())
 }
 
@@ -1011,6 +1106,19 @@ async fn plugin_add_rejects_unconfigured_repo_local_marketplaces() -> Result<()>
             "plugin `sample` was not found in marketplace `debug`",
         ));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_add_materializes_user_configured_git_sources() -> Result<()> {
+    let (codex_home, _source) = setup_local_marketplace_with_git_plugin_source()?;
+    codex_command(codex_home.path())?
+        .args(["plugin", "add", "git-plugin@debug"])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE))?;
+    assert!(config.contains(r#"[plugins."git-plugin@debug"]"#));
     Ok(())
 }
 

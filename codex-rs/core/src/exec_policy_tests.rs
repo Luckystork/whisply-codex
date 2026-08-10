@@ -8,6 +8,7 @@ use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_config::LoaderOverrides;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_config::RequirementSource;
 use codex_config::RequirementsExecPolicy;
 use codex_config::Sourced;
@@ -2274,8 +2275,10 @@ async fn exec_policies_only_load_from_trusted_project_layers() -> std::io::Resul
     let codex_home = temp.path().join("home_execpolicy_nested");
     let project_root = temp.path().join("project_execpolicy_nested");
     let nested = project_root.join("nested");
-    let root_rules = project_root.join(".codex").join(RULES_DIR_NAME);
-    let nested_rules = nested.join(".codex").join(RULES_DIR_NAME);
+    let root_rules = project_root
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join(RULES_DIR_NAME);
+    let nested_rules = nested.join(PROJECT_CONFIG_DIRECTORY).join(RULES_DIR_NAME);
 
     fs::create_dir_all(&codex_home)?;
     fs::create_dir_all(&nested_rules)?;
@@ -2321,7 +2324,9 @@ async fn exec_policies_require_project_trust_without_config_toml() -> std::io::R
     let temp = tempfile::tempdir()?;
     let project_root = temp.path().join("project_execpolicy");
     let nested = project_root.join("nested");
-    let rules_dir = project_root.join(".codex").join(RULES_DIR_NAME);
+    let rules_dir = project_root
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join(RULES_DIR_NAME);
     fs::create_dir_all(&nested)?;
     fs::write(project_root.join(".git"), "gitdir: here")?;
     fs::create_dir_all(&rules_dir)?;
@@ -2380,7 +2385,9 @@ async fn exec_policy_warnings_ignore_untrusted_project_rules_without_config_toml
     let temp = tempfile::tempdir()?;
     let project_root = temp.path().join("project_execpolicy_warning");
     let nested = project_root.join("nested");
-    let rules_dir = project_root.join(".codex").join(RULES_DIR_NAME);
+    let rules_dir = project_root
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join(RULES_DIR_NAME);
     fs::create_dir_all(&nested)?;
     fs::write(project_root.join(".git"), "gitdir: here")?;
     fs::create_dir_all(&rules_dir)?;

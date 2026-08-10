@@ -32,6 +32,15 @@ impl From<AppServerCodeModeHostArgs> for CodeModeHostTransport {
     }
 }
 
+impl CodeModeHostTransport {
+    /// Returns whether this transport stays inside the BrokerOnly process
+    /// boundary. A WebSocket host is an externally owned execution authority,
+    /// even when it currently resolves to the local machine.
+    pub(crate) fn is_available_in_broker_only(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
 fn parse_websocket_url(value: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|error| format!("invalid websocket URL: {error}"))?;
     if !matches!(url.scheme(), "ws" | "wss") || url.host_str().is_none() {

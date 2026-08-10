@@ -201,6 +201,21 @@ pub async fn load_default_config_for_test(codex_home: &TempDir) -> Config {
     .await
 }
 
+/// Builds a default test config with `cwd` participating in normal project
+/// trust resolution. This is used only by tests that intentionally exercise
+/// trusted repository-local capabilities such as `.agents/skills`.
+pub async fn load_default_config_for_test_at_cwd(
+    codex_home: &TempDir,
+    cwd: &AbsolutePathBuf,
+) -> Config {
+    load_default_config_for_test_with_cloud_config_bundle_at_cwd(
+        codex_home,
+        cwd,
+        CloudConfigBundleLoader::default(),
+    )
+    .await
+}
+
 /// Returns a default `Config` with test-provided cloud bundle requirements applied.
 /// during config construction.
 pub async fn load_default_config_for_test_with_cloud_config_bundle(
@@ -215,6 +230,24 @@ pub async fn load_default_config_for_test_with_cloud_config_bundle(
         .build()
         .await
         .expect("defaults for test should always succeed")
+}
+
+/// Equivalent to [`load_default_config_for_test_with_cloud_config_bundle`],
+/// but loads project layers relative to the supplied test workspace.
+pub async fn load_default_config_for_test_with_cloud_config_bundle_at_cwd(
+    codex_home: &TempDir,
+    cwd: &AbsolutePathBuf,
+    cloud_config_bundle: CloudConfigBundleLoader,
+) -> Config {
+    ConfigBuilder::default()
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(default_test_overrides())
+        .fallback_cwd(Some(cwd.to_path_buf()))
+        .cloud_config_bundle(cloud_config_bundle)
+        .build()
+        .await
+        .expect("defaults for trusted-workspace test should always succeed")
 }
 
 pub fn managed_network_requirements_loader() -> CloudConfigBundleLoader {

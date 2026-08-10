@@ -1,7 +1,10 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use codex_app_server_protocol::ClientRequest;
@@ -46,12 +49,14 @@ async fn plan_mode_uses_proposed_plan_block_for_plan_item() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::CollaborationModes)
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 
@@ -108,12 +113,14 @@ async fn plan_mode_without_proposed_plan_does_not_emit_plan_item() -> Result<()>
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .enable_feature(Feature::CollaborationModes)
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized()
         .await?;
 

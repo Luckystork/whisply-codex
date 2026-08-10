@@ -19,6 +19,8 @@ use codex_execpolicy::Evaluation;
 use codex_execpolicy::RuleMatch;
 use codex_features::Feature;
 use codex_model_provider::create_model_provider;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::AdditionalPermissionProfile as PermissionProfile;
 use codex_protocol::models::ContentItem;
@@ -103,7 +105,9 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
         .enable(Feature::GuardianApproval)
         .expect("test setup should allow enabling guardian approvals");
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -192,7 +196,9 @@ async fn request_permissions_guardian_review_stops_when_cancelled() {
         .enable(Feature::GuardianApproval)
         .expect("test setup should allow enabling guardian approvals");
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -321,7 +327,9 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
         .features
         .enable(Feature::GuardianApproval)
         .expect("test setup should allow enabling guardian approvals");
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -439,7 +447,9 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
     environment.config.permission_profile =
         config.permissions.permission_profile_state().snapshot();
     config.approvals_reviewer = ApprovalsReviewer::User;
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
@@ -756,6 +766,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        managed_gateway_client: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         skills_service,
         plugins_manager,

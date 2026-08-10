@@ -1,6 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
@@ -60,9 +62,9 @@ async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Re
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build()
@@ -178,9 +180,9 @@ async fn thread_start_rejects_hidden_dynamic_tools_without_namespace() -> Result
     let server = MockServer::start().await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build()
         .await?;
@@ -220,9 +222,9 @@ async fn thread_start_rejects_invalid_dynamic_tool_inputs() -> Result<()> {
     let server = MockServer::start().await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build()
@@ -366,9 +368,9 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build()
         .await?;
@@ -596,14 +598,14 @@ async fn start_function_dynamic_tool_call(call_id: &str) -> Result<PendingDynami
     let server = create_mock_responses_server_sequence_unchecked(response_sequence).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
     let mut model_info =
         codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model_info.input_modalities.push(InputModality::Audio);
     write_models_cache_with_models(codex_home.path(), vec![model_info])?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build()
         .await?;
@@ -718,8 +720,8 @@ async fn dynamic_tool_call_round_trip_handles_content_items() -> Result<()> {
             image_url: TINY_PNG_DATA_URL.to_string(),
             detail: Some(DEFAULT_IMAGE_DETAIL),
         },
-        FunctionCallOutputContentItem::InputAudio {
-            audio_url: INLINE_AUDIO_DATA_URL.to_string(),
+        FunctionCallOutputContentItem::InputText {
+            text: "audio content omitted because you do not support audio input".to_string(),
         },
     ];
     let response = DynamicToolCallResponse {
@@ -782,8 +784,8 @@ async fn dynamic_tool_call_round_trip_handles_content_items() -> Result<()> {
                 "detail": "high"
             },
             {
-                "type": "input_audio",
-                "audio_url": INLINE_AUDIO_DATA_URL
+                "type": "input_text",
+                "text": "audio content omitted because you do not support audio input"
             }
         ])
     );

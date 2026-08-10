@@ -68,33 +68,27 @@ fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
 }
 
 #[test]
-fn detail_policies_apply_the_expected_budgets() {
+fn detail_policies_apply_the_expected_dimension_limits() {
     for (detail, effective_detail, input_dimensions, expected_dimensions) in [
         (
             Some(ImageDetail::High),
             ImageDetailSetting::High,
-            (2048, 2048),
-            (1600, 1600),
+            (2049, 1),
+            (2048, 1),
         ),
         (
             Some(ImageDetail::Original),
             ImageDetailSetting::Original,
-            (6401, 100),
-            (6000, 94),
-        ),
-        (
-            Some(ImageDetail::Original),
-            ImageDetailSetting::Original,
-            (3201, 3201),
-            (3200, 3200),
+            (6001, 1),
+            (6000, 1),
         ),
         (
             Some(ImageDetail::Auto),
             ImageDetailSetting::High,
-            (2048, 2048),
-            (1600, 1600),
+            (2049, 1),
+            (2048, 1),
         ),
-        (None, ImageDetailSetting::High, (2048, 2048), (1600, 1600)),
+        (None, ImageDetailSetting::High, (2049, 1), (2048, 1)),
     ] {
         let (image_url, _) = png_data_url(input_dimensions.0, input_dimensions.1);
         let mut items = vec![ResponseItem::Message {

@@ -507,15 +507,12 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
 }
 
 #[tokio::test]
-async fn prefetch_rate_limits_is_gated_on_chatgpt_auth_provider() {
+async fn prefetch_rate_limits_is_disabled_for_the_managed_model_provider() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     assert!(!chat.should_prefetch_rate_limits());
 
     set_chatgpt_auth(&mut chat);
-    assert!(chat.should_prefetch_rate_limits());
-
-    chat.config.model_provider.requires_openai_auth = false;
     assert!(!chat.should_prefetch_rate_limits());
 
     chat.prefetch_rate_limits();

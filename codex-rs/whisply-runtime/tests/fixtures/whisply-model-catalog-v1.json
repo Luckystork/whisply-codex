@@ -1,0 +1,94 @@
+{
+  "keySet": {
+    "schemaVersion": 1,
+    "keys": [
+      {
+        "keyId": "catalog-retired-2026-07",
+        "algorithm": "ed25519",
+        "publicKey": "E5j2LG0aRXxRumpLXz29L2n8qTIWIY3ImX5Ba9F9k8o"
+      },
+      {
+        "keyId": "catalog-rotation-2026-08",
+        "algorithm": "ed25519",
+        "publicKey": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"
+      }
+    ]
+  },
+  "envelope": {
+    "schemaVersion": 1,
+    "signatureVersion": "jcs-ed25519-v1",
+    "keyId": "catalog-rotation-2026-08",
+    "signature": "e81-n2IW8oXF_uMPwLaonoEm4RwQi1pAi5UWA8jIs8SKMn2jySIdpL8dqIh-97FbrS6lydYLxCk3SVdFqqijAg",
+    "catalog": {
+      "schemaVersion": 1,
+      "catalogRevision": "catalog-fixture-2026-08-08.2",
+      "generatedAtUnixSeconds": 1786126400,
+      "expiresAtUnixSeconds": 1786212800,
+      "models": [
+        {
+          "id": "gpt-5.6-sol",
+          "displayName": "GPT 5.6 Sol",
+          "providerFamily": "openai",
+          "routeRevision": "route-fixture-gpt-5.6-sol-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1050000, "outputLimit": 4096},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1000, "recommendedDefault": false
+        },
+        {
+          "id": "gpt-5.6-sol-pro", "displayName": "GPT 5.6 Sol Pro", "providerFamily": "openai", "routeRevision": "route-fixture-gpt-5.6-sol-pro-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1050000, "outputLimit": 16000},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1800, "recommendedDefault": false
+        },
+        {
+          "id": "gpt-5.6-terra", "displayName": "GPT 5.6 Terra", "providerFamily": "openai", "routeRevision": "route-fixture-gpt-5.6-terra-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1050000, "outputLimit": 4096},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1300, "recommendedDefault": true
+        },
+        {
+          "id": "gpt-5.6-terra-pro", "displayName": "GPT 5.6 Terra Pro", "providerFamily": "openai", "routeRevision": "route-fixture-gpt-5.6-terra-pro-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1050000, "outputLimit": 16000},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 2000, "recommendedDefault": false
+        },
+        {
+          "id": "gpt-5.6-luna", "displayName": "GPT 5.6 Luna", "providerFamily": "openai", "routeRevision": "route-fixture-gpt-5.6-luna-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1050000, "outputLimit": 4096},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 800, "recommendedDefault": false
+        },
+        {
+          "id": "gpt-5.6-luna-pro", "displayName": "GPT 5.6 Luna Pro", "providerFamily": "openai", "routeRevision": "route-fixture-gpt-5.6-luna-pro-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1050000, "outputLimit": 16000},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1400, "recommendedDefault": false
+        },
+        {
+          "id": "haiku-4.5", "displayName": "Claude Haiku 4.5", "providerFamily": "anthropic", "routeRevision": "route-fixture-haiku-4.5-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": false, "contextLimit": 200000, "outputLimit": 2048},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": [], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 500, "recommendedDefault": false
+        },
+        {
+          "id": "sonnet-5", "displayName": "Claude Sonnet 5", "providerFamily": "anthropic", "routeRevision": "route-fixture-sonnet-5-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 200000, "outputLimit": 4096},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1100, "recommendedDefault": false
+        },
+        {
+          "id": "opus-5", "displayName": "Claude Opus 5", "providerFamily": "anthropic", "routeRevision": "route-fixture-opus-5-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 200000, "outputLimit": 4096},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1800, "recommendedDefault": false
+        },
+        {
+          "id": "gemini-3.1-pro", "displayName": "Gemini 3.1 Pro Preview", "providerFamily": "google", "routeRevision": "route-fixture-gemini-3.1-pro-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1000000, "outputLimit": 8192},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1200, "recommendedDefault": false
+        },
+        {
+          "id": "gemini-3.5-flash", "displayName": "Gemini 3.5 Flash", "providerFamily": "google", "routeRevision": "route-fixture-gemini-3.5-flash-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1000000, "outputLimit": 8192},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 600, "recommendedDefault": false
+        },
+        {
+          "id": "grok-4.5", "displayName": "Grok 4.5", "providerFamily": "xai", "routeRevision": "route-fixture-grok-4.5-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 128000, "outputLimit": 4096},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1100, "recommendedDefault": false
+        }
+      ]
+    }
+  }
+}

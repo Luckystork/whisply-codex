@@ -746,12 +746,6 @@ struct RemotePluginInstalledResponse {
 struct RemotePluginMutationResponse {
     id: String,
     enabled: bool,
-    app_ids_needing_auth: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemotePluginInstallResult {
-    pub app_ids_needing_auth: Option<Vec<String>>,
 }
 
 pub async fn fetch_remote_marketplaces(
@@ -1455,16 +1449,14 @@ pub async fn install_remote_plugin(
     auth: Option<&CodexAuth>,
     _marketplace_name: &str,
     plugin_id: &str,
-) -> Result<RemotePluginInstallResult, RemotePluginCatalogError> {
+) -> Result<(), RemotePluginCatalogError> {
     let auth = ensure_chatgpt_auth(auth)?;
     // Remote plugin IDs uniquely identify remote plugins, so the caller-provided
     // marketplace name is not validated before sending the install mutation.
 
     let base_url = config.chatgpt_base_url.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base_url}/ps/plugins/{plugin_id}/install"))
+    let url = Url::parse(&format!("{base_url}/ps/plugins/{plugin_id}/install"))
         .map_err(RemotePluginCatalogError::InvalidBaseUrl)?;
-    url.query_pairs_mut()
-        .append_pair("includeAppsNeedingAuth", "true");
     let url = url.to_string();
     let request = authenticated_request(config.http_request(Method::POST, &url), auth);
     let response: RemotePluginMutationResponse = send_and_decode(request, &url).await?;
@@ -1482,9 +1474,7 @@ pub async fn install_remote_plugin(
         });
     }
 
-    Ok(RemotePluginInstallResult {
-        app_ids_needing_auth: response.app_ids_needing_auth,
-    })
+    Ok(())
 }
 
 pub async fn resolve_remote_plugin_uninstall_target(

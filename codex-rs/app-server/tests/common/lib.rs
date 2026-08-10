@@ -1,10 +1,11 @@
 #![allow(clippy::expect_used)]
 
 mod analytics_server;
-mod auth_fixtures;
 mod config;
 mod json_logging;
 mod local_websocket_exec_server;
+#[cfg(target_os = "macos")]
+mod managed_whisply_gateway;
 mod mock_model_server;
 mod models_cache;
 mod responses;
@@ -13,14 +14,8 @@ mod rpc_delay;
 mod test_app_server;
 
 pub use analytics_server::start_analytics_events_server;
-pub use auth_fixtures::ChatGptAuthFixture;
-pub use auth_fixtures::ChatGptIdTokenClaims;
-pub use auth_fixtures::encode_id_token;
-pub use auth_fixtures::write_chatgpt_auth;
 use codex_app_server_protocol::JSONRPCResponse;
-pub use config::MockResponsesConfig;
-pub use config::write_mock_responses_config_toml;
-pub use config::write_mock_responses_config_toml_with_chatgpt_base_url;
+pub use config::ManagedWhisplyConfig;
 pub use core_test_support::PathBufExt;
 pub use core_test_support::format_with_current_shell;
 pub use core_test_support::format_with_current_shell_display;
@@ -31,6 +26,10 @@ pub use core_test_support::test_path_buf_with_windows;
 pub use core_test_support::test_tmp_path;
 pub use core_test_support::test_tmp_path_buf;
 pub use json_logging::app_server_json_shutdown_event;
+#[cfg(target_os = "macos")]
+pub use managed_whisply_gateway::InProcessManagedWhisplyGatewayFixture;
+#[cfg(target_os = "macos")]
+pub use managed_whisply_gateway::ManagedWhisplyGatewayFixture;
 pub use mock_model_server::create_mock_responses_server_repeating_assistant;
 pub use mock_model_server::create_mock_responses_server_sequence;
 pub use mock_model_server::create_mock_responses_server_sequence_unchecked;
@@ -54,6 +53,19 @@ pub use test_app_server::DEFAULT_CLIENT_NAME;
 pub use test_app_server::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
 pub use test_app_server::TestAppServer;
 pub use test_app_server::TestAppServerBuilder;
+
+/// Creates a child-process app-server builder with a test-owned managed
+/// gateway. Response-I/O tests must call this explicitly; metadata-only tests
+/// use `TestAppServer::builder()` without any broker fixture.
+#[cfg(target_os = "macos")]
+#[macro_export]
+macro_rules! managed_whisply_app_server_builder {
+    ($gateway_base_url:expr $(,)?) => {{
+        $crate::TestAppServer::builder().with_managed_whisply_gateway(
+            $crate::ManagedWhisplyGatewayFixture::new($gateway_base_url)?,
+        )
+    }};
+}
 
 pub fn to_response<T: DeserializeOwned>(response: JSONRPCResponse) -> anyhow::Result<T> {
     let value = serde_json::to_value(response.result)?;

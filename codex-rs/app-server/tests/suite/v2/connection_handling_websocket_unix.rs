@@ -1,14 +1,17 @@
+#![cfg(target_os = "macos")]
+
 use super::connection_handling_websocket::DEFAULT_READ_TIMEOUT;
 use super::connection_handling_websocket::WsClient;
 use super::connection_handling_websocket::connect_websocket;
-use super::connection_handling_websocket::create_config_toml;
 use super::connection_handling_websocket::read_response_for_id;
 use super::connection_handling_websocket::send_initialize_request;
 use super::connection_handling_websocket::send_request;
-use super::connection_handling_websocket::spawn_websocket_server;
+use super::connection_handling_websocket::spawn_websocket_server_with_managed_whisply_gateway;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::to_response;
 use codex_app_server_protocol::RequestId;
@@ -36,6 +39,7 @@ async fn websocket_transport_ctrl_c_waits_for_running_turn_before_exit() -> Resu
     let GracefulCtrlCFixture {
         _codex_home,
         _server,
+        _managed_gateway,
         mut process,
         mut ws,
     } = start_ctrl_c_restart_fixture(Duration::from_secs(3)).await?;
@@ -61,6 +65,7 @@ async fn websocket_transport_second_ctrl_c_forces_exit_while_turn_running() -> R
     let GracefulCtrlCFixture {
         _codex_home,
         _server,
+        _managed_gateway,
         mut process,
         mut ws,
     } = start_ctrl_c_restart_fixture(Duration::from_secs(3)).await?;
@@ -87,6 +92,7 @@ async fn websocket_transport_sigterm_waits_for_running_turn_before_exit() -> Res
     let GracefulCtrlCFixture {
         _codex_home,
         _server,
+        _managed_gateway,
         mut process,
         mut ws,
     } = start_ctrl_c_restart_fixture(Duration::from_secs(3)).await?;
@@ -112,6 +118,7 @@ async fn websocket_transport_second_sigterm_forces_exit_while_turn_running() -> 
     let GracefulCtrlCFixture {
         _codex_home,
         _server,
+        _managed_gateway,
         mut process,
         mut ws,
     } = start_ctrl_c_restart_fixture(Duration::from_secs(3)).await?;
@@ -138,6 +145,7 @@ async fn websocket_transport_repeated_sighup_keeps_waiting_for_running_turn() ->
     let GracefulCtrlCFixture {
         _codex_home,
         _server,
+        _managed_gateway,
         mut process,
         mut ws,
     } = start_ctrl_c_restart_fixture(Duration::from_secs(3)).await?;
@@ -164,6 +172,7 @@ async fn websocket_transport_repeated_sighup_keeps_waiting_for_running_turn() ->
 struct GracefulCtrlCFixture {
     _codex_home: TempDir,
     _server: wiremock::MockServer,
+    _managed_gateway: ManagedWhisplyGatewayFixture,
     process: Child,
     ws: WsClient,
 }
@@ -179,9 +188,12 @@ async fn start_ctrl_c_restart_fixture(turn_delay: Duration) -> Result<GracefulCt
         .await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
 
-    let (process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let (process, bind_addr) =
+        spawn_websocket_server_with_managed_whisply_gateway(codex_home.path(), &managed_gateway)
+            .await?;
     let mut ws = connect_websocket(bind_addr).await?;
 
     send_initialize_request(&mut ws, /*id*/ 1, "ws_graceful_shutdown").await?;
@@ -201,6 +213,7 @@ async fn start_ctrl_c_restart_fixture(turn_delay: Duration) -> Result<GracefulCt
     Ok(GracefulCtrlCFixture {
         _codex_home: codex_home,
         _server: server,
+        _managed_gateway: managed_gateway,
         process,
         ws,
     })

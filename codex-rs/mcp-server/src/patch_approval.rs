@@ -76,7 +76,7 @@ pub(crate) async fn handle_patch_approval_request(
         Ok(value) => value,
         Err(err) => {
             let message = format!("Failed to serialize PatchApprovalElicitRequestParams: {err}");
-            error!("{message}");
+            error!("patch approval elicitation parameter serialization failed");
 
             outgoing.send_error(request_id.clone(), ErrorData::invalid_params(message, None));
 
@@ -106,35 +106,37 @@ pub(crate) async fn on_patch_approval_response(
     let response = receiver.await;
     let value = match response {
         Ok(value) => value,
-        Err(err) => {
-            error!("request failed: {err:?}");
-            if let Err(submit_err) = codex
+        Err(_) => {
+            error!("patch approval elicitation callback failed; denying approval");
+            if codex
                 .submit(Op::PatchApproval {
                     id: approval_id.clone(),
                     decision: ReviewDecision::denied("approval request failed"),
                 })
                 .await
+                .is_err()
             {
-                error!("failed to submit denied PatchApproval after request failure: {submit_err}");
+                error!("denied patch approval submission failed after callback failure");
             }
             return;
         }
     };
 
-    let response = serde_json::from_value::<PatchApprovalResponse>(value).unwrap_or_else(|err| {
-        error!("failed to deserialize PatchApprovalResponse: {err}");
+    let response = serde_json::from_value::<PatchApprovalResponse>(value).unwrap_or_else(|_| {
+        error!("patch approval response deserialization failed; denying approval");
         PatchApprovalResponse {
             decision: ReviewDecision::denied("approval request failed"),
         }
     });
 
-    if let Err(err) = codex
+    if codex
         .submit(Op::PatchApproval {
             id: approval_id,
             decision: response.decision,
         })
         .await
+        .is_err()
     {
-        error!("failed to submit PatchApproval: {err}");
+        error!("patch approval submission failed");
     }
 }

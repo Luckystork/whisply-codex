@@ -108,6 +108,8 @@ const REALTIME_V2_STEER_ACKNOWLEDGEMENT: &str =
 const REALTIME_ACTIVE_RESPONSE_ERROR_PREFIX: &str =
     "Conversation already has an active response in progress:";
 const REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION: &str = "The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.";
+pub(crate) const WHISPLY_REALTIME_UNAVAILABLE_ERROR: &str =
+    "Realtime conversations are unavailable in Whisply's broker-only runtime.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RealtimeConversationEnd {
@@ -1142,6 +1144,12 @@ async fn prepare_realtime_start(
     sess: &Arc<Session>,
     params: ConversationStartParams,
 ) -> CodexResult<PreparedRealtimeConversationStart> {
+    // Whisply only has a brokered Responses authority. Realtime has no
+    // corresponding broker contract, so this must remain ahead of
+    // `ModelProviderInfo::to_api_provider`, which would synthesize a direct
+    // provider endpoint from the selected model provider.
+    reject_direct_realtime_authority()?;
+
     let provider = sess.provider().await;
     let auth_manager = sess
         .services
@@ -1227,6 +1235,12 @@ async fn prepare_realtime_start(
         session_config,
         transport,
     })
+}
+
+fn reject_direct_realtime_authority() -> CodexResult<()> {
+    Err(CodexErr::InvalidRequest(
+        WHISPLY_REALTIME_UNAVAILABLE_ERROR.to_string(),
+    ))
 }
 
 fn validate_avas_webrtc_start(

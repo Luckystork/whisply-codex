@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use chrono::Utc;
 use codex_app_server_protocol::MemoryResetResponse;
@@ -22,8 +22,8 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[tokio::test]
 async fn memory_reset_clears_memory_files_and_rows_preserves_threads() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new("http://127.0.0.1:9")
-        .with_root_config("suppress_unstable_features_warning = true")
+    ManagedWhisplyConfig::new()
+        .with_additional_config("suppress_unstable_features_warning = true")
         .enable_feature(Feature::Sqlite)
         .write(codex_home.path())?;
     let state_db = init_state_db(codex_home.path()).await?;
@@ -82,7 +82,7 @@ async fn seed_stage1_output(state_db: &Arc<StateRuntime>, codex_home: &Path) -> 
     );
     builder.updated_at = Some(now);
     builder.cwd = codex_home.to_path_buf();
-    let metadata = builder.build("mock_provider");
+    let metadata = builder.build("whisply");
     state_db.upsert_thread(&metadata).await?;
 
     let claim = state_db
@@ -123,7 +123,7 @@ async fn seed_stage1_output(state_db: &Arc<StateRuntime>, codex_home: &Path) -> 
 async fn init_state_db(codex_home: &Path) -> Result<Arc<StateRuntime>> {
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db

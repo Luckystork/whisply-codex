@@ -2,6 +2,7 @@ use super::hooks_cla::append_convertible_hook_groups_cla;
 use super::hooks_cla::hook_migration_cla;
 use super::hooks_cla::rewrite_hook_command_cla;
 use super::*;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::Path;
@@ -45,21 +46,14 @@ fn migrated_hook_command(script_name: &str) -> String {
 }
 
 fn migrated_quoted_hook_command(script_name: &str) -> String {
-    let hook_path = Path::new("/repo/.codex")
+    let hook_path = Path::new("/repo")
+        .join(PROJECT_CONFIG_DIRECTORY)
         .join(EXTERNAL_AGENT_MIGRATED_HOOKS_SUBDIR)
         .join(script_name);
     format!(
         "python3 {}",
         shell_single_quote(hook_path.to_string_lossy().as_ref())
     )
-}
-
-#[test]
-fn env_placeholder_accepts_defaults() {
-    assert_eq!(
-        parse_env_placeholder("${TOKEN:-fallback}"),
-        Some("TOKEN".to_string())
-    );
 }
 
 #[test]
@@ -126,7 +120,7 @@ args = [
 }
 
 #[test]
-fn mcp_migration_skips_unsupported_transports() {
+fn mcp_migration_preserves_standard_http_bearer_configuration() {
     let root = tempfile::TempDir::new().expect("tempdir");
     fs::write(
         root.path().join(".mcp.json"),
@@ -161,175 +155,45 @@ bearer_token_env_var = "VAULT_TOKEN"
 }
 
 #[test]
-fn mcp_migration_reads_matching_project_entries_from_repo_external_project_config() {
-    let root = tempfile::TempDir::new().expect("tempdir");
-    let project = root.path().join("repo");
-    fs::create_dir_all(&project).expect("create repo");
-    let other = root.path().join("other");
-    fs::create_dir_all(&other).expect("create other");
-    fs::write(
-        project.join(external_agent_project_config_file()),
-        serde_json::json!({
-            "mcpServers": {
-                "top": {"command": "top-server"}
-            },
-            "projects": {
-                project.display().to_string(): {
-                    "mcpServers": {
-                        "repo": {"command": "repo-server"}
-                    }
-                },
-                other.display().to_string(): {
-                    "mcpServers": {
-                        "other": {"command": "other-server"}
-                    }
-                }
-            }
-        })
-        .to_string(),
-    )
-    .expect("write external agent project config");
-
-    assert_eq!(
-        build_mcp_config_from_external(
-            &project, /*external_agent_home*/ None, /*settings*/ None,
-        )
-        .unwrap(),
-        toml::from_str(
-            r#"
-[mcp_servers.repo]
-command = "repo-server"
-
-[mcp_servers.top]
-command = "top-server"
-"#
-        )
-        .unwrap()
-    );
-}
-
-#[test]
-fn mcp_migration_reads_matching_project_entries_from_home_external_project_config() {
-    let root = tempfile::TempDir::new().expect("tempdir");
-    let project = root.path().join("repo");
-    fs::create_dir_all(&project).expect("create repo");
-    let external_agent_home = root.path().join(external_agent_config_dir());
-    fs::create_dir_all(&external_agent_home).expect("create external agent home");
-    fs::write(
-        root.path().join(external_agent_project_config_file()),
-        serde_json::json!({
-            "projects": {
-                project.display().to_string(): {
-                    "mcpServers": {
-                        "repo": {"command": "repo-server"}
-                    }
-                }
-            }
-        })
-        .to_string(),
-    )
-    .expect("write external agent project config");
-
-    assert_eq!(
-        build_mcp_config_from_external(
-            &project,
-            Some(&external_agent_home),
-            /*settings*/ None,
-        )
-        .unwrap(),
-        toml::from_str(
-            r#"
-[mcp_servers.repo]
-command = "repo-server"
-"#
-        )
-        .unwrap()
-    );
-}
-
-#[test]
-fn mcp_migration_preserves_repo_servers_over_home_project_entries() {
-    let root = tempfile::TempDir::new().expect("tempdir");
-    let project = root.path().join("repo");
-    fs::create_dir_all(&project).expect("create repo");
-    let external_agent_home = root.path().join(external_agent_config_dir());
-    fs::create_dir_all(&external_agent_home).expect("create external agent home");
-    fs::write(
-        project.join(EXTERNAL_AGENT_MCP_CONFIG_FILE),
-        serde_json::json!({
-            "mcpServers": {
-                "shared": {"command": "repo-server"}
-            }
-        })
-        .to_string(),
-    )
-    .expect("write repo mcp");
-    fs::write(
-        root.path().join(external_agent_project_config_file()),
-        serde_json::json!({
-            "projects": {
-                project.display().to_string(): {
-                    "mcpServers": {
-                        "home-only": {"command": "home-only-server"},
-                        "shared": {"command": "home-server"}
-                    }
-                }
-            }
-        })
-        .to_string(),
-    )
-    .expect("write external agent project config");
-
-    assert_eq!(
-        build_mcp_config_from_external(
-            &project,
-            Some(&external_agent_home),
-            /*settings*/ None,
-        )
-        .unwrap(),
-        toml::from_str(
-            r#"
-[mcp_servers.home-only]
-command = "home-only-server"
-
-[mcp_servers.shared]
-command = "repo-server"
-"#
-        )
-        .unwrap()
-    );
-}
-
-#[test]
-fn mcp_migration_skips_disabled_servers() {
+fn mcp_migration_preserves_explicit_custom_server_configuration() {
     let root = tempfile::TempDir::new().expect("tempdir");
     fs::write(
         root.path().join(".mcp.json"),
         r#"{
           "mcpServers": {
-            "enabled": {"command": "enabled-server"},
-            "explicit-disabled": {"command": "disabled-server", "disabled": true},
-            "not-enabled": {"command": "not-enabled-server"}
+            "local": {"type": "stdio", "command": "local-server", "args": ["--stdio"]},
+            "with-env": {"command": "local-server", "env": {"OPENAI_API_KEY": "private"}},
+            "remote": {"type": "http", "url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer private"}}
           }
         }"#,
     )
     .expect("write mcp");
-    let settings = serde_json::json!({
-        "enabledMcpjsonServers": ["enabled"],
-        "disabledMcpjsonServers": ["explicit-disabled"]
-    });
 
+    let migrated = build_mcp_config_from_external(
+        root.path(),
+        /*external_agent_home*/ None,
+        /*settings*/ None,
+    )
+    .expect("build mcp config");
     assert_eq!(
-        build_mcp_config_from_external(
-            root.path(),
-            /*external_agent_home*/ None,
-            Some(&settings),
-        )
-        .unwrap(),
+        migrated,
         toml::from_str(
             r#"
-[mcp_servers.enabled]
-command = "enabled-server"
+[mcp_servers.local]
+command = "local-server"
+args = ["--stdio"]
+
+[mcp_servers.remote]
+url = "https://example.invalid/mcp"
+
+[mcp_servers.remote.http_headers]
+Authorization = "Bearer private"
+
+[mcp_servers.with-env]
+command = "local-server"
+
+[mcp_servers.with-env.env]
+OPENAI_API_KEY = "private"
 "#
         )
         .unwrap()
@@ -382,12 +246,14 @@ Review carefully."""
 
 #[test]
 fn subagent_target_preserves_dotted_file_stem() {
-    let target_agents = Path::new("/repo/.codex/agents");
+    let target_agents = Path::new("/repo")
+        .join(PROJECT_CONFIG_DIRECTORY)
+        .join("agents");
     let source_file = source_path("agents/security.audit.md");
 
     assert_eq!(
-        subagent_target_file(&source_file, target_agents),
-        Some(PathBuf::from("/repo/.codex/agents/security.audit.toml"))
+        subagent_target_file(&source_file, &target_agents),
+        Some(target_agents.join("security.audit.toml"))
     );
 }
 
@@ -466,7 +332,7 @@ fn hook_migration_ignores_unsupported_handlers() {
     append_convertible_hook_groups_cla(
         &settings,
         &mut migration,
-        Some(Path::new("/repo/.codex")),
+        Some(Path::new("/repo").join(PROJECT_CONFIG_DIRECTORY).as_path()),
         TEST_REWRITE_PROFILE,
     );
 
@@ -582,6 +448,7 @@ fn hook_migration_honors_settings_local_disable_override() {
 
 #[test]
 fn hook_command_paths_rewrite_to_target_hook_dir() {
+    let target_config_dir = Path::new("/repo").join(PROJECT_CONFIG_DIRECTORY);
     let project_dir_env_var = external_agent_project_dir_env_var();
     let plugin_root_env_var = format!(
         "{}_PLUGIN_ROOT",
@@ -594,17 +461,17 @@ fn hook_command_paths_rewrite_to_target_hook_dir() {
     assert_eq!(
         rewrite_hook_command_cla(
             &source_hook_command_with_project_dir("check.py"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         migrated_hook_command("check.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("\"${project_dir_env_var}\"/{source_hooks_path}/check-style.sh"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         shell_single_quote(
-            Path::new("/repo/.codex")
+            target_config_dir
                 .join(EXTERNAL_AGENT_MIGRATED_HOOKS_SUBDIR)
                 .join("check-style.sh")
                 .to_string_lossy()
@@ -614,35 +481,35 @@ fn hook_command_paths_rewrite_to_target_hook_dir() {
     assert_eq!(
         rewrite_hook_command_cla(
             &source_hook_command("check.py"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         migrated_hook_command("check.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 ./{source_hooks_path}/check.py"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         migrated_hook_command("check.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 '${{{project_dir_env_var}}}/{source_hooks_path}/check.py'"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         migrated_quoted_hook_command("check.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 \"${{{project_dir_env_var}}}/{source_hooks_path}/check.py\""),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         migrated_quoted_hook_command("check.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("bash -lc \"python3 {source_hooks_path}/check.py\""),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!("bash -lc \"python3 {source_hooks_path}/check.py\"")
     );
@@ -651,35 +518,35 @@ fn hook_command_paths_rewrite_to_target_hook_dir() {
             &format!(
                 "HOOK=${{{project_dir_env_var}}}/{source_hooks_path}/check.py python3 \"$HOOK\""
             ),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!("HOOK=${{{project_dir_env_var}}}/{source_hooks_path}/check.py python3 \"$HOOK\"")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 {source_hooks_path}/${{SCRIPT}}.py"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!("python3 {source_hooks_path}/${{SCRIPT}}.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 {source_hooks_path}/{{lint,fmt}}.sh"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!("python3 {source_hooks_path}/{{lint,fmt}}.sh")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 {source_hooks_path}/my\\ script.py"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!("python3 {source_hooks_path}/my\\ script.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 .{SOURCE_EXTERNAL_AGENT_NAME}\\hooks\\check.py"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!("python3 .{}\\hooks\\check.py", SOURCE_EXTERNAL_AGENT_NAME)
     );
@@ -690,7 +557,7 @@ fn hook_command_paths_rewrite_to_target_hook_dir() {
                 project_dir_env_var,
                 external_agent_config_dir()
             ),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!(
             "python3 \"%{}%\\{}\\hooks\\check.py\"",
@@ -701,19 +568,19 @@ fn hook_command_paths_rewrite_to_target_hook_dir() {
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("python3 '${{{project_dir_env_var}}}/{source_hooks_path}/my script.py'"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         migrated_quoted_hook_command("my script.py")
     );
     assert_eq!(
         rewrite_hook_command_cla(
             &format!("/repo/{source_hooks_path}/check.py 2>/dev/null || true"),
-            Some(Path::new("/repo/.codex")),
+            Some(target_config_dir.as_path()),
         ),
         format!(
             "{} 2>/dev/null || true",
             shell_single_quote(
-                Path::new("/repo/.codex")
+                target_config_dir
                     .join(EXTERNAL_AGENT_MIGRATED_HOOKS_SUBDIR)
                     .join("check.py")
                     .to_string_lossy()
@@ -723,7 +590,7 @@ fn hook_command_paths_rewrite_to_target_hook_dir() {
     );
     let plugin_script_command = format!("${{{plugin_root_env_var}}}/scripts/format.sh");
     assert_eq!(
-        rewrite_hook_command_cla(&plugin_script_command, Some(Path::new("/repo/.codex")),),
+        rewrite_hook_command_cla(&plugin_script_command, Some(target_config_dir.as_path())),
         plugin_script_command
     );
 }
@@ -733,7 +600,7 @@ fn hook_script_copy_keeps_existing_target_scripts() {
     let root = tempfile::TempDir::new().expect("tempdir");
     let source_external_agent_dir = root.path().join(external_agent_config_dir());
     let source_hooks = source_external_agent_dir.join(EXTERNAL_AGENT_HOOKS_SUBDIR);
-    let target_config_dir = root.path().join(".codex");
+    let target_config_dir = root.path().join(PROJECT_CONFIG_DIRECTORY);
     let target_hooks = target_config_dir.join(EXTERNAL_AGENT_MIGRATED_HOOKS_SUBDIR);
     fs::create_dir_all(&source_hooks).expect("create source hooks");
     fs::create_dir_all(&target_hooks).expect("create target hooks");

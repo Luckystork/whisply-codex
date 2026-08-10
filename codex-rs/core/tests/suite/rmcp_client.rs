@@ -23,6 +23,7 @@ use codex_config::types::McpServerEnvVar;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_core::config::Config;
+use codex_core::config::ConfigBuilder;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::Environment;
 use codex_exec_server::HttpRedirectPolicy;
@@ -30,7 +31,6 @@ use codex_exec_server::HttpRequestParams;
 use codex_features::Feature;
 use codex_http_client::HttpClientBuilder;
 use codex_login::CodexAuth;
-use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_SANDBOX_STATE_META_CAPABILITY;
 use codex_mcp::SandboxState;
 use codex_models_manager::manager::RefreshStrategy;
@@ -57,7 +57,6 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::user_input::UserInput;
 use codex_utils_cargo_bin::cargo_bin;
 use codex_utils_path_uri::PathUri;
-use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::assert_regex_match;
 use core_test_support::is_remote_test_environment;
 use core_test_support::responses;
@@ -975,32 +974,42 @@ async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_curso
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apps_enabled_turn_skips_pending_optional_mcp_without_cached_tools() -> anyhow::Result<()> {
+async fn ready_local_mcp_turn_skips_pending_optional_mcp_without_cached_tools() -> anyhow::Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let apps_server = AppsTestServer::mount(&server).await?;
-    let apps_base_url = apps_server.chatgpt_base_url.clone();
-    let response_mock = mount_sse_once(
+    let search_call_id = "search-ready-local-echo";
+    let search_response = mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_response_created("resp-1"),
-            responses::ev_assistant_message("msg-1", "done"),
+            responses::ev_tool_search_call(search_call_id, &json!({"query": "ready local echo"})),
             responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let completion_response = mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-2"),
+            responses::ev_assistant_message("msg-1", "done"),
+            responses::ev_completed("resp-2"),
         ]),
     )
     .await;
     let pending_mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let pending_mcp_url = format!("http://{}/mcp", pending_mcp_listener.local_addr()?);
+    let ready_mcp_command = stdio_server_bin()?;
 
     let fixture = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::Apps)
-                .expect("test config should allow Apps override");
-            config.chatgpt_base_url = apps_base_url;
+            insert_mcp_server(
+                config,
+                "ready_local",
+                stdio_transport(ready_mcp_command, None, Vec::new()),
+                TestMcpServerOptions::default(),
+            );
             insert_mcp_server(
                 config,
                 "pending_optional",
@@ -1020,15 +1029,19 @@ async fn apps_enabled_turn_skips_pending_optional_mcp_without_cached_tools() -> 
         tokio::time::timeout(Duration::from_secs(5), pending_mcp_listener.accept())
             .await
             .context("optional MCP startup should connect before the first turn")??;
+    // The optional HTTP server intentionally never completes startup. Waiting
+    // for the aggregate startup summary would therefore wait for the very
+    // server this test needs the first turn to skip. Wait only for the local
+    // stdio server's own readiness update, as the former Apps fixture did.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = fixture
                 .codex
                 .next_event()
                 .await
-                .context("event stream ended before Codex Apps became ready")?;
+                .context("event stream ended before local MCP became ready")?;
             if let EventMsg::McpStartupUpdate(update) = event.msg
-                && update.server == CODEX_APPS_MCP_SERVER_NAME
+                && update.server == "ready_local"
                 && matches!(update.status, McpStartupStatus::Ready)
             {
                 break Ok::<(), anyhow::Error>(());
@@ -1036,20 +1049,40 @@ async fn apps_enabled_turn_skips_pending_optional_mcp_without_cached_tools() -> 
         }
     })
     .await
-    .context("Codex Apps should finish starting before the first turn")??;
+    .context("ready local MCP should finish starting before the first turn")??;
 
     tokio::time::timeout(Duration::from_secs(5), fixture.submit_turn("hello"))
         .await
         .context("a pending optional MCP must not block the first turn")??;
-    let body = response_mock.single_request().body_json();
-    assert!(body["input"].to_string().contains("<apps_instructions>"));
+    let body = search_response.single_request().body_json();
     let tools = body["tools"].as_array().expect("model request tools");
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.get("type").and_then(Value::as_str) == Some("tool_search")),
+        "the ready local MCP should remain discoverable through tool_search"
+    );
+    assert!(
+        responses::namespace_child_tool(&body, "mcp__ready_local", "echo").is_none(),
+        "the ready local MCP must not bypass tool_search"
+    );
     assert!(tools.iter().all(|tool| {
         tool.get("name")
             .or_else(|| tool.get("type"))
             .and_then(Value::as_str)
             .is_none_or(|name| !name.starts_with("mcp__pending_optional"))
     }));
+    let search_output = completion_response
+        .single_request()
+        .tool_search_output(search_call_id);
+    assert!(
+        responses::namespace_child_tool(&search_output, "mcp__ready_local", "echo").is_some(),
+        "the ready local MCP should be returned by tool_search"
+    );
+    assert!(
+        responses::namespace_child_tool(&search_output, "mcp__pending_optional", "echo").is_none(),
+        "a pending optional MCP without cached tools must not reach tool_search"
+    );
 
     tokio::time::timeout(Duration::from_secs(2), fixture.codex.shutdown_and_wait())
         .await
@@ -2873,7 +2906,8 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn streamable_http_configured_auth_precedes_chatgpt_auth() -> anyhow::Result<()> {
+async fn streamable_http_configured_headers_authenticate_custom_mcp_without_ambient_auth()
+-> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -2885,7 +2919,6 @@ async fn streamable_http_configured_auth_precedes_chatgpt_auth() -> anyhow::Resu
     let configured_auth_url = configured_auth_server.url().to_string();
 
     let configured_auth_fixture = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
             insert_mcp_server(
                 config,
@@ -2901,7 +2934,6 @@ async fn streamable_http_configured_auth_precedes_chatgpt_auth() -> anyhow::Resu
                 },
                 TestMcpServerOptions {
                     environment_id: remote_aware_environment_id(),
-                    auth: McpServerAuth::ChatGpt,
                     ..Default::default()
                 },
             );
@@ -2917,124 +2949,77 @@ async fn streamable_http_configured_auth_precedes_chatgpt_auth() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn streamable_http_chatgpt_auth_is_not_sent_to_configured_origin() -> anyhow::Result<()> {
+async fn streamable_http_chatgpt_auth_is_rejected_before_mcp_io() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let server = responses::start_mock_server().await;
     let untrusted_server = MockServer::start().await;
-    let untrusted_apps = AppsTestServer::mount(&untrusted_server).await?;
-    let untrusted_mcp_url = format!("{}/api/codex/ps/mcp", untrusted_apps.chatgpt_base_url);
-    let untrusted_chatgpt_base_url = untrusted_apps.chatgpt_base_url;
+    let untrusted_mcp_url = format!("{}/mcp", untrusted_server.uri());
+    let home = tempdir()?;
+    fs::write(
+        home.path().join("config.toml"),
+        format!(
+            r#"
+model_provider = "whisply"
 
-    let fixture = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(move |config| {
-            config.chatgpt_base_url = untrusted_chatgpt_base_url;
-            insert_mcp_server(
-                config,
-                "untrusted_origin",
-                McpServerTransportConfig::StreamableHttp {
-                    url: untrusted_mcp_url,
-                    bearer_token_env_var: None,
-                    http_headers: None,
-                    env_http_headers: None,
-                },
-                TestMcpServerOptions {
-                    auth: McpServerAuth::ChatGpt,
-                    ..Default::default()
-                },
-            );
-        })
-        .build(&server)
-        .await?;
+[mcp_servers.untrusted_origin]
+url = "{untrusted_mcp_url}"
+auth = "chatgpt"
+"#,
+        ),
+    )?;
 
-    wait_for_mcp_server(&fixture.codex, "untrusted_origin").await?;
-    let observed_requests = untrusted_server
-        .received_requests()
+    let error = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
         .await
-        .expect("mock server should capture MCP startup requests")
-        .into_iter()
-        .filter(|request| request.url.path() == "/api/codex/ps/mcp")
-        .filter_map(|request| {
-            let body: Value = serde_json::from_slice(&request.body).ok()?;
-            let method = body.get("method")?.as_str()?.to_string();
-            let authorization = request
-                .headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-            Some((method, authorization))
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        observed_requests,
-        vec![
-            ("initialize".to_string(), None),
-            ("notifications/initialized".to_string(), None),
-            ("tools/list".to_string(), None),
-        ],
+        .expect_err("ChatGPT-authenticated MCP config must fail before startup");
+    assert!(
+        error
+            .to_string()
+            .contains("auth = \"chatgpt\" is unavailable")
+    );
+    assert!(
+        untrusted_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "rejected ChatGPT MCP config must not contact its configured origin"
     );
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn configured_chatgpt_base_url_does_not_grant_mcp_chatgpt_auth() -> anyhow::Result<()> {
+async fn configured_chatgpt_base_url_is_rejected_before_mcp_or_oauth_io() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let server = responses::start_mock_server().await;
     let untrusted_server = MockServer::start().await;
-    let untrusted_apps = AppsTestServer::mount(&untrusted_server).await?;
-    let untrusted_mcp_url = format!("{}/api/codex/ps/mcp", untrusted_apps.chatgpt_base_url);
-    let untrusted_chatgpt_base_url = untrusted_apps.chatgpt_base_url;
-
-    let fixture = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_pre_build_hook(move |codex_home| {
-            fs::write(
-                codex_home.join("config.toml"),
-                format!(
-                    r#"
+    let untrusted_chatgpt_base_url = untrusted_server.uri();
+    let home = tempdir()?;
+    fs::write(
+        home.path().join("config.toml"),
+        format!(
+            r#"
+model_provider = "whisply"
 chatgpt_base_url = "{untrusted_chatgpt_base_url}"
-
-[mcp_servers.untrusted_origin]
-url = "{untrusted_mcp_url}"
-auth = "chatgpt"
 "#,
-                ),
-            )
-            .expect("write attacker-controlled MCP config");
-        })
-        .build(&server)
-        .await?;
+        ),
+    )?;
 
-    wait_for_mcp_server(&fixture.codex, "untrusted_origin").await?;
-    let observed_requests = untrusted_server
-        .received_requests()
+    let error = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
         .await
-        .expect("mock server should capture MCP startup requests")
-        .into_iter()
-        .filter(|request| request.url.path() == "/api/codex/ps/mcp")
-        .filter_map(|request| {
-            let body: Value = serde_json::from_slice(&request.body).ok()?;
-            let method = body.get("method")?.as_str()?.to_string();
-            let authorization = request
-                .headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-            Some((method, authorization))
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        observed_requests,
-        vec![
-            ("initialize".to_string(), None),
-            ("notifications/initialized".to_string(), None),
-            ("tools/list".to_string(), None),
-        ],
+        .expect_err("configured hosted base URL must fail before startup");
+    assert!(error.to_string().contains("hosted provider base URLs"));
+    assert!(
+        untrusted_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "rejected hosted base URL must not contact a configured MCP or OAuth origin"
     );
 
     Ok(())

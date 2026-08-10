@@ -3,20 +3,27 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::PathBufExt;
 use app_test_support::TestAppServer;
+#[cfg(target_os = "macos")]
 use app_test_support::create_final_assistant_message_sse_response;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::TurnStartParams;
+#[cfg(target_os = "macos")]
 use codex_app_server_protocol::UserInput as V2UserInput;
+#[cfg(target_os = "macos")]
 use codex_features::Feature;
 use codex_shell_command::shell_detect::ShellType;
 use codex_shell_command::shell_detect::detect_shell_type;
+#[cfg(target_os = "macos")]
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
+#[cfg(target_os = "macos")]
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -24,13 +31,15 @@ use tokio::time::timeout;
 const AGENTS_INSTRUCTIONS: &str = "selected environment workspace instructions";
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn write_mock_config(codex_home: &Path, server_uri: &str) -> std::io::Result<()> {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 100000")
-        .with_provider_config("supports_websockets = false")
+fn write_mock_config(codex_home: &Path, _server_uri: &str) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
+            "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 100000",
+        )
         .write(codex_home)
 }
 
+#[cfg(target_os = "macos")]
 fn text_turn_params(thread_id: String, prompt: &str) -> TurnStartParams {
     TurnStartParams {
         thread_id,
@@ -44,9 +53,8 @@ fn text_turn_params(thread_id: String, prompt: &str) -> TurnStartParams {
 
 #[tokio::test]
 async fn thread_start_reports_selected_environment_metadata() -> Result<()> {
-    let server = responses::start_mock_server().await;
     let codex_home = TempDir::new()?;
-    write_mock_config(codex_home.path(), &server.uri())?;
+    write_mock_config(codex_home.path(), "")?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -83,6 +91,7 @@ async fn thread_start_reports_selected_environment_metadata() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_start_reports_selected_environment_instruction_source() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -97,7 +106,7 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
     .await;
     let codex_home = TempDir::new()?;
     write_mock_config(codex_home.path(), &server.uri())?;
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -146,6 +155,7 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn turn_model_context_uses_selected_environment() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -160,7 +170,7 @@ async fn turn_model_context_uses_selected_environment() -> Result<()> {
     .await;
     let codex_home = TempDir::new()?;
     write_mock_config(codex_home.path(), &server.uri())?;
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -213,6 +223,7 @@ async fn turn_model_context_uses_selected_environment() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn command_execution_notifications_preserve_selected_environment_paths() -> Result<()> {
     let command_arguments = serde_json::to_string(&json!({
@@ -233,13 +244,14 @@ async fn command_execution_notifications_preserve_selected_environment_paths() -
     ])
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 100000")
-        .with_provider_config("supports_websockets = false")
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
+            "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 100000",
+        )
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::UnifiedExec)
         .write(codex_home.path())?;
-    let mut app_server = TestAppServer::builder()
+    let mut app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;

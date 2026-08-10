@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
@@ -35,7 +38,7 @@ use tokio::time::timeout;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[tokio::test]
-async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result<()> {
+async fn turn_start_forwards_bounded_whisply_metadata_to_responses_request_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -50,12 +53,12 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_provider_config("supports_websockets = false")
-        .write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -74,7 +77,7 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     ]);
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
-            thread_id: thread.id,
+            thread_id: thread.id.clone(),
             client_user_message_id: None,
             input: vec![V2UserInput::Text {
                 text: "Hello".to_string(),
@@ -94,27 +97,34 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     .await??;
 
     let request = response_mock.single_request();
-    let metadata = request
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("x-codex-turn-metadata header should be present");
-    assert_eq!(metadata["fiber_run_id"].as_str(), Some("fiber-start-123"));
-    assert_eq!(metadata["origin"].as_str(), Some("gaas"));
-    assert_eq!(metadata["thread_source"].as_str(), Some("automation"));
+    let metadata = whisply_turn_metadata(&request);
+    assert_eq!(metadata["schema_version"].as_u64(), Some(1));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
-    assert!(metadata.get("installation_id").is_some());
-    assert!(metadata.get("session_id").is_some());
-    assert_eq!(
-        metadata["window_id"].as_str(),
-        request.header("x-codex-window-id").as_deref()
-    );
+    assert_eq!(metadata["thread_id"].as_str(), Some(thread.id.as_str()));
+    assert!(metadata["session_id"].as_str().is_some());
+    assert!(metadata["window_id"].as_str().is_some());
+    for key in [
+        "fiber_run_id",
+        "origin",
+        "thread_source",
+        "installation_id",
+        "sandbox",
+        "workspaces",
+    ] {
+        assert!(
+            metadata.get(key).is_none(),
+            "bounded Whisply metadata must not forward {key}"
+        );
+    }
+    assert!(request.header("x-codex-turn-metadata").is_none());
+    assert!(request.header("x-codex-window-id").is_none());
 
     Ok(())
 }
 
 #[tokio::test]
-async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> Result<()> {
+async fn turn_start_omits_fork_lineage_from_bounded_whisply_metadata_for_thread_fork_v2()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -129,21 +139,21 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_provider_config("supports_websockets = false")
-        .write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let source_thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
@@ -172,17 +182,12 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
     .await??;
 
     let request = response_mock.single_request();
-    let metadata = request
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("x-codex-turn-metadata header should be present");
-    assert_eq!(
-        metadata["forked_from_thread_id"].as_str(),
-        Some(source_thread_id.as_str())
-    );
+    let metadata = whisply_turn_metadata(&request);
+    assert_eq!(metadata["schema_version"].as_u64(), Some(1));
+    assert!(metadata.get("forked_from_thread_id").is_none());
     assert_eq!(metadata["thread_id"].as_str(), Some(thread.id.as_str()));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
+    assert!(request.header("x-codex-turn-metadata").is_none());
 
     Ok(())
 }
@@ -210,21 +215,21 @@ async fn review_start_sends_parent_lineage_in_turn_metadata_for_thread_fork_v2()
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_provider_config("supports_websockets = false")
-        .write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let source_thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
@@ -253,15 +258,8 @@ async fn review_start_sends_parent_lineage_in_turn_metadata_for_thread_fork_v2()
     .await??;
 
     let request = response_mock.single_request();
-    let metadata = request
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("x-codex-turn-metadata header should be present");
-    assert_eq!(
-        request.header("x-openai-subagent").as_deref(),
-        Some("review")
-    );
+    let metadata = whisply_turn_metadata(&request);
+    assert_eq!(metadata["subagent_kind"].as_str(), Some("review"));
     assert!(metadata.get("forked_from_thread_id").is_none());
     assert_eq!(
         metadata["parent_thread_id"].as_str(),
@@ -271,13 +269,8 @@ async fn review_start_sends_parent_lineage_in_turn_metadata_for_thread_fork_v2()
         .as_str()
         .expect("review request thread_id should be present");
     assert!(review_request_thread_id != review_thread_id.as_str());
-    assert_eq!(
-        request
-            .header("x-codex-window-id")
-            .as_deref()
-            .and_then(|window_id| window_id.split_once(':').map(|(thread_id, _)| thread_id)),
-        Some(review_request_thread_id)
-    );
+    assert!(request.header("x-openai-subagent").is_none());
+    assert!(request.header("x-codex-window-id").is_none());
     assert!(metadata["turn_id"].as_str().is_some());
 
     Ok(())
@@ -299,9 +292,7 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() 
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_provider_config("supports_websockets = false")
-        .write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let root_thread_id = CoreThreadId::new();
     let root_thread_id_str = root_thread_id.to_string();
@@ -312,15 +303,17 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() 
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved subagent message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
         SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
         root_thread_id.into(),
         parent_thread_id,
     )?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .without_auto_env()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
@@ -361,16 +354,12 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() 
     .await??;
 
     let request = response_mock.single_request();
-    let metadata = request
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("x-codex-turn-metadata header should be present");
+    let metadata = whisply_turn_metadata(&request);
     assert_eq!(
         metadata["parent_thread_id"].as_str(),
         Some(parent_thread_id_str.as_str())
     );
-    assert_eq!(metadata["subagent_kind"].as_str(), Some("guardian"));
+    assert_eq!(metadata["subagent_kind"].as_str(), Some("other"));
     assert_eq!(
         metadata["session_id"].as_str(),
         Some(thread.session_id.as_str())
@@ -383,7 +372,8 @@ async fn turn_start_sends_nested_subagent_lineage_after_cold_thread_resume_v2() 
 }
 
 #[tokio::test]
-async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() -> Result<()> {
+async fn turn_steer_keeps_whisply_metadata_bounded_across_follow_up_responses_requests_v2()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let codex_home = TempDir::new()?;
@@ -403,12 +393,12 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
     let request_log =
         responses::mount_response_sequence(&server, vec![first_response, second_response]).await;
 
-    MockResponsesConfig::new(&server.uri())
-        .with_provider_config("supports_websockets = false")
-        .write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -471,57 +461,42 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2() 
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 2);
-    let first_metadata = requests[0]
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("first x-codex-turn-metadata header should be present");
-    assert_eq!(
-        first_metadata["fiber_run_id"].as_str(),
-        Some("fiber-start-123")
-    );
+    let first_metadata = whisply_turn_metadata(&requests[0]);
+    assert_eq!(first_metadata["schema_version"].as_u64(), Some(1));
+    assert!(first_metadata.get("fiber_run_id").is_none());
     assert_eq!(first_metadata["turn_id"].as_str(), Some(turn_id.as_str()));
 
-    let second_metadata = requests[1]
-        .header("x-codex-turn-metadata")
-        .as_deref()
-        .map(parse_json_header)
-        .expect("second x-codex-turn-metadata header should be present");
-    assert_eq!(
-        second_metadata["fiber_run_id"].as_str(),
-        Some("fiber-steer-456")
-    );
-    assert_eq!(second_metadata["origin"].as_str(), Some("gaas"));
+    let second_metadata = whisply_turn_metadata(&requests[1]);
+    assert_eq!(second_metadata["schema_version"].as_u64(), Some(1));
+    assert!(second_metadata.get("fiber_run_id").is_none());
+    assert!(second_metadata.get("origin").is_none());
     assert_eq!(second_metadata["turn_id"].as_str(), Some(turn_id.as_str()));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn turn_start_forwards_client_metadata_to_responses_websocket_request_body_v2() -> Result<()>
-{
+async fn turn_start_uses_brokered_http_when_whisply_websockets_are_disabled_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let websocket_server = responses::start_websocket_server(vec![vec![
-        vec![
-            responses::ev_response_created("warm-1"),
-            responses::ev_completed("warm-1"),
-        ],
-        vec![
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
             responses::ev_response_created("resp-1"),
             responses::ev_assistant_message("msg-1", "Done"),
             responses::ev_completed("resp-1"),
-        ],
-    ]])
+        ]),
+    )
     .await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&websocket_server.uri().replacen("ws://", "http://", 1))
-        .with_provider_config("supports_websockets = true")
-        .write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -559,35 +534,17 @@ async fn turn_start_forwards_client_metadata_to_responses_websocket_request_body
     )
     .await??;
 
-    let warmup = websocket_server
-        .wait_for_request(/*connection_index*/ 0, /*request_index*/ 0)
-        .await
-        .body_json();
-    let request = websocket_server
-        .wait_for_request(/*connection_index*/ 0, /*request_index*/ 1)
-        .await
-        .body_json();
-
-    assert_eq!(warmup["type"].as_str(), Some("response.create"));
-    assert_eq!(warmup["generate"].as_bool(), Some(false));
-    assert_eq!(request["type"].as_str(), Some("response.create"));
-    assert_eq!(request["previous_response_id"].as_str(), Some("warm-1"));
-
-    let metadata = request["client_metadata"]["x-codex-turn-metadata"]
-        .as_str()
-        .map(parse_json_header)
-        .expect("websocket x-codex-turn-metadata client metadata should be present");
-    assert_eq!(metadata["fiber_run_id"].as_str(), Some("fiber-start-123"));
-    assert_eq!(metadata["origin"].as_str(), Some("gaas"));
-    assert_eq!(metadata["thread_source"].as_str(), Some("automation"));
+    let request = response_mock.single_request();
+    assert_eq!(request.path(), "/v1/responses");
+    let metadata = whisply_turn_metadata(&request);
+    assert_eq!(metadata["schema_version"].as_u64(), Some(1));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
     assert!(metadata.get("session_id").is_some());
-    assert_eq!(
-        metadata["window_id"].as_str(),
-        request["client_metadata"]["x-codex-window-id"].as_str()
-    );
+    assert!(metadata.get("fiber_run_id").is_none());
+    assert!(metadata.get("origin").is_none());
+    assert!(metadata.get("thread_source").is_none());
+    assert!(request.header("x-codex-turn-metadata").is_none());
 
-    websocket_server.shutdown().await;
     Ok(())
 }
 
@@ -607,6 +564,23 @@ async fn fork_fake_rollout_thread(
 
 fn parse_json_header(value: &str) -> serde_json::Value {
     serde_json::from_str(value).expect("metadata header should contain valid JSON")
+}
+
+fn whisply_turn_metadata(request: &responses::ResponsesRequest) -> serde_json::Value {
+    let body = request.body_json();
+    let client_metadata = body["client_metadata"]
+        .as_object()
+        .expect("brokered Responses request should include client_metadata");
+    assert_eq!(
+        client_metadata.len(),
+        1,
+        "Whisply must send one bounded metadata envelope rather than the upstream flat projection"
+    );
+    client_metadata
+        .get("x-whisply-turn-metadata")
+        .and_then(serde_json::Value::as_str)
+        .map(parse_json_header)
+        .expect("x-whisply-turn-metadata envelope should be present")
 }
 
 async fn wait_for_request_count(

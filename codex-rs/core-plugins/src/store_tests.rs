@@ -73,7 +73,7 @@ fn install_copies_plugin_into_default_marketplace() {
 }
 
 #[test]
-fn install_accepts_manifest_mcp_server_objects() {
+fn install_accepts_manifest_http_mcp_server_objects() {
     let tmp = tempdir().unwrap();
     let plugin_root = tmp.path().join("counter-sample");
     fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
@@ -110,6 +110,33 @@ fn install_accepts_manifest_mcp_server_objects() {
         }
     );
     assert!(installed_path.join(".codex-plugin/plugin.json").is_file());
+}
+
+#[test]
+fn install_preserves_plugin_mcp_host_environment_references() {
+    let tmp = tempdir().unwrap();
+    let plugin_root = tmp.path().join("host-environment-plugin");
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"host-environment-plugin"}"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"custom":{"command":"echo","envVars":["DATABASE_URL"]}}}"#,
+    )
+    .unwrap();
+    let plugin_id =
+        PluginId::new("host-environment-plugin".to_string(), "debug".to_string()).unwrap();
+
+    let result = PluginStore::new(tmp.path().to_path_buf())
+        .install(AbsolutePathBuf::try_from(plugin_root).unwrap(), plugin_id)
+        .expect("explicit plugin MCP configuration should be installed");
+    assert!(
+        result.installed_path.join(".mcp.json").is_file(),
+        "the installed plugin retains its custom MCP declaration"
+    );
 }
 
 #[test]

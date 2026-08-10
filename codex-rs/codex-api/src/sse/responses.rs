@@ -17,6 +17,7 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -27,8 +28,10 @@ use tracing::trace;
 
 const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
+const X_WHISPLY_TURN_STATE_HEADER: &str = "x-whisply-turn-state";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const REQUEST_ID_HEADER: &str = "x-request-id";
+const WHISPLY_REQUEST_ID_HEADER: &str = "x-whisply-request-id";
 const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION: &str = "trusted_access_for_cyber";
 
 pub fn spawn_response_stream(
@@ -36,6 +39,7 @@ pub fn spawn_response_stream(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    heartbeat_comments_reset_idle: bool,
 ) -> ResponseStream {
     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
     let models_etag = stream_response
@@ -54,15 +58,21 @@ pub fn spawn_response_stream(
         .is_some();
     let upstream_request_id = stream_response
         .headers
-        .get(REQUEST_ID_HEADER)
+        .get(WHISPLY_REQUEST_ID_HEADER)
+        .or_else(|| stream_response.headers.get(REQUEST_ID_HEADER))
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let safety_buffering_treatment =
         treatment_from_headers(&stream_response.headers).unwrap_or_default();
+    let turn_state_header = if heartbeat_comments_reset_idle {
+        X_WHISPLY_TURN_STATE_HEADER
+    } else {
+        X_CODEX_TURN_STATE_HEADER
+    };
     if let Some(turn_state) = turn_state.as_ref()
         && let Some(header_value) = stream_response
             .headers
-            .get(X_CODEX_TURN_STATE_HEADER)
+            .get(turn_state_header)
             .and_then(|value| value.to_str().ok())
     {
         let _ = turn_state.set(header_value.to_string());
@@ -89,6 +99,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            heartbeat_comments_reset_idle,
         )
         .await;
     });
@@ -266,7 +277,9 @@ fn header_openai_model_value_from_json(value: &Value) -> Option<String> {
 fn header_turn_state_value_from_json(value: &Value) -> Option<String> {
     let headers = value.as_object()?;
     headers.iter().find_map(|(name, value)| {
-        if name.eq_ignore_ascii_case(X_CODEX_TURN_STATE_HEADER) {
+        if name.eq_ignore_ascii_case(X_CODEX_TURN_STATE_HEADER)
+            || name.eq_ignore_ascii_case(X_WHISPLY_TURN_STATE_HEADER)
+        {
             json_value_as_string(value)
         } else {
             None
@@ -488,6 +501,28 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        /*heartbeat_comments_reset_idle*/ false,
+    )
+    .await;
+}
+
+/// Test-only entry point for the managed Whisply gateway's SSE behavior. SSE
+/// comment frames are transport heartbeats, not Responses events, so they
+/// reset the idle timer without being sent through the response event channel.
+#[cfg(test)]
+pub async fn process_sse_with_heartbeat_comments(
+    stream: ByteStream,
+    tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    idle_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+) {
+    process_sse_with_treatment(
+        stream,
+        tx_event,
+        idle_timeout,
+        telemetry,
+        SafetyBufferingTreatment::default(),
+        /*heartbeat_comments_reset_idle*/ true,
     )
     .await;
 }
@@ -498,36 +533,97 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    heartbeat_comments_reset_idle: bool,
 ) {
+    let heartbeat_activity =
+        heartbeat_comments_reset_idle.then(|| Arc::new(Mutex::new(Instant::now())));
+    let stream: ByteStream = if let Some(heartbeat_activity) = heartbeat_activity.as_ref() {
+        let heartbeat_activity = Arc::clone(heartbeat_activity);
+        Box::pin(stream.inspect(move |chunk| {
+            if chunk.is_ok()
+                && let Ok(mut last_activity) = heartbeat_activity.lock()
+            {
+                *last_activity = Instant::now();
+            }
+        }))
+    } else {
+        stream
+    };
     let mut stream = stream.eventsource();
+    let heartbeat_check_interval = if idle_timeout.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        idle_timeout.min(Duration::from_secs(1))
+    };
+    let mut heartbeat_idle_check = tokio::time::interval(heartbeat_check_interval);
     let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
 
     loop {
-        let start = Instant::now();
-        let response = timeout(idle_timeout, stream.next()).await;
-        if let Some(t) = telemetry.as_ref() {
-            t.on_sse_poll(&response, start.elapsed());
-        }
-        let sse = match response {
-            Ok(Some(Ok(sse))) => sse,
-            Ok(Some(Err(e))) => {
-                debug!("SSE Error: {e:#}");
-                let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
-                return;
+        let sse = if let Some(heartbeat_activity) = heartbeat_activity.as_ref() {
+            // The eventsource parser intentionally suppresses SSE comments.
+            // Observe raw chunks as well so a legal `: heartbeat` comment
+            // keeps a long-running authenticated request alive without
+            // surfacing a fake model event or triggering a client retry.
+            loop {
+                tokio::select! {
+                    response = stream.next() => {
+                        break match response {
+                            Some(Ok(sse)) => sse,
+                            Some(Err(error)) => {
+                                debug!("SSE Error: {error:#}");
+                                let _ = tx_event.send(Err(ApiError::Stream(error.to_string()))).await;
+                                return;
+                            }
+                            None => {
+                                let error = response_error.take().unwrap_or(ApiError::Stream(
+                                    "stream closed before response.completed".into(),
+                                ));
+                                let _ = tx_event.send(Err(error)).await;
+                                return;
+                            }
+                        };
+                    }
+                    _ = heartbeat_idle_check.tick() => {
+                        let elapsed = heartbeat_activity
+                            .lock()
+                            .map(|last_activity| last_activity.elapsed())
+                            .unwrap_or(idle_timeout);
+                        if elapsed >= idle_timeout {
+                            let _ = tx_event
+                                .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
+                                .await;
+                            return;
+                        }
+                    }
+                }
             }
-            Ok(None) => {
-                let error = response_error.unwrap_or(ApiError::Stream(
-                    "stream closed before response.completed".into(),
-                ));
-                let _ = tx_event.send(Err(error)).await;
-                return;
+        } else {
+            let start = Instant::now();
+            let response = timeout(idle_timeout, stream.next()).await;
+            if let Some(t) = telemetry.as_ref() {
+                t.on_sse_poll(&response, start.elapsed());
             }
-            Err(_) => {
-                let _ = tx_event
-                    .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
-                    .await;
-                return;
+            match response {
+                Ok(Some(Ok(sse))) => sse,
+                Ok(Some(Err(e))) => {
+                    debug!("SSE Error: {e:#}");
+                    let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                    return;
+                }
+                Ok(None) => {
+                    let error = response_error.unwrap_or(ApiError::Stream(
+                        "stream closed before response.completed".into(),
+                    ));
+                    let _ = tx_event.send(Err(error)).await;
+                    return;
+                }
+                Err(_) => {
+                    let _ = tx_event
+                        .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
+                        .await;
+                    return;
+                }
             }
         };
 
@@ -1006,6 +1102,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn heartbeat_comments_reset_the_managed_gateway_idle_timer() {
+        let completed = json!({
+            "type": "response.completed",
+            "response": { "id": "resp-heartbeat" }
+        })
+        .to_string();
+        let completed = format!("event: response.completed\ndata: {completed}\n\n");
+        let frames = vec![
+            (Duration::ZERO, Bytes::from_static(b": heartbeat\n\n")),
+            (
+                Duration::from_millis(12),
+                Bytes::from_static(b": heartbeat\n\n"),
+            ),
+            (
+                Duration::from_millis(12),
+                Bytes::from_static(b": heartbeat\n\n"),
+            ),
+            (
+                Duration::from_millis(12),
+                Bytes::from_static(b": heartbeat\n\n"),
+            ),
+            (Duration::from_millis(12), Bytes::from(completed)),
+        ];
+        let stream = stream::unfold(frames.into_iter(), |mut frames| async move {
+            let (delay, frame) = frames.next()?;
+            tokio::time::sleep(delay).await;
+            Some((Ok::<_, TransportError>(frame), frames))
+        });
+        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
+        tokio::spawn(process_sse_with_heartbeat_comments(
+            Box::pin(stream),
+            tx,
+            Duration::from_millis(30),
+            /*telemetry*/ None,
+        ));
+
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("heartbeat stream should complete")
+            .expect("response event channel should stay open")
+            .expect("heartbeat stream should not idle-time out");
+        assert_matches!(
+            event,
+            ResponseEvent::Completed { response_id, .. } if response_id == "resp-heartbeat"
+        );
+    }
+
+    #[tokio::test]
     async fn error_when_error_event() {
         let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_689bcf18d7f08194bf3440ba62fe05d803fee0cdac429894","object":"response","created_at":1755041560,"status":"failed","background":false,"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more."}, "usage":null,"user":null,"metadata":{}}}"#;
 
@@ -1243,6 +1387,7 @@ mod tests {
             idle_timeout(),
             /*telemetry*/ None,
             /*turn_state*/ None,
+            /*heartbeat_comments_reset_idle*/ false,
         );
         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
         let event = stream
@@ -1283,6 +1428,7 @@ mod tests {
             idle_timeout(),
             /*telemetry*/ None,
             /*turn_state*/ None,
+            /*heartbeat_comments_reset_idle*/ false,
         );
         let mut events = Vec::new();
         while let Some(event) = stream.rx_event.recv().await {

@@ -1,5 +1,7 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
 use app_test_support::create_mock_responses_server_repeating_assistant;
@@ -36,15 +38,14 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 #[tokio::test]
 async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
     let parent_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-01T00-00-00",
         "2025-01-01T00:00:00Z",
         "parent",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let parent_thread_id = ThreadId::from_string(&parent_id)?;
@@ -61,7 +62,7 @@ async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> R
     let child_thread_id = ThreadId::from_string(&child.id)?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -107,9 +108,9 @@ async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> R
 async fn thread_archive_requires_materialized_rollout() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -225,16 +226,15 @@ async fn thread_archive_requires_materialized_rollout() -> Result<()> {
 
 #[tokio::test]
 async fn thread_archive_archives_spawned_descendants() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let parent_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-01T00-00-00",
         "2025-01-01T00:00:00Z",
         "parent",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let child_id = create_fake_rollout(
@@ -242,7 +242,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
         "2025-01-01T00-01-00",
         "2025-01-01T00:01:00Z",
         "child",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let grandchild_id = create_fake_rollout(
@@ -250,7 +250,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
         "2025-01-01T00-02-00",
         "2025-01-01T00:02:00Z",
         "grandchild",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -259,7 +259,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -334,16 +334,15 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
 
 #[tokio::test]
 async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let parent_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-01T00-00-00",
         "2025-01-01T00:00:00Z",
         "parent",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let child_id = create_fake_rollout(
@@ -351,7 +350,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
         "2025-01-01T00-01-00",
         "2025-01-01T00:01:00Z",
         "child",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let grandchild_id = create_fake_rollout(
@@ -359,7 +358,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
         "2025-01-01T00-02-00",
         "2025-01-01T00:02:00Z",
         "grandchild",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -368,7 +367,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -470,16 +469,15 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
 
 #[tokio::test]
 async fn thread_archive_succeeds_when_spawned_descendant_is_missing() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
     let parent_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-01T00-00-00",
         "2025-01-01T00:00:00Z",
         "parent",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let parent_thread_id = ThreadId::from_string(&parent_id)?;
@@ -487,7 +485,7 @@ async fn thread_archive_succeeds_when_spawned_descendant_is_missing() -> Result<
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     state_db
@@ -547,9 +545,9 @@ async fn thread_archive_succeeds_when_spawned_descendant_is_missing() -> Result<
 async fn thread_archive_clears_stale_subscriptions_before_resume() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut primary = TestAppServer::builder()
+    let mut primary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -582,7 +580,7 @@ async fn thread_archive_clears_stale_subscriptions_before_resume() -> Result<()>
     .await??;
     primary.clear_message_buffer();
 
-    let mut secondary = TestAppServer::builder()
+    let mut secondary = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;

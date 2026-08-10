@@ -19,6 +19,7 @@ pub mod remote_bundle;
 pub mod remote_legacy;
 mod remote_plugin_id_resolver;
 mod script_attribution;
+mod skill_package;
 pub mod startup_sync;
 pub mod store;
 #[cfg(test)]
@@ -76,3 +77,6 @@ pub use remote::RecommendedPlugin;
 pub use remote::RecommendedPluginsMode;
 pub use script_attribution::PluginCommandAttribution;
 pub use script_attribution::TrustedPluginRoots;
+pub use skill_package::validate_plugin_package_contents;
+pub use skill_package::validate_skill_document_contents;
+pub use skill_package::validate_skill_package_contents;

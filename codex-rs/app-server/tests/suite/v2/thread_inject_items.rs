@@ -1,6 +1,9 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ThreadInjectItemsParams;
 use codex_app_server_protocol::ThreadInjectItemsResponse;
@@ -34,10 +37,12 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -145,10 +150,12 @@ async fn thread_inject_items_adds_raw_response_items_after_a_turn() -> Result<()
     let response_mock = responses::mount_sse_sequence(&server, vec![first_body, second_body]).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 

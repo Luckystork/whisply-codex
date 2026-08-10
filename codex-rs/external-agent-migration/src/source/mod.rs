@@ -42,45 +42,8 @@ fn build_config(
     };
 
     let mut root = toml::map::Map::new();
-    if let Some(env) = settings.get("env").and_then(JsonValue::as_object)
-        && !env.is_empty()
-    {
-        let mut shell_policy = toml::map::Map::new();
-        shell_policy.insert("inherit".to_string(), TomlValue::String("core".to_string()));
-        shell_policy.insert(
-            "set".to_string(),
-            TomlValue::Table(json_object_to_env_toml_table(env)),
-        );
-        root.insert(
-            "shell_environment_policy".to_string(),
-            TomlValue::Table(shell_policy),
-        );
-    }
-
     append_source_config(&mut root, settings);
     Ok(TomlValue::Table(root))
-}
-
-fn json_object_to_env_toml_table(
-    object: &serde_json::Map<String, JsonValue>,
-) -> toml::map::Map<String, TomlValue> {
-    let mut table = toml::map::Map::new();
-    for (key, value) in object {
-        if let Some(value) = json_env_value_to_string(value) {
-            table.insert(key.clone(), TomlValue::String(value));
-        }
-    }
-    table
-}
-
-fn json_env_value_to_string(value: &JsonValue) -> Option<String> {
-    match value {
-        JsonValue::String(value) => Some(value.clone()),
-        JsonValue::Null => None,
-        JsonValue::Bool(value) => Some(value.to_string()),
-        JsonValue::Number(value) => Some(value.to_string()),
-        JsonValue::Array(_) | JsonValue::Object(_) => None,
-    }
 }
 
 fn is_non_empty_text_file(path: &Path) -> io::Result<bool> {

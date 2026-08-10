@@ -1,6 +1,10 @@
+#![cfg(target_os = "macos")]
+
 use std::time::Duration;
 
 use anyhow::Result;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -47,41 +51,28 @@ async fn host_skill_catalog_refreshes_once_when_skills_change() -> Result<()> {
     .await;
 
     let codex_home = TempDir::new()?;
-    let extra_root = TempDir::new()?;
-    let extra_skills_root = extra_root.path().join("skills");
+    let extra_skills_root = codex_home.path().join("skills");
     write_skill(
         &extra_skills_root,
         "initial-host-skill",
         INITIAL_SKILL_DESCRIPTION,
     )?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        format!(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(
             r#"
-model = "mock-model"
-approval_policy = "never"
-sandbox_mode = "read-only"
-model_provider = "mock_provider"
-
 [skills]
 include_instructions = true
 
 [skills.bundled]
 enabled = false
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
 "#,
-            server.uri()
-        ),
-    )?;
+        )
+        .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build()
         .await?;
     timeout(READ_TIMEOUT, app_server.initialize()).await??;

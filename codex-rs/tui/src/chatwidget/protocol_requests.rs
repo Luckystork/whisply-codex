@@ -45,6 +45,8 @@ impl ChatWidget {
                 self.on_request_user_input(params);
             }
             ServerRequest::DynamicToolCall { .. }
+            | ServerRequest::WhisplyToolExecute { .. }
+            | ServerRequest::WhisplyToolCancel { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. }

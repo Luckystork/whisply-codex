@@ -1,5 +1,8 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
@@ -26,13 +29,15 @@ async fn thread_status_changed_emits_runtime_updates() -> Result<()> {
     let codex_home = TempDir::new()?;
     let responses = vec![create_final_assistant_message_sse_response("done")?];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .enable_feature(Feature::CollaborationModes)
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .with_env_overrides(&[("RUST_LOG", Some("info"))])
         .build_initialized()
         .await?;
@@ -130,13 +135,15 @@ async fn thread_status_changed_can_be_opted_out() -> Result<()> {
     let codex_home = TempDir::new()?;
     let responses = vec![create_final_assistant_message_sse_response("done")?];
     let server = create_mock_responses_server_sequence(responses).await;
-    MockResponsesConfig::new(&server.uri())
+    ManagedWhisplyConfig::new()
         .with_approval_policy("untrusted")
         .enable_feature(Feature::CollaborationModes)
         .write(codex_home.path())?;
 
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(&server.uri())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_managed_whisply_gateway(managed_gateway)
         .build()
         .await?;
     let message = timeout(

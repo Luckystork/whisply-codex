@@ -1,15 +1,15 @@
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
 use app_test_support::create_fake_rollout_with_token_usage;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_repeating_assistant;
+#[cfg(target_os = "macos")]
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::rollout_path;
 use app_test_support::to_response;
-use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCError;
@@ -43,9 +43,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_features::Feature;
-use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -70,21 +68,23 @@ use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
-use wiremock::Mock;
-use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
-
-use super::analytics::assert_basic_thread_initialized_event;
-use super::analytics::mount_analytics_capture;
-use super::analytics::thread_initialized_event;
-use super::analytics::wait_for_analytics_payload;
 
 #[cfg(windows)]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn write_managed_config(codex_home: &std::path::Path) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)
+}
+
+#[cfg(target_os = "macos")]
+fn write_managed_response_config(
+    codex_home: &std::path::Path,
+    _server_uri: &str,
+) -> std::io::Result<()> {
+    ManagedWhisplyConfig::new().write(codex_home)
+}
 
 async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
     let list_id = mcp
@@ -114,9 +114,8 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
 
 #[tokio::test]
 async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let preview = "Saved user message";
     let conversation_id = create_fake_rollout(
@@ -124,7 +123,7 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -198,7 +197,7 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     assert_eq!(thread.session_id, thread.id);
     assert_eq!(thread.forked_from_id, Some(conversation_id.clone()));
     assert_eq!(thread.preview, preview);
-    assert_eq!(thread.model_provider, "mock_provider");
+    assert_eq!(thread.model_provider, "whisply");
     assert_eq!(thread.status, ThreadStatus::Idle);
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
@@ -282,25 +281,28 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_preserves_persisted_approvals_reviewer() -> Result<()> {
     assert_thread_fork_preserves_persisted_approvals_reviewer(ThreadHistoryMode::Legacy).await
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn paginated_thread_fork_preserves_persisted_approvals_reviewer() -> Result<()> {
     assert_thread_fork_preserves_persisted_approvals_reviewer(ThreadHistoryMode::Paginated).await
 }
 
+#[cfg(target_os = "macos")]
 async fn assert_thread_fork_preserves_persisted_approvals_reviewer(
     history_mode: ThreadHistoryMode,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
 
     let (source_thread_id, source_turn_id) = {
-        let mut mcp = TestAppServer::builder()
+        let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
             .with_codex_home(codex_home.path())
             .build_initialized()
             .await?;
@@ -379,7 +381,7 @@ async fn assert_thread_fork_preserves_persisted_approvals_reviewer(
         (thread.id, turn.id)
     };
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -419,25 +421,28 @@ async fn assert_thread_fork_preserves_persisted_approvals_reviewer(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_at_last_turn_id_keeps_only_terminal_prefix() -> Result<()> {
     assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(ThreadHistoryMode::Legacy).await
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn paginated_thread_fork_at_named_boundaries_keeps_only_terminal_prefix() -> Result<()> {
     assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(ThreadHistoryMode::Paginated)
         .await
 }
 
+#[cfg(target_os = "macos")]
 async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     history_mode: ThreadHistoryMode,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
@@ -599,6 +604,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(vec![
@@ -621,7 +627,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     ])
     .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -629,9 +635,8 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         format!("{config}\n[features]\ngoals = true\n"),
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
@@ -663,15 +668,14 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     // Stop the source before its active goal exists so a late idle hook cannot continue it.
     timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
     drop(mcp);
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-        "mock_provider".into(),
+        "whisply".into(),
     )
     .await?;
     let source_goal = state_db
@@ -766,9 +770,8 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     let forked_thread = forked_threads.pop().expect("empty-prefix fork");
     let forked_thread_id = ThreadId::from_string(&forked_thread.id)?;
     drop(mcp);
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
-        .without_managed_config()
         .build_initialized()
         .await?;
     let resume_id = mcp
@@ -846,16 +849,15 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
 
 #[tokio::test]
 async fn thread_fork_inherits_explicit_source_name_from_session_index() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let source_thread_id = ThreadId::from_string(&conversation_id)?;
@@ -889,9 +891,8 @@ async fn thread_fork_inherits_explicit_source_name_from_session_index() -> Resul
 
 #[tokio::test]
 async fn thread_fork_can_load_source_by_path() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let preview = "Saved user message";
     let conversation_id = create_fake_rollout(
@@ -899,7 +900,7 @@ async fn thread_fork_can_load_source_by_path() -> Result<()> {
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let original_path = codex_home
@@ -931,7 +932,7 @@ async fn thread_fork_can_load_source_by_path() -> Result<()> {
     assert_ne!(thread.id, conversation_id);
     assert_eq!(thread.forked_from_id, Some(conversation_id));
     assert_eq!(thread.preview, preview);
-    assert_eq!(thread.model_provider, "mock_provider");
+    assert_eq!(thread.model_provider, "whisply");
     assert_eq!(thread.turns.len(), 1, "expected copied fork history");
 
     Ok(())
@@ -939,9 +940,8 @@ async fn thread_fork_can_load_source_by_path() -> Result<()> {
 
 #[tokio::test]
 async fn thread_fork_can_cut_before_unfinished_stored_turn() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let conversation_id = create_fake_rollout(
@@ -949,7 +949,7 @@ async fn thread_fork_can_cut_before_unfinished_stored_turn() -> Result<()> {
         filename_ts,
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let source_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
@@ -1012,16 +1012,15 @@ async fn thread_fork_can_cut_before_unfinished_stored_turn() -> Result<()> {
 
 #[tokio::test]
 async fn thread_fork_emits_restored_token_usage_before_next_turn() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_token_usage(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -1065,16 +1064,15 @@ async fn thread_fork_emits_restored_token_usage_before_next_turn() -> Result<()>
 
 #[tokio::test]
 async fn thread_fork_can_exclude_turns_and_skip_restored_token_usage() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_rollout_with_token_usage(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -1111,34 +1109,28 @@ async fn thread_fork_can_exclude_turns_and_skip_restored_token_usage() -> Result
 }
 
 #[tokio::test]
-async fn thread_fork_tracks_thread_initialized_analytics() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
+async fn thread_fork_uses_managed_metadata_config() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .without_managed_config()
         .build_initialized()
         .await?;
 
     let fork_id = mcp
         .send_thread_fork_request(ThreadForkParams {
-            thread_id: conversation_id,
+            thread_id: conversation_id.clone(),
             thread_source: Some(ThreadSource::User),
             ..Default::default()
         })
@@ -1146,32 +1138,14 @@ async fn thread_fork_tracks_thread_initialized_analytics() -> Result<()> {
     let ThreadForkResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
 
-    let payload = wait_for_analytics_payload(&server, DEFAULT_READ_TIMEOUT).await?;
-    let event = thread_initialized_event(&payload)?;
-    assert_basic_thread_initialized_event(
-        event,
-        &thread.id,
-        &thread.session_id,
-        "codex",
-        "mock-model",
-        "forked",
-        "user",
-    );
-    assert_eq!(
-        event["event_params"]["forked_from_thread_id"],
-        thread
-            .forked_from_id
-            .as_deref()
-            .expect("forked thread has a source thread")
-    );
+    assert_eq!(thread.forked_from_id.as_deref(), Some(conversation_id.as_str()));
     Ok(())
 }
 
 #[tokio::test]
 async fn thread_fork_rejects_unmaterialized_thread() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1210,18 +1184,19 @@ async fn thread_fork_rejects_unmaterialized_thread() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
 
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let source_path = rollout_path(
@@ -1249,7 +1224,7 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     ] {
         append_rollout_item_to_path(source_path.as_path(), &item).await?;
     }
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -1352,22 +1327,25 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_freezes_active_paginated_turn_as_interrupted() -> Result<()> {
     assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V1).await
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_persists_developer_interruption_marker_for_multi_agent_v2() -> Result<()> {
     assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V2).await
 }
 
+#[cfg(target_os = "macos")]
 async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     multi_agent_version: MultiAgentVersion,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    let config = MockResponsesConfig::new(&server.uri());
+    let config = ManagedWhisplyConfig::new();
     let (config, expected_marker_role, thread_source) = match multi_agent_version {
         MultiAgentVersion::V2 => (
             config.enable_feature(Feature::MultiAgentV2),
@@ -1383,7 +1361,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let source_path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &source_thread_id);
@@ -1432,7 +1410,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         &completed_user_item("before-fork", /*completed_at_ms*/ 1),
     )
     .await?;
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -1668,7 +1646,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     assert!(nested_before.turns.is_empty());
 
     drop(mcp);
-    let mut resumed_app_server = TestAppServer::builder()
+    let mut resumed_app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -1738,16 +1716,15 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
 
 #[tokio::test]
 async fn thread_fork_with_empty_path_uses_thread_id() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
 
     let conversation_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
@@ -1775,117 +1752,26 @@ async fn thread_fork_with_empty_path_uses_thread_id() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn thread_fork_surfaces_cloud_config_bundle_load_errors() -> Result<()> {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/wham/config/bundle"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .insert_header("content-type", "text/html")
-                .set_body_string("<html>nope</html>"),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/oauth/token"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "error": { "code": "refresh_token_invalidated" }
-        })))
-        .mount(&server)
-        .await;
-
-    let codex_home = TempDir::new()?;
-    let model_server = create_mock_responses_server_repeating_assistant("Done").await;
-    let chatgpt_base_url = format!("{}/backend-api", server.uri());
-    MockResponsesConfig::new(&model_server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{chatgpt_base_url}""#))
-        .write(codex_home.path())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .refresh_token("stale-refresh-token")
-            .plan_type("business")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123")
-            .account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-
-    let conversation_id = create_fake_rollout(
-        codex_home.path(),
-        "2025-01-05T12-00-00",
-        "2025-01-05T12:00:00Z",
-        "Saved user message",
-        Some("mock_provider"),
-        /*git_info*/ None,
-    )?;
-
-    let refresh_token_url = format!("{}/oauth/token", server.uri());
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .with_env_overrides(&[
-            ("OPENAI_API_KEY", None),
-            (
-                REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
-                Some(refresh_token_url.as_str()),
-            ),
-        ])
-        .build_initialized()
-        .await?;
-
-    let fork_id = mcp
-        .send_thread_fork_request(ThreadForkParams {
-            thread_id: conversation_id,
-            ..Default::default()
-        })
-        .await?;
-    let fork_err: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(fork_id)),
-    )
-    .await??;
-
-    assert!(
-        fork_err
-            .error
-            .message
-            .contains("failed to load configuration"),
-        "unexpected fork error: {}",
-        fork_err.error.message
-    );
-    assert_eq!(
-        fork_err.error.data,
-        Some(json!({
-            "reason": "cloudConfigBundle",
-            "errorCode": "Auth",
-            "action": "relogin",
-            "statusCode": 401,
-            "detail": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
-        }))
-    );
-
-    Ok(())
-}
-
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn thread_fork_ephemeral_remains_pathless_and_omits_listing() -> Result<()> {
     assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(ThreadHistoryMode::Legacy).await
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn paginated_thread_fork_ephemeral_remains_pathless_and_omits_listing() -> Result<()> {
     assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(ThreadHistoryMode::Paginated)
         .await
 }
 
+#[cfg(target_os = "macos")]
 async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
     history_mode: ThreadHistoryMode,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
 
     let preview = "Saved user message";
     let create_rollout = match history_mode {
@@ -1897,11 +1783,11 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         preview,
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .build_initialized()
@@ -2076,15 +1962,14 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
 
 #[tokio::test]
 async fn thread_fork_rejects_incompatible_boundaries_and_ephemeral_goal_deferral() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_config(codex_home.path())?;
     let thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
     let mut mcp = TestAppServer::builder()
@@ -2125,23 +2010,24 @@ async fn thread_fork_rejects_incompatible_boundaries_and_ephemeral_goal_deferral
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn pathless_ephemeral_thread_rejects_codex_home_path_after_reload() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    write_managed_response_config(codex_home.path(), &server.uri())?;
 
     let parent_thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Parent message",
-        Some("mock_provider"),
+        Some("whisply"),
         /*git_info*/ None,
     )?;
 
     let side_thread_id = {
-        let mut app_server = TestAppServer::builder()
+        let mut app_server = app_test_support::managed_whisply_app_server_builder!(&server.uri())
             .with_codex_home(codex_home.path())
             .without_auto_env()
             .build_initialized()

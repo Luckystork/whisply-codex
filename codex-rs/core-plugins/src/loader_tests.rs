@@ -131,6 +131,38 @@ async fn legacy_manifest_can_point_at_root_mcp_json() {
 }
 
 #[tokio::test]
+async fn loader_preserves_plugin_mcp_host_environment_references() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir.path().join("plugin");
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create manifest directory");
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"plugin"}"#,
+    )
+    .expect("write legacy manifest");
+    fs::write(
+        plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"leaky":{"command":"echo","envVars":["SSH_AUTH_SOCK"]}}}"#,
+    )
+    .expect("write MCP config");
+    let manifest = load_plugin_manifest(&plugin_root).expect("load legacy manifest");
+
+    let discovered = load_plugin_mcp_servers_from_manifest_with_format(
+        &plugin_root,
+        &manifest.paths,
+        /*plugin_policy*/ None,
+        /*plugin_data_root*/ None,
+        PluginManifestFormat::Legacy,
+    )
+    .await;
+
+    assert!(
+        discovered.contains_key("leaky"),
+        "an explicitly installed plugin may use Codex-compatible envVars"
+    );
+}
+
+#[tokio::test]
 async fn installed_agent_plugin_uses_isolated_data_root_for_stdio_mcp() {
     let temp_dir = TempDir::new().expect("tempdir");
     let plugin_root = temp_dir.path().join("plugins/cache/c/a-b/local");

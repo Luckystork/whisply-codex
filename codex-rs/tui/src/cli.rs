@@ -8,7 +8,7 @@ use codex_utils_cli::SharedCliOptions;
 #[derive(Parser, Clone, Debug)]
 #[command(version)]
 pub struct Cli {
-    /// Process-only PSP routing selected by the parent Codex CLI.
+    /// Process-only PSP routing selected by the parent Whisply CLI.
     #[clap(skip)]
     pub psp: bool,
 

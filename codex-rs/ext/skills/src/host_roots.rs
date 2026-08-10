@@ -4,9 +4,6 @@ use std::sync::Arc;
 
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
-use codex_config::default_project_root_markers;
-use codex_config::merge_toml_values;
-use codex_config::project_root_markers_from_config;
 use codex_core_skills::loader::SkillRoot;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
@@ -18,7 +15,6 @@ use codex_utils_plugins::PluginSkillRoot;
 use codex_utils_plugins::SkillDiscoveryMode;
 use dirs::home_dir;
 use futures::StreamExt;
-use toml::Value as TomlValue;
 
 use crate::loader::HostSkillRoot;
 
@@ -46,7 +42,7 @@ pub(crate) async fn resolve_skill_roots(
     .await
 }
 
-async fn resolve_skill_roots_with_home_dir(
+pub(crate) async fn resolve_skill_roots_with_home_dir(
     repository_file_system: Option<Arc<dyn ExecutorFileSystem>>,
     config_layer_stack: &ConfigLayerStack,
     cwd: &AbsolutePathBuf,
@@ -90,6 +86,7 @@ fn roots_from_layer_stack(
     repository_file_system: Option<Arc<dyn ExecutorFileSystem>>,
 ) -> Vec<HostSkillRoot> {
     let mut roots = Vec::new();
+    let active_project_is_trusted = trusted_project_root(config_layer_stack).is_some();
 
     for layer in config_layer_stack.all_layers_high_to_low() {
         let Some(config_folder) = layer.config_folder() else {
@@ -98,7 +95,12 @@ fn roots_from_layer_stack(
 
         match &layer.name {
             ConfigLayerSource::Project { .. } => {
-                if let Some(repository_file_system) = &repository_file_system {
+                // Project-local roots are untrusted input until the active
+                // project layer has passed the config loader's trust gate.
+                if active_project_is_trusted
+                    && !layer.is_disabled()
+                    && let Some(repository_file_system) = &repository_file_system
+                {
                     roots.push(HostSkillRoot {
                         path: config_folder.join(SKILLS_DIR_NAME),
                         scope: SkillScope::Repo,
@@ -173,9 +175,12 @@ async fn repo_agents_skill_roots(
     let Some(repository_file_system) = repository_file_system else {
         return Vec::new();
     };
-    let project_root_markers = project_root_markers_from_stack(config_layer_stack);
-    let project_root =
-        find_project_root(repository_file_system.as_ref(), cwd, &project_root_markers).await;
+    // `.agents/skills` is a compatibility project root, not a process-global
+    // user root. Its authority and ancestry begin at the active project's
+    // trusted layer, never at an unrelated marker-derived ancestor.
+    let Some(project_root) = trusted_project_root(config_layer_stack) else {
+        return Vec::new();
+    };
     let directories = dirs_between_project_root_and_cwd(cwd, &project_root);
     let mut roots = Vec::new();
     let mut results = futures::stream::iter(directories)
@@ -212,69 +217,35 @@ async fn repo_agents_skill_roots(
     roots
 }
 
-fn project_root_markers_from_stack(config_layer_stack: &ConfigLayerStack) -> Vec<String> {
-    let mut merged = TomlValue::Table(toml::map::Map::new());
-    for layer in config_layer_stack.layers_low_to_high() {
-        if matches!(layer.name, ConfigLayerSource::Project { .. }) {
-            continue;
-        }
-        merge_toml_values(&mut merged, &layer.config);
-    }
-
-    match project_root_markers_from_config(&merged) {
-        Ok(Some(markers)) => markers,
-        Ok(None) => default_project_root_markers(),
-        Err(error) => {
-            tracing::warn!("invalid project_root_markers: {error}");
-            default_project_root_markers()
-        }
-    }
+fn trusted_project_root(config_layer_stack: &ConfigLayerStack) -> Option<AbsolutePathBuf> {
+    config_layer_stack
+        .trusted_project_root()
+        .cloned()
+        .or_else(|| active_trusted_project_layer_root(config_layer_stack))
 }
 
-async fn find_project_root(
-    repository_file_system: &dyn ExecutorFileSystem,
-    cwd: &AbsolutePathBuf,
-    project_root_markers: &[String],
-) -> AbsolutePathBuf {
-    if project_root_markers.is_empty() {
-        return cwd.clone();
+fn active_trusted_project_layer_root(
+    config_layer_stack: &ConfigLayerStack,
+) -> Option<AbsolutePathBuf> {
+    let active_project_layer = config_layer_stack
+        .all_layers_high_to_low()
+        .find(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))?;
+    if active_project_layer.is_disabled() {
+        return None;
     }
-
-    let mut probes = Vec::new();
-    for ancestor in cwd.ancestors() {
-        for marker in project_root_markers {
-            probes.push((ancestor.clone(), ancestor.join(marker)));
-        }
+    match &active_project_layer.name {
+        ConfigLayerSource::Project { dot_codex_folder } => dot_codex_folder.parent(),
+        _ => None,
     }
-    let mut results = futures::stream::iter(probes)
-        .map(|(ancestor, marker_path)| async move {
-            let marker_path_uri = PathUri::from_abs_path(&marker_path);
-            let result = repository_file_system
-                .get_metadata(&marker_path_uri, /*sandbox*/ None)
-                .await;
-            (ancestor, marker_path, result)
-        })
-        .buffered(MAX_CONCURRENT_ANCESTOR_PROBES);
-    while let Some((ancestor, marker_path, result)) = results.next().await {
-        match result {
-            Ok(_) => return ancestor,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!(
-                    "failed to stat project root marker {}: {error:#}",
-                    marker_path.display()
-                );
-            }
-        }
-    }
-
-    cwd.clone()
 }
 
 fn dirs_between_project_root_and_cwd(
     cwd: &AbsolutePathBuf,
     project_root: &AbsolutePathBuf,
 ) -> Vec<AbsolutePathBuf> {
+    if !cwd.as_path().starts_with(project_root.as_path()) {
+        return Vec::new();
+    }
     let mut directories = cwd
         .ancestors()
         .scan(false, |done, directory| {

@@ -156,6 +156,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";
 const REQUEST_ID_HEADER: &str = "x-request-id";
+const WHISPLY_REQUEST_ID_HEADER: &str = "x-whisply-request-id";
 const OAI_REQUEST_ID_HEADER: &str = "x-oai-request-id";
 const CF_RAY_HEADER: &str = "cf-ray";
 const X_OPENAI_AUTHORIZATION_ERROR_HEADER: &str = "x-openai-authorization-error";
@@ -186,7 +187,8 @@ fn api_error_user_message(status: http::StatusCode, body: &str) -> Option<String
 }
 
 fn extract_request_id(headers: Option<&HeaderMap>) -> Option<String> {
-    extract_header(headers, REQUEST_ID_HEADER)
+    extract_header(headers, WHISPLY_REQUEST_ID_HEADER)
+        .or_else(|| extract_header(headers, REQUEST_ID_HEADER))
         .or_else(|| extract_header(headers, OAI_REQUEST_ID_HEADER))
 }
 

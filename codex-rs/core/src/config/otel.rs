@@ -14,11 +14,11 @@ pub(crate) fn resolve_config(
     let environment = config
         .environment
         .unwrap_or_else(|| DEFAULT_OTEL_ENVIRONMENT.to_string());
-    let exporter = config.exporter.unwrap_or(OtelExporterKind::None);
-    // OTLP HTTP endpoints are signal-specific in our config, so enabling log
-    // export must not implicitly send spans to a /v1/logs endpoint.
-    let trace_exporter = config.trace_exporter.unwrap_or(OtelExporterKind::None);
-    let metrics_exporter = config.metrics_exporter.unwrap_or(OtelExporterKind::Statsig);
+    // BrokerOnly has no ambient telemetry authority. Retain the local OTEL
+    // metadata below, but ensure config resolution cannot select an exporter.
+    let exporter = OtelExporterKind::None;
+    let trace_exporter = OtelExporterKind::None;
+    let metrics_exporter = OtelExporterKind::None;
     // Provider initialization installs process-global OTEL state. Sanitize
     // user-editable trace metadata here so malformed config is reported as a
     // startup warning instead of making startup fail.

@@ -6,7 +6,6 @@ use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::Child;
-use std::process::Command;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -14,34 +13,43 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use anyhow::ensure;
+use app_test_support::ManagedWhisplyGatewayFixture;
+use core_test_support::streaming_sse::start_managed_streaming_sse_server;
 use tempfile::TempDir;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 15);
 const FOCUS_INPUT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 
-#[test]
-fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn focus_gained_with_unanswered_palette_queries_preserves_immediate_input() -> Result<()> {
     let repo_root = codex_utils_cargo_bin::repo_root()?;
     let codex_home = tempfile::tempdir()?;
     write_test_config(codex_home.path(), &repo_root)?;
+    let (server, _completions) = start_managed_streaming_sse_server(Vec::new()).await;
+    let managed_gateway = ManagedWhisplyGatewayFixture::new(server.uri())?;
 
-    let mut terminal = PtyCodex::start(&repo_root, codex_home)?;
-    terminal.wait_for_startup()?;
+    let result: Result<()> = {
+        let mut terminal = PtyCodex::start(&repo_root, codex_home, managed_gateway)?;
+        terminal.wait_for_startup()?;
 
-    let startup_output_len = terminal.output.len();
-    let focus_started = Instant::now();
-    terminal.write_input(format!("\u{1b}[I{FOCUS_PROBE_INPUT}").as_bytes())?;
-    terminal.wait_for_focus_input(FOCUS_PROBE_INPUT, focus_started, startup_output_len)?;
+        let startup_output_len = terminal.output.len();
+        let focus_started = Instant::now();
+        terminal.write_input(format!("\u{1b}[I{FOCUS_PROBE_INPUT}").as_bytes())?;
+        terminal.wait_for_focus_input(FOCUS_PROBE_INPUT, focus_started, startup_output_len)?;
 
-    let delayed_input = format!("{FOCUS_PROBE_INPUT}-delayed");
-    let delayed_focus_started = Instant::now();
-    terminal.write_input(b"\x1b[I")?;
-    terminal.read_output(Duration::from_millis(/*millis*/ 20))?;
-    terminal.write_input(delayed_input.as_bytes())?;
-    terminal.wait_for_focus_input(&delayed_input, delayed_focus_started, startup_output_len)?;
+        let delayed_input = format!("{FOCUS_PROBE_INPUT}-delayed");
+        let delayed_focus_started = Instant::now();
+        terminal.write_input(b"\x1b[I")?;
+        terminal.read_output(Duration::from_millis(/*millis*/ 20))?;
+        terminal.write_input(delayed_input.as_bytes())?;
+        terminal.wait_for_focus_input(&delayed_input, delayed_focus_started, startup_output_len)?;
+        terminal.assert_managed_gateway_healthy()?;
 
-    Ok(())
+        Ok(())
+    };
+    server.shutdown().await;
+    result
 }
 
 struct PtyCodex {
@@ -52,11 +60,16 @@ struct PtyCodex {
     cursor_answered: bool,
     palette_answered: bool,
     keyboard_answered: bool,
+    _managed_gateway: ManagedWhisplyGatewayFixture,
     _codex_home: TempDir,
 }
 
 impl PtyCodex {
-    fn start(repo_root: &Path, codex_home: TempDir) -> Result<Self> {
+    fn start(
+        repo_root: &Path,
+        codex_home: TempDir,
+        managed_gateway: ManagedWhisplyGatewayFixture,
+    ) -> Result<Self> {
         let mut master_fd = -1;
         let mut slave_fd = -1;
         let mut window_size = libc::winsize {
@@ -88,20 +101,41 @@ impl PtyCodex {
         let stdin = slave.try_clone().context("clone pseudo-terminal stdin")?;
         let stdout = slave.try_clone().context("clone pseudo-terminal stdout")?;
 
-        let codex = codex_utils_cargo_bin::cargo_bin("codex")
+        let codex = codex_utils_cargo_bin::cargo_bin("whisply")
             .or_else(|_| codex_utils_cargo_bin::cargo_bin("codex-tui"))?;
-        let child = Command::new(codex)
+        let canonical_home = codex_home
+            .path()
+            .canonicalize()
+            .context("canonicalize focus-test Whisply home")?;
+        let mut command = tokio::process::Command::new(codex);
+        command
             .arg("--no-alt-screen")
             .arg("-C")
             .arg(repo_root)
             .arg("-c")
             .arg("analytics.enabled=false")
             .env("TERM", "xterm-256color")
-            .env("OPENAI_API_KEY", "focus-palette-test")
-            .env("CODEX_HOME", codex_home.path())
+            .env("CODEX_HOME", &canonical_home)
+            .env("WHISPLY_HOME", &canonical_home)
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(slave)
+            .stderr(slave);
+        for (key, value) in managed_gateway.environment_overrides() {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+        ManagedWhisplyGatewayFixture::configure_child_command(
+            &mut command,
+            managed_gateway.inherited_descriptor_fds(),
+        )?;
+        let child = command
+            .as_std_mut()
             .spawn()
             .context("start Codex in focus-test pseudo-terminal")?;
 
@@ -115,8 +149,13 @@ impl PtyCodex {
             cursor_answered: false,
             palette_answered: false,
             keyboard_answered: false,
+            _managed_gateway: managed_gateway,
             _codex_home: codex_home,
         })
+    }
+
+    fn assert_managed_gateway_healthy(&self) -> Result<()> {
+        self._managed_gateway.assert_healthy()
     }
 
     fn wait_for_startup(&mut self) -> Result<()> {
@@ -125,7 +164,7 @@ impl PtyCodex {
             self.read_output(Duration::from_millis(/*millis*/ 50))?;
             self.answer_startup_queries()?;
 
-            if self.palette_answered && self.screen_contains("OpenAI Codex") {
+            if self.palette_answered && self.screen_contains("Whisply") {
                 return Ok(());
             }
 
@@ -252,15 +291,11 @@ fn contains_bytes(buffer: &[u8], needle: &[u8]) -> bool {
 fn write_test_config(codex_home: &Path, repo_root: &Path) -> Result<()> {
     let repo_root = repo_root.display();
     let config = format!(
-        "model = \"gpt-5.6-terra\"\nmodel_provider = \"openai\"\n\
+        "model = \"gpt-5.6-terra\"\nmodel_provider = \"whisply\"\n\
          suppress_unstable_features_warning = true\n\n\
          [projects.\"{repo_root}\"]\ntrust_level = \"trusted\"\n"
     );
     std::fs::write(codex_home.join("config.toml"), config)
         .context("write focus-test Codex configuration")?;
-    std::fs::write(
-        codex_home.join("auth.json"),
-        r#"{"OPENAI_API_KEY":"focus-palette-test","tokens":null,"last_refresh":null}"#,
-    )
-    .context("write focus-test API-key authentication")
+    Ok(())
 }

@@ -53,6 +53,28 @@ fn qualified_mcp_tool_name_prefix_sanitizes_server_names_without_lowercasing() {
 }
 
 #[test]
+fn whisply_mcp_admission_rejects_host_owned_and_chatgpt_auth_servers_only() {
+    let host_owned = codex_apps_mcp_server_config(
+        "https://chatgpt.com",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    assert!(is_whisply_rejected_mcp_server(
+        CODEX_APPS_MCP_SERVER_NAME,
+        &host_owned
+    ));
+
+    assert!(is_whisply_rejected_mcp_server("legacy-alias", &host_owned));
+
+    let mut ordinary_oauth = host_owned;
+    ordinary_oauth.auth = McpServerAuth::OAuth;
+    assert!(!is_whisply_rejected_mcp_server(
+        "ordinary-oauth",
+        &ordinary_oauth
+    ));
+}
+
+#[test]
 fn mcp_prompt_auto_approval_honors_unrestricted_managed_profiles() {
     assert!(mcp_permission_prompt_is_auto_approved(
         AskForApproval::Never,

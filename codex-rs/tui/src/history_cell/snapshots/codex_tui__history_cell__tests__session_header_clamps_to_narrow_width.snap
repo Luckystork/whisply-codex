@@ -1,9 +1,10 @@
 ---
 source: tui/src/history_cell/tests.rs
+assertion_line: 1633
 expression: "render_lines(&lines).join(\"\\n\")"
 ---
 ╭──────────────────────────────────────────╮
-│ >_ OpenAI Codex (vtest)                  │
+│ >_ Whisply (vtest)                       │
 │                                          │
 │ model:       gpt-5.6-sol xhigh   fast  … │
 │ directory:   project                     │

@@ -4,7 +4,9 @@ export JUST_SHELL := justfile_directory() / "scripts/just-shell.py"
 set shell := ["python3", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
 set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
 
-rust_min_stack := "8388608" # 8 MiB
+# The complete app-server protocol suite reaches deeply nested fixture stacks.
+# Keep `just test` aligned with the fixed debug verifier's Rust-only setting.
+rust_min_stack := "67108864" # 64 MiB
 python := if os_family() == "windows" { "python" } else { "python3" }
 
 # Display help
@@ -77,12 +79,17 @@ install:
 # Run `cargo install --locked cargo-nextest` if you don't have it installed.
 # Prefer this for routine local runs. Workspace crate features are banned, so
 # there should be no need to add `--all-features`.
+test-helper-binaries:
+    cargo build -p codex-cli --bin whisply
+    cargo build -p codex-rmcp-client --bin test_stdio_server
+    cargo build -p codex-code-mode-host --bin codex-code-mode-host
+
 [unix]
-test *args:
+test *args: test-helper-binaries
     RUST_MIN_STACK={{ rust_min_stack }} NEXTEST_PROFILE=local cargo nextest run --no-fail-fast "$@"
 
 [windows]
-test *args:
+test *args: test-helper-binaries
     $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
 
 # Run from the repository root so scripts that resolve paths from `cwd` see

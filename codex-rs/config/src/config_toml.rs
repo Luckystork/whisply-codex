@@ -14,6 +14,7 @@ use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
 use crate::types::MarketplaceConfig;
+use crate::types::McpServerAuth;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
 use crate::types::Notice;
@@ -51,6 +52,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path::normalize_for_path_comparison;
+use codex_whisply::WHISPLY_PROVIDER_ID;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -58,12 +60,16 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 use serde_json::Value as JsonValue;
 
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 5] = [
     AMAZON_BEDROCK_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,
+    WHISPLY_PROVIDER_ID,
 ];
+
+/// The host-owned Apps MCP is not a configurable runtime authority in Whisply.
+const WHISPLY_RESERVED_MCP_SERVER_NAME: &str = "codex_apps";
 
 pub const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32 * 1024;
 
@@ -85,6 +91,33 @@ const fn default_hide_agent_reasoning() -> Option<bool> {
 
 const fn default_true() -> bool {
     true
+}
+
+/// Reject MCP configuration that could route a Whisply runtime through a
+/// host-owned ChatGPT authority. This is deliberately attached to the
+/// top-level config field (rather than the generic `McpServerConfig` type) so
+/// genuine plugin and external MCP definitions remain available to their
+/// explicit owners.
+fn deserialize_whisply_mcp_servers<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, McpServerConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mcp_servers = HashMap::<String, McpServerConfig>::deserialize(deserializer)?;
+    for (name, server) in &mcp_servers {
+        if name == WHISPLY_RESERVED_MCP_SERVER_NAME {
+            return Err(D::Error::custom(
+                "mcp_servers.codex_apps is reserved and unavailable in Whisply",
+            ));
+        }
+        if server.auth == McpServerAuth::ChatGpt {
+            return Err(D::Error::custom(format!(
+                "mcp_servers.{name}.auth = \"chatgpt\" is unavailable in Whisply; use a standard MCP OAuth or local server"
+            )));
+        }
+    }
+    Ok(mcp_servers)
 }
 
 /// Backward-compatible shape for ChatGPT workspace login restrictions in config.toml.
@@ -144,7 +177,7 @@ pub struct OrchestratorFeatureToml {
     pub enabled: Option<bool>,
 }
 
-/// Base config deserialized from ~/.codex/config.toml.
+/// Base config deserialized from ~/.whisply/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ConfigToml {
@@ -254,7 +287,7 @@ pub struct ConfigToml {
     pub cli_auth_credentials_store: Option<AuthCredentialsStoreMode>,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_whisply_mcp_servers")]
     // Uses the raw MCP input shape (custom deserialization) rather than `McpServerConfig`.
     #[schemars(schema_with = "crate::schema::mcp_servers_schema")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
@@ -312,17 +345,17 @@ pub struct ConfigToml {
     #[serde(default)]
     pub profiles: HashMap<String, ConfigProfile>,
 
-    /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
+    /// Settings that govern if and what will be written to `~/.whisply/history.jsonl`.
     #[serde(default = "default_history")]
     pub history: Option<History>,
 
     /// Directory where Codex stores the SQLite state DB.
-    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
+    /// Defaults to `$WHISPLY_SQLITE_HOME` when set. Otherwise uses `$WHISPLY_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.
-    /// Defaults to `$CODEX_HOME/log`.
+    /// Defaults to `$WHISPLY_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
     /// Debugging and reproducibility settings.
@@ -463,7 +496,7 @@ pub struct ConfigToml {
     pub ghost_snapshot: Option<GhostSnapshotToml>,
 
     /// Markers used to detect the project root when searching parent
-    /// directories for `.codex` folders. Defaults to [".git"] when unset.
+    /// directories for `.whisply` folders. Defaults to [".git"] when unset.
     #[serde(default)]
     pub project_root_markers: Option<Vec<String>>,
 
@@ -1022,6 +1055,59 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("TOML list of strings"));
         assert!(message.contains("comma-separated strings are not supported"));
+    }
+
+    #[test]
+    fn mcp_servers_reject_chatgpt_auth_under_an_alias() {
+        let err = toml::from_str::<ConfigToml>(
+            r#"
+[mcp_servers.legacy_chatgpt_alias]
+url = "https://chatgpt.com/backend-api/ps/mcp"
+auth = "chatgpt"
+"#,
+        )
+        .expect_err("Whisply must reject aliased ChatGPT MCP authority");
+
+        let message = err.to_string();
+        assert!(message.contains("legacy_chatgpt_alias"));
+        assert!(message.contains("auth = \"chatgpt\""));
+    }
+
+    #[test]
+    fn mcp_servers_reject_the_reserved_host_owned_apps_name() {
+        let err = toml::from_str::<ConfigToml>(
+            r#"
+[mcp_servers.codex_apps]
+url = "https://example.invalid/mcp"
+"#,
+        )
+        .expect_err("Whisply must reserve the host-owned Apps MCP name");
+
+        assert!(
+            err.to_string()
+                .contains("mcp_servers.codex_apps is reserved")
+        );
+    }
+
+    #[test]
+    fn mcp_servers_retain_standard_oauth_and_local_mcp_configuration() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+[mcp_servers.external_oauth]
+url = "https://external.example/mcp"
+
+[mcp_servers.local_oss]
+command = "local-mcp"
+"#,
+        )
+        .expect("standard OAuth and local MCP servers should remain configurable");
+
+        assert_eq!(config.mcp_servers.len(), 2);
+        assert_eq!(
+            config.mcp_servers["external_oauth"].auth,
+            McpServerAuth::OAuth
+        );
+        assert_eq!(config.mcp_servers["local_oss"].auth, McpServerAuth::OAuth);
     }
 
     #[test]

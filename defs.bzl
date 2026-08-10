@@ -202,6 +202,7 @@ def codex_rust_crate(
         test_tags = [],
         unit_test_timeout = None,
         extra_binaries = [],
+        binary_overrides = {},
         extra_binaries_non_windows = [],
         run_tests_with_wine_exec = False):
     """Defines a Rust crate with library, binaries, and tests wired for Bazel + Cargo parity.
@@ -250,6 +251,11 @@ def codex_rust_crate(
             generated from `src/**/*.rs`.
         extra_binaries: Additional binary labels to surface as test data and
             `CARGO_BIN_EXE_*` environment variables. These are only needed for binaries from a different crate.
+        binary_overrides: Mapping from an in-crate binary name to a test-only
+            replacement binary label. The normal binary target remains
+            available to production consumers, but integration-test data and
+            its `CARGO_BIN_EXE_*` entry use only the replacement. Replacement
+            labels must retain the original binary basename.
         extra_binaries_non_windows: Like `extra_binaries`, but omitted from
             Windows test data and environment variables. Tests using these
             binaries must be excluded when targeting Windows.
@@ -370,14 +376,30 @@ def codex_rust_crate(
 
         maybe_deps += [name]
 
+    for binary, binary_label in binary_overrides.items():
+        if binary not in binaries:
+            fail(
+                "binary_overrides contains {}, which is not an in-crate binary".format(
+                    binary
+                )
+            )
+        if Label(binary_label).name != binary:
+            fail(
+                "binary_overrides[{}] must keep the {} binary basename".format(
+                    binary,
+                    binary,
+                )
+            )
+
     sanitized_binaries = []
     cargo_env = {}
     cargo_env_runfiles = {}
     for binary, main in binaries.items():
         #binary = binary.replace("-", "_")
-        sanitized_binaries.append(binary)
-        cargo_env_runfiles[":" + binary] = "CARGO_BIN_EXE_" + binary
-        cargo_env["CARGO_BIN_EXE_" + binary] = "$(rlocationpath :%s)" % binary
+        if binary not in binary_overrides:
+            sanitized_binaries.append(binary)
+            cargo_env_runfiles[":" + binary] = "CARGO_BIN_EXE_" + binary
+            cargo_env["CARGO_BIN_EXE_" + binary] = "$(rlocationpath :%s)" % binary
 
         rust_binary(
             name = binary,
@@ -428,6 +450,11 @@ def codex_rust_crate(
             tags = test_tags,
             **binary_unit_test_kwargs
         )
+
+    for binary, binary_label in binary_overrides.items():
+        sanitized_binaries.append(binary_label)
+        cargo_env_runfiles[binary_label] = "CARGO_BIN_EXE_" + binary
+        cargo_env["CARGO_BIN_EXE_" + binary] = "$(rlocationpath %s)" % binary_label
 
     for binary_label in extra_binaries:
         sanitized_binaries.append(binary_label)

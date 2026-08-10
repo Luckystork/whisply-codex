@@ -2,7 +2,9 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
-use app_test_support::create_mock_responses_server_sequence_unchecked;
+use app_test_support::ManagedWhisplyConfig;
+#[cfg(target_os = "macos")]
+use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::to_response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -19,6 +21,7 @@ use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_core::config::set_project_trust_level;
 use codex_protocol::config_types::TrustLevel;
 use futures::SinkExt;
@@ -64,9 +67,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 #[tokio::test]
 async fn websocket_transport_routes_per_connection_handshake_and_responses() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
 
@@ -109,13 +111,12 @@ async fn websocket_transport_routes_per_connection_handshake_and_responses() -> 
 
 #[tokio::test]
 async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let project = TempDir::new()?;
     std::fs::create_dir(project.path().join(".git"))?;
-    let rules_dir = project.path().join(".codex/rules");
+    let rules_dir = project.path().join(PROJECT_CONFIG_DIRECTORY).join("rules");
     std::fs::create_dir_all(&rules_dir)?;
     let rules_path = rules_dir.join("broken.rules");
     std::fs::write(&rules_path, "prefix_rule(")?;
@@ -209,9 +210,8 @@ async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Resul
 
 #[tokio::test]
 async fn websocket_transport_serves_health_endpoints_on_same_listener() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
     let client = reqwest::Client::new();
@@ -236,9 +236,8 @@ async fn websocket_transport_serves_health_endpoints_on_same_listener() -> Resul
 
 #[tokio::test]
 async fn websocket_transport_rejects_browser_origin_without_auth() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
 
@@ -265,11 +264,10 @@ async fn websocket_transport_rejects_browser_origin_without_auth() -> Result<()>
 
 #[tokio::test]
 async fn websocket_transport_rejects_missing_and_invalid_capability_tokens() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     let token_file = codex_home.path().join("app-server-token");
     std::fs::write(&token_file, "super-secret-token\n")?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
     let auth_args = vec![
         "--ws-auth".to_string(),
         "capability-token".to_string(),
@@ -297,12 +295,11 @@ async fn websocket_transport_rejects_missing_and_invalid_capability_tokens() -> 
 
 #[tokio::test]
 async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     let shared_secret_file = codex_home.path().join("app-server-signing-secret");
     let shared_secret = "0123456789abcdef0123456789abcdef";
     std::fs::write(&shared_secret_file, format!("{shared_secret}\n"))?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
     let auth_args = vec![
         "--ws-auth".to_string(),
         "signed-bearer-token".to_string(),
@@ -394,11 +391,10 @@ async fn websocket_transport_verifies_signed_short_lived_bearer_tokens() -> Resu
 
 #[tokio::test]
 async fn websocket_transport_rejects_short_signed_bearer_secret_configuration() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     let shared_secret_file = codex_home.path().join("app-server-signing-secret");
     std::fs::write(&shared_secret_file, "too-short\n")?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let output = run_websocket_server_to_completion_with_args(
         codex_home.path(),
@@ -426,9 +422,8 @@ async fn websocket_transport_rejects_short_signed_bearer_secret_configuration() 
 
 #[tokio::test]
 async fn websocket_transport_rejects_unauthenticated_non_loopback_startup() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let output =
         run_websocket_server_to_completion_with_args(codex_home.path(), "ws://0.0.0.0:0", &[])
@@ -449,9 +444,8 @@ async fn websocket_transport_rejects_unauthenticated_non_loopback_startup() -> R
 #[tokio::test]
 async fn websocket_disconnect_keeps_last_subscribed_thread_loaded_until_idle_timeout() -> Result<()>
 {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+    write_managed_websocket_config(codex_home.path())?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
 
@@ -487,6 +481,35 @@ pub(super) async fn spawn_websocket_server_with_args(
     listen_url: &str,
     extra_args: &[String],
 ) -> Result<(Child, SocketAddr)> {
+    spawn_websocket_server_with_args_and_env(codex_home, listen_url, extra_args, &[], None).await
+}
+
+/// Starts a websocket child with test-only launch descriptors supplied by the
+/// native managed broker fixture. The fixture remains owned by the caller for
+/// the child process lifetime, including the inherited descriptor handles.
+#[cfg(target_os = "macos")]
+pub(super) async fn spawn_websocket_server_with_managed_whisply_gateway(
+    codex_home: &Path,
+    managed_gateway: &ManagedWhisplyGatewayFixture,
+) -> Result<(Child, SocketAddr)> {
+    let env_overrides = managed_gateway.environment_overrides();
+    spawn_websocket_server_with_args_and_env(
+        codex_home,
+        "ws://127.0.0.1:0",
+        &[],
+        &env_overrides,
+        Some(managed_gateway.inherited_descriptor_fds()),
+    )
+    .await
+}
+
+async fn spawn_websocket_server_with_args_and_env(
+    codex_home: &Path,
+    listen_url: &str,
+    extra_args: &[String],
+    env_overrides: &[(String, Option<String>)],
+    managed_whisply_descriptor_fds: Option<[i32; 3]>,
+) -> Result<(Child, SocketAddr)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
@@ -497,8 +520,26 @@ pub(super) async fn spawn_websocket_server_with_args(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home)
+        .env_remove("CODEX_HOME")
+        .env_remove("OPENAI_API_KEY")
         .env("RUST_LOG", "warn");
+    for (key, value) in env_overrides {
+        match value {
+            Some(value) => {
+                cmd.env(key, value);
+            }
+            None => {
+                cmd.env_remove(key);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(descriptor_fds) = managed_whisply_descriptor_fds {
+        ManagedWhisplyGatewayFixture::configure_child_command(&mut cmd, descriptor_fds)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = managed_whisply_descriptor_fds;
     let mut process = cmd
         .kill_on_drop(true)
         .spawn()
@@ -633,7 +674,9 @@ async fn run_websocket_server_to_completion_with_args(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home)
+        .env_remove("CODEX_HOME")
+        .env_remove("OPENAI_API_KEY")
         .env("RUST_LOG", "warn");
     timeout(DEFAULT_READ_TIMEOUT, cmd.output())
         .await
@@ -929,31 +972,17 @@ pub(super) async fn assert_no_message(stream: &mut WsClient, wait_for: Duration)
     }
 }
 
-pub(super) fn create_config_toml(
+pub(super) fn create_managed_config_toml(
     codex_home: &Path,
-    server_uri: &str,
     approval_policy: &str,
 ) -> std::io::Result<()> {
-    let config_toml = codex_home.join("config.toml");
-    std::fs::write(
-        config_toml,
-        format!(
-            r#"
-model = "mock-model"
-approval_policy = "{approval_policy}"
-sandbox_mode = "read-only"
+    ManagedWhisplyConfig::new()
+        .with_approval_policy(approval_policy)
+        .write(codex_home)
+}
 
-model_provider = "mock_provider"
-
-[model_providers.mock_provider]
-name = "Mock provider for test"
-base_url = "{server_uri}/v1"
-wire_api = "responses"
-request_max_retries = 0
-stream_max_retries = 0
-"#
-        ),
-    )
+fn write_managed_websocket_config(codex_home: &Path) -> std::io::Result<()> {
+    create_managed_config_toml(codex_home, "never")
 }
 
 fn connectable_bind_addr(bind_addr: SocketAddr) -> SocketAddr {

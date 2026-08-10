@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
-use app_test_support::create_mock_responses_server_sequence_unchecked;
 use axum::Router;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ListMcpServerStatusParams;
@@ -17,6 +16,7 @@ use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_config::PROJECT_CONFIG_DIRECTORY;
 use codex_core::config::set_project_trust_level;
 use codex_protocol::config_types::TrustLevel;
 use core_test_support::stdio_server_bin;
@@ -82,11 +82,10 @@ fn assert_dynamic_status(response: &ListMcpServerStatusResponse, process_label: 
 
 #[tokio::test]
 async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server("look-up.raw").await?;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_extra_config(&format!(
+    managed_response_config("")
+        .with_additional_config(&format!(
             "[mcp_servers.some-server]\nurl = \"{mcp_server_url}/mcp\""
         ))
         .write(codex_home.path())?;
@@ -138,15 +137,51 @@ async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()
 }
 
 #[tokio::test]
+async fn connector_token_does_not_add_host_owned_apps_to_session_or_status() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("CODEX_CONNECTORS_TOKEN", Some("legacy-connectors-token"))])
+        .build_initialized()
+        .await?;
+    let thread = app_server
+        .start_thread(ThreadStartParams::default())
+        .await?
+        .thread;
+
+    for thread_id in [None, Some(thread.id)] {
+        let response: ListMcpServerStatusResponse = app_server
+            .request(|request_id| ClientRequest::McpServerStatusList {
+                request_id,
+                params: ListMcpServerStatusParams {
+                    cursor: None,
+                    limit: None,
+                    detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+                    thread_id,
+                },
+            })
+            .await?;
+        assert!(
+            response
+                .data
+                .iter()
+                .all(|status| status.name != "codex_apps")
+        );
+        assert!(response.data.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_server_status_list_waits_for_live_stdio_metadata_before_using_cached_tools()
 -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     let barrier_file = codex_home.path().join("allow-initialize");
     let pid_file = codex_home.path().join("mcp.pid");
     std::fs::write(&barrier_file, "ready")?;
-    mock_responses_config(&server.uri())
-        .with_extra_config(&format!(
+    managed_response_config("")
+        .with_additional_config(&format!(
             r#"[mcp_servers.cached-stdio]
 command = {}
 enabled_tools = ["echo"]
@@ -212,11 +247,10 @@ MCP_TEST_PID_FILE = {}
 
 #[tokio::test]
 async fn mcp_server_status_list_uses_thread_project_local_config() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let (mcp_server_url, mcp_server_handle) = start_mcp_server("project_lookup").await?;
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    managed_response_config("").write(codex_home.path())?;
     std::fs::create_dir_all(workspace.path().join(".git"))?;
     set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
 
@@ -231,7 +265,7 @@ async fn mcp_server_status_list_uses_thread_project_local_config() -> Result<()>
         })
         .await?;
 
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(PROJECT_CONFIG_DIRECTORY);
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),
@@ -374,11 +408,10 @@ impl ServerHandler for SlowInventoryServer {
 
 #[tokio::test]
 async fn mcp_server_status_list_tools_and_auth_only_skips_slow_inventory_calls() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let (mcp_server_url, mcp_server_handle) = start_slow_inventory_mcp_server("lookup").await?;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_extra_config(&format!(
+    managed_response_config("")
+        .with_additional_config(&format!(
             "[mcp_servers.some-server]\nurl = \"{mcp_server_url}/mcp\""
         ))
         .write(codex_home.path())?;
@@ -419,13 +452,12 @@ async fn mcp_server_status_list_tools_and_auth_only_skips_slow_inventory_calls()
 
 #[tokio::test]
 async fn mcp_server_status_list_keeps_tools_for_sanitized_name_collisions() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let (dash_server_url, dash_server_handle) = start_mcp_server("dash_lookup").await?;
     let (underscore_server_url, underscore_server_handle) =
         start_mcp_server("underscore_lookup").await?;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_extra_config(&format!(
+    managed_response_config("")
+        .with_additional_config(&format!(
             r#"[mcp_servers.some-server]
 url = "{dash_server_url}/mcp"
 
@@ -527,8 +559,8 @@ async fn start_slow_inventory_mcp_server(tool_name: &str) -> Result<(String, Joi
     Ok((format!("http://{addr}"), handle))
 }
 
-fn mock_responses_config(server_uri: &str) -> MockResponsesConfig {
-    MockResponsesConfig::new(server_uri)
-        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 1024")
-        .with_provider_config("supports_websockets = false")
+fn managed_response_config(_server_uri: &str) -> ManagedWhisplyConfig {
+    ManagedWhisplyConfig::new().with_additional_config(
+        "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 1024",
+    )
 }

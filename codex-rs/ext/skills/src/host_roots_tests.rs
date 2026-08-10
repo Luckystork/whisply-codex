@@ -7,6 +7,9 @@ use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirementsToml;
+use codex_config::LoaderOverrides;
+use codex_config::NoopThreadConfigLoader;
+use codex_config::loader::load_config_layers_state;
 use codex_core_skills::SkillMetadata;
 use codex_core_skills::loader::MAX_CONCURRENT_ROOT_SCANS;
 use codex_core_skills::loader::load_skills_from_roots;
@@ -274,7 +277,6 @@ fn layer_roots_preserve_scope_precedence_and_disabled_projects() {
         roots,
         vec![
             (SkillScope::Repo, nested_project_folder.join("skills")),
-            (SkillScope::Repo, project_folder.join("skills")),
             (SkillScope::User, user_folder.join("skills")),
             (SkillScope::User, home_folder.join(".agents/skills")),
             (SkillScope::System, user_folder.join("skills/.system")),
@@ -392,14 +394,15 @@ async fn unique_extra_root_loads_as_recursive_user_root() {
 }
 
 #[tokio::test]
-async fn repo_ancestry_without_project_marker_does_not_walk_parents() {
+async fn repo_ancestry_does_not_walk_beyond_trusted_project_layer() {
     let temp_dir = TempDir::new().expect("temp dir");
     let outer = absolute(temp_dir.path().join("outer"));
     let cwd = outer.join("nested/inner");
     fs::create_dir_all(outer.join(".agents/skills")).expect("create outer skills");
     fs::create_dir_all(cwd.join(".agents/skills")).expect("create cwd skills");
 
-    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &stack(Vec::new()), &cwd)
+    let config_stack = stack(vec![project_layer(&cwd.join(".whisply"))]);
+    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &config_stack, &cwd)
         .await
         .into_iter()
         .map(|root| root.path)
@@ -419,7 +422,7 @@ async fn repo_ancestry_stops_at_project_root_and_preserves_root_to_cwd_order() {
     fs::create_dir_all(outer.join(".agents/skills")).expect("create outer skills");
     fs::create_dir_all(repository.join(".agents/skills")).expect("create repo skills");
     fs::create_dir_all(repository.join("nested/.agents/skills")).expect("create nested skills");
-    let config_stack = stack(Vec::new());
+    let config_stack = stack(vec![project_layer(&repository.join(".whisply"))]);
 
     let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &config_stack, &nested)
         .await
@@ -432,6 +435,347 @@ async fn repo_ancestry_stops_at_project_root_and_preserves_root_to_cwd_order() {
         vec![
             repository.join(".agents/skills"),
             repository.join("nested/.agents/skills"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn nested_trusted_project_excludes_untrusted_ancestor_agents_roots() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let workspace = absolute(temp_dir.path().join("workspace"));
+    let nested = workspace.join("nested");
+    fs::create_dir_all(&nested).expect("create nested cwd");
+    fs::create_dir_all(workspace.join(".agents/skills")).expect("create outer skills");
+    fs::create_dir_all(nested.join(".agents/skills")).expect("create nested skills");
+    let config_stack = stack(vec![
+        ConfigLayerEntry::new_disabled(
+            ConfigLayerSource::Project {
+                dot_codex_folder: workspace.join(".whisply"),
+            },
+            empty_config(),
+            "untrusted project",
+        ),
+        project_layer(&nested.join(".whisply")),
+    ]);
+
+    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &config_stack, &nested)
+        .await
+        .into_iter()
+        .map(|root| root.path)
+        .collect::<Vec<_>>();
+
+    assert_eq!(roots, vec![nested.join(".agents/skills")]);
+}
+
+#[tokio::test]
+async fn untrusted_project_suppresses_project_skill_roots_but_keeps_user_roots() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let home_folder = absolute(temp_dir.path().join("home"));
+    let codex_home = home_folder.join("account");
+    let workspace = absolute(temp_dir.path().join("workspace"));
+    let project_config = workspace.join(".whisply");
+    let user_skill = write_skill(&codex_home.join("skills"), "user", "user-skill");
+    let home_skill = write_skill(&home_folder.join(".agents/skills"), "home", "home-skill");
+    let project_skill = write_skill(&project_config.join("skills"), "project", "project-skill");
+    let agent_skill = write_skill(
+        &workspace.join(".agents/skills"),
+        "compatibility",
+        "compatibility-skill",
+    );
+    let config_stack = stack(vec![
+        user_layer(&codex_home),
+        ConfigLayerEntry::new_disabled(
+            ConfigLayerSource::Project {
+                dot_codex_folder: project_config,
+            },
+            empty_config(),
+            "untrusted project",
+        ),
+    ]);
+
+    let roots = resolve_skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &config_stack,
+        &workspace,
+        Some(&home_folder),
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.skills,
+        vec![
+            expected_skill(home_skill, "home-skill", SkillScope::User),
+            expected_skill(user_skill, "user-skill", SkillScope::User),
+        ]
+    );
+    assert!(
+        outcome
+            .skills
+            .iter()
+            .all(|skill| skill.path_to_skills_md != project_skill
+                && skill.path_to_skills_md != agent_skill)
+    );
+}
+
+#[tokio::test]
+async fn trusted_project_keeps_agents_compatibility_as_repo_scope() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let workspace = absolute(temp_dir.path().join("workspace"));
+    let project_config = workspace.join(".whisply");
+    let agent_skill = write_skill(
+        &workspace.join(".agents/skills"),
+        "compatibility",
+        "compatibility-skill",
+    );
+    let config_stack = stack(vec![project_layer(&project_config)]);
+
+    let roots = resolve_skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &config_stack,
+        &workspace,
+        /*home_dir*/ None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.skills,
+        vec![expected_skill(
+            agent_skill,
+            "compatibility-skill",
+            SkillScope::Repo,
+        )]
+    );
+}
+
+#[tokio::test]
+async fn trusted_git_project_without_whisply_keeps_agents_compatibility() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let codex_home = absolute(temp_dir.path().join("account"));
+    let workspace = absolute(temp_dir.path().join("workspace"));
+    fs::create_dir_all(&codex_home).expect("create account root");
+    fs::create_dir_all(workspace.join(".git")).expect("create git marker");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            workspace.display()
+        ),
+    )
+    .expect("write account config");
+    let agent_skill = write_skill(
+        &workspace.join(".agents/skills"),
+        "compatibility",
+        "compatibility-skill",
+    );
+    let overrides = LoaderOverrides {
+        managed_config_path: Some(temp_dir.path().join("missing-managed-config.toml")),
+        system_config_path: Some(temp_dir.path().join("missing-system-config.toml")),
+        system_requirements_path: Some(temp_dir.path().join("missing-system-requirements.toml")),
+        ignore_managed_requirements: true,
+        #[cfg(target_os = "macos")]
+        managed_preferences_base64: Some(String::new()),
+        macos_managed_config_requirements_base64: Some(String::new()),
+        ..Default::default()
+    };
+    let config_stack = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        codex_home.as_path(),
+        Some(workspace.clone()),
+        &[],
+        overrides,
+        &NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load trusted project config");
+
+    assert_eq!(config_stack.trusted_project_root(), Some(&workspace));
+    assert!(
+        config_stack
+            .all_layers_low_to_high()
+            .all(|layer| !matches!(layer.name, ConfigLayerSource::Project { .. }))
+    );
+
+    let roots = resolve_skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &config_stack,
+        &workspace,
+        /*home_dir*/ None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.skills,
+        vec![expected_skill(
+            agent_skill,
+            "compatibility-skill",
+            SkillScope::Repo,
+        )]
+    );
+}
+
+#[tokio::test]
+async fn root_trust_keeps_root_agents_when_nested_whisply_inherits_it() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let codex_home = absolute(temp_dir.path().join("account"));
+    let workspace = absolute(temp_dir.path().join("workspace"));
+    let cwd = workspace.join("nested");
+    fs::create_dir_all(&codex_home).expect("create account root");
+    fs::create_dir_all(workspace.join(".git")).expect("create git marker");
+    fs::create_dir_all(cwd.join(".whisply")).expect("create nested project layer");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            workspace.display()
+        ),
+    )
+    .expect("write account config");
+    let agent_skill = write_skill(
+        &workspace.join(".agents/skills"),
+        "compatibility",
+        "compatibility-skill",
+    );
+    let overrides = LoaderOverrides {
+        managed_config_path: Some(temp_dir.path().join("missing-managed-config.toml")),
+        system_config_path: Some(temp_dir.path().join("missing-system-config.toml")),
+        system_requirements_path: Some(temp_dir.path().join("missing-system-requirements.toml")),
+        ignore_managed_requirements: true,
+        #[cfg(target_os = "macos")]
+        managed_preferences_base64: Some(String::new()),
+        macos_managed_config_requirements_base64: Some(String::new()),
+        ..Default::default()
+    };
+    let config_stack = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        codex_home.as_path(),
+        Some(cwd.clone()),
+        &[],
+        overrides,
+        &NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load trusted project config");
+
+    assert_eq!(config_stack.trusted_project_root(), Some(&workspace));
+    assert!(
+        config_stack
+            .all_layers_low_to_high()
+            .any(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+    );
+
+    let roots = resolve_skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &config_stack,
+        &cwd,
+        /*home_dir*/ None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.skills,
+        vec![expected_skill(
+            agent_skill,
+            "compatibility-skill",
+            SkillScope::Repo,
+        )]
+    );
+}
+
+#[tokio::test]
+async fn project_skill_roots_are_isolated_per_cwd_while_extra_user_root_stays_global() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let account_root = absolute(temp_dir.path().join("account/skills"));
+    let workspace_a = absolute(temp_dir.path().join("workspace-a"));
+    let workspace_b = absolute(temp_dir.path().join("workspace-b"));
+    let user_skill = write_skill(&account_root, "user", "account-skill");
+    let agent_skill_a = write_skill(
+        &workspace_a.join(".agents/skills"),
+        "workspace-a",
+        "workspace-a-skill",
+    );
+    let agent_skill_b = write_skill(
+        &workspace_b.join(".agents/skills"),
+        "workspace-b",
+        "workspace-b-skill",
+    );
+    let stack_a = stack(vec![project_layer(&workspace_a.join(".whisply"))]);
+    let stack_b = stack(vec![project_layer(&workspace_b.join(".whisply"))]);
+
+    let roots_a = resolve_skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &stack_a,
+        &workspace_a,
+        /*home_dir*/ None,
+        Vec::new(),
+        vec![account_root.clone()],
+    )
+    .await;
+    let roots_b = resolve_skill_roots_with_home_dir(
+        Some(Arc::clone(&LOCAL_FS)),
+        &stack_b,
+        &workspace_b,
+        /*home_dir*/ None,
+        Vec::new(),
+        vec![account_root],
+    )
+    .await;
+    let outcome_a = load_skills_from_roots(
+        roots_a,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+    let outcome_b = load_skills_from_roots(
+        roots_b,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert_eq!(
+        outcome_a.skills,
+        vec![
+            expected_skill(agent_skill_a, "workspace-a-skill", SkillScope::Repo),
+            expected_skill(user_skill.clone(), "account-skill", SkillScope::User),
+        ]
+    );
+    assert_eq!(
+        outcome_b.skills,
+        vec![
+            expected_skill(agent_skill_b, "workspace-b-skill", SkillScope::Repo),
+            expected_skill(user_skill, "account-skill", SkillScope::User),
         ]
     );
 }
@@ -573,7 +917,7 @@ async fn repo_ancestry_limits_concurrent_probes_and_preserves_order() {
 
         calls.release.add_permits(expected_probes.len());
     };
-    let config_stack = stack(Vec::new());
+    let config_stack = stack(vec![project_layer(&directories[0].join(".whisply"))]);
     let (roots, ()) = tokio::join!(
         repo_agents_skill_roots(Some(file_system), &config_stack, &cwd),
         assertions,
@@ -613,7 +957,7 @@ async fn resolved_config_and_repo_roots_preserve_order_and_dedupe_paths_not_name
     let home_skill = write_skill(&home_folder.join(".agents/skills"), "home", "home-skill");
     let system_skill = write_skill(&codex_home.join("skills/.system"), "system", "system-skill");
     let admin_skill = write_skill(&system_folder.join("skills"), "admin", "admin-skill");
-    let repo_agent_skill = write_skill(
+    let _repo_agent_skill = write_skill(
         &repository.join(".agents/skills"),
         "repo-agent",
         "repo-agent-skill",
@@ -644,7 +988,7 @@ async fn resolved_config_and_repo_roots_preserve_order_and_dedupe_paths_not_name
         vec![user_skills],
     )
     .await;
-    assert_eq!(roots.len(), 8);
+    assert_eq!(roots.len(), 7);
     let outcome = load_skills_from_roots(
         roots,
         /*plugin_skill_snapshots*/ None,
@@ -658,7 +1002,6 @@ async fn resolved_config_and_repo_roots_preserve_order_and_dedupe_paths_not_name
             expected_skill(root_project_skill, "duplicate-skill", SkillScope::Repo),
             expected_skill(nested_project_skill, "duplicate-skill", SkillScope::Repo),
             expected_skill(nested_agent_skill, "nested-agent-skill", SkillScope::Repo),
-            expected_skill(repo_agent_skill, "repo-agent-skill", SkillScope::Repo),
             expected_skill(user_skill, "duplicate-skill", SkillScope::User),
             expected_skill(home_skill, "home-skill", SkillScope::User),
             expected_skill(system_skill, "system-skill", SkillScope::System),

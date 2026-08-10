@@ -47,7 +47,6 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
-use codex_config::RemoteThreadConfigLoader;
 use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 pub use codex_core::otel_init::build_provider as build_otel_provider;
@@ -56,6 +55,7 @@ pub use codex_exec_server::ExecServerRuntimePaths;
 use codex_feedback::CodexFeedback;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_whisply::ManagedGatewayClient;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -316,6 +316,9 @@ pub struct InProcessClientStartArgs {
     pub state_db: Option<StateDbHandle>,
     /// Environment manager used by core execution and filesystem operations.
     pub environment_manager: Arc<EnvironmentManager>,
+    /// Test-scoped managed gateway for embedded response-I/O. Production
+    /// callers leave this unset and retain ordinary launcher authority.
+    pub managed_gateway_client: Option<Arc<ManagedGatewayClient>>,
     /// Startup warnings emitted after initialize succeeds.
     pub config_warnings: Vec<ConfigWarningNotification>,
     /// Session source recorded in app-server thread metadata.
@@ -336,11 +339,11 @@ pub struct InProcessClientStartArgs {
     pub channel_capacity: usize,
 }
 
-fn configured_thread_config_loader(config: &Config) -> Arc<dyn ThreadConfigLoader> {
-    match config.experimental_thread_config_endpoint.as_deref() {
-        Some(endpoint) => Arc::new(RemoteThreadConfigLoader::new(endpoint)),
-        None => Arc::new(NoopThreadConfigLoader),
-    }
+fn configured_thread_config_loader(_config: &Config) -> Arc<dyn ThreadConfigLoader> {
+    // The in-process TUI client receives an already-resolved Config, so keep
+    // this defense in depth against a programmatic mutation of the deprecated
+    // endpoint after BrokerOnly validation. Thread configuration remains local.
+    Arc::new(NoopThreadConfigLoader)
 }
 
 impl InProcessClientStartArgs {
@@ -383,6 +386,7 @@ impl InProcessClientStartArgs {
             log_db: self.log_db,
             state_db: self.state_db,
             environment_manager: self.environment_manager,
+            managed_gateway_client: self.managed_gateway_client,
             config_warnings: self.config_warnings,
             session_source: self.session_source,
             enable_codex_api_key_env: self.enable_codex_api_key_env,
@@ -1010,6 +1014,7 @@ mod tests {
             log_db: None,
             state_db: Some(state_db),
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+            managed_gateway_client: None,
             config_warnings: Vec::new(),
             session_source,
             enable_codex_api_key_env: false,
@@ -2227,6 +2232,7 @@ mod tests {
             log_db: None,
             state_db: None,
             environment_manager: environment_manager.clone(),
+            managed_gateway_client: None,
             config_warnings: Vec::new(),
             session_source: SessionSource::Exec,
             enable_codex_api_key_env: false,
@@ -2261,7 +2267,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_start_args_use_remote_thread_config_loader_when_configured() {
+    async fn runtime_start_args_ignore_remote_thread_config_endpoint() {
         let mut config = build_test_config().await;
         config.experimental_thread_config_endpoint = Some("not-a-valid-endpoint".to_string());
 
@@ -2276,6 +2282,7 @@ mod tests {
             log_db: None,
             state_db: None,
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+            managed_gateway_client: None,
             config_warnings: Vec::new(),
             session_source: SessionSource::Exec,
             enable_codex_api_key_env: false,
@@ -2288,15 +2295,12 @@ mod tests {
         }
         .into_runtime_start_args();
 
-        let err = runtime_args
+        let layers = runtime_args
             .thread_config_loader
             .load(Default::default())
             .await
-            .expect_err("configured remote loader should try to connect");
-        assert_eq!(
-            err.code(),
-            codex_config::ThreadConfigLoadErrorCode::RequestFailed
-        );
+            .expect("BrokerOnly must retain a local no-op thread-config loader");
+        assert!(layers.is_empty());
     }
 
     #[tokio::test]

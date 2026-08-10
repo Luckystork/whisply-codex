@@ -62,6 +62,18 @@ const MCP_TOOL_NAME_PREFIX: &str = "mcp";
 const MCP_TOOL_NAME_DELIMITER: &str = "__";
 const CODEX_CONNECTORS_TOKEN_ENV_VAR: &str = "CODEX_CONNECTORS_TOKEN";
 
+/// Whisply never admits the host-owned Apps MCP or a ChatGPT-authenticated MCP
+/// server, regardless of whether it originated in config, a plugin, or an
+/// extension contribution. Call this before any MCP side effect when working
+/// from a raw server map rather than the resolved runtime catalog.
+pub fn is_whisply_rejected_mcp_server_name(name: &str) -> bool {
+    name == CODEX_APPS_MCP_SERVER_NAME
+}
+
+pub fn is_whisply_rejected_mcp_server(name: &str, server: &McpServerConfig) -> bool {
+    is_whisply_rejected_mcp_server_name(name) || matches!(&server.auth, McpServerAuth::ChatGpt)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum McpSnapshotDetail {
     #[default]

@@ -8,6 +8,7 @@ use self::layer_io::LoadedConfigLayers;
 use crate::CONFIG_TOML_FILE;
 use crate::CloudConfigBundleLayers;
 use crate::ConfigLayerSource;
+use crate::PROJECT_CONFIG_DIRECTORY;
 use crate::ProfileV2Name;
 use crate::RequirementsLayerEntry;
 use crate::compose_requirements;
@@ -52,7 +53,7 @@ use std::path::PathBuf;
 use toml::Value as TomlValue;
 
 #[cfg(unix)]
-const SYSTEM_CONFIG_TOML_FILE_UNIX: &str = "/etc/codex/config.toml";
+const SYSTEM_CONFIG_TOML_FILE_UNIX: &str = "/etc/whisply/config.toml";
 
 #[cfg(windows)]
 const DEFAULT_PROGRAM_DATA_DIR_WINDOWS: &str = r"C:\ProgramData";
@@ -84,7 +85,7 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// composed with config-style TOML merging plus field-specific handling for
 /// hooks, rules, deny-read permissions, and remote sandbox config:
 ///
-/// - system    `/etc/codex/requirements.toml` (Unix) or
+/// - system    `/etc/whisply/requirements.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\requirements.toml` (Windows)
 /// - cloud:    enterprise-managed cloud config bundle requirements
 /// - legacy:   managed_config.toml reinterpreted as requirements.toml
@@ -96,14 +97,14 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// Configuration is built up from multiple layers in the following order:
 ///
 /// - admin:    managed preferences (*)
-/// - system    `/etc/codex/config.toml` (Unix) or
+/// - system    `/etc/whisply/config.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
 /// - cloud     enterprise-managed cloud config bundle fragments
-/// - user      `${CODEX_HOME}/config.toml`
-/// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
+/// - user      `${WHISPLY_HOME}/config.toml`
+/// - profile   `${WHISPLY_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
-/// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
-/// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
+/// - tree      parent directories up to root looking for `./.whisply/config.toml` (loaded but disabled when untrusted)
+/// - repo      `$(git rev-parse --show-toplevel)/.whisply/config.toml` (loaded but disabled when untrusted)
 /// - runtime   e.g., --config flags, model selector in UI
 ///
 /// (*) Only available on macOS via managed device profiles.
@@ -300,6 +301,7 @@ pub async fn load_config_layers_state(
     }
 
     let mut startup_warnings = None;
+    let mut trusted_project_root = None;
     if let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
@@ -357,6 +359,25 @@ pub async fn load_config_layers_state(
             strict_config,
         )
         .await?;
+        trusted_project_root = project_trust_context
+            .decision_for_dir(&project_trust_context.project_root)
+            .trusted_project_root();
+        if let Some(active_project_layer) = project_layers.layers.last() {
+            trusted_project_root = if active_project_layer.is_disabled() {
+                None
+            } else {
+                match &active_project_layer.name {
+                    ConfigLayerSource::Project { dot_codex_folder } => {
+                        dot_codex_folder.parent().and_then(|directory| {
+                            project_trust_context
+                                .decision_for_dir(&directory)
+                                .trusted_project_root()
+                        })
+                    }
+                    _ => None,
+                }
+            };
+        }
         layers.extend(project_layers.layers);
         startup_warnings = Some(project_layers.startup_warnings);
     }
@@ -439,7 +460,8 @@ pub async fn load_config_layers_state(
         config_requirements_toml.clone().try_into()?,
         config_requirements_toml.into_toml(),
     )?
-    .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules);
+    .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules)
+    .with_trusted_project_root(trusted_project_root);
     Ok(match startup_warnings {
         Some(startup_warnings) => config_layer_stack.with_startup_warnings(startup_warnings),
         None => config_layer_stack,
@@ -857,11 +879,16 @@ struct ProjectTrustConfigToml {
 struct ProjectTrustDecision {
     trust_level: Option<TrustLevel>,
     trust_key: String,
+    trusted_project_root: AbsolutePathBuf,
 }
 
 impl ProjectTrustDecision {
     fn is_trusted(&self) -> bool {
         matches!(self.trust_level, Some(TrustLevel::Trusted))
+    }
+
+    fn trusted_project_root(&self) -> Option<AbsolutePathBuf> {
+        self.is_trusted().then(|| self.trusted_project_root.clone())
     }
 }
 
@@ -874,6 +901,7 @@ impl ProjectTrustContext {
                 return ProjectTrustDecision {
                     trust_level: Some(trust_level),
                     trust_key,
+                    trusted_project_root: dir.clone(),
                 };
             }
         }
@@ -885,6 +913,7 @@ impl ProjectTrustContext {
                 return ProjectTrustDecision {
                     trust_level: Some(trust_level),
                     trust_key,
+                    trusted_project_root: self.project_root.clone(),
                 };
             }
         }
@@ -897,6 +926,10 @@ impl ProjectTrustContext {
                     return ProjectTrustDecision {
                         trust_level: Some(trust_level),
                         trust_key,
+                        trusted_project_root: self
+                            .repo_root
+                            .clone()
+                            .unwrap_or_else(|| self.project_root.clone()),
                     };
                 }
             }
@@ -908,6 +941,10 @@ impl ProjectTrustContext {
                 .repo_root_key
                 .clone()
                 .unwrap_or_else(|| self.project_root_key.clone()),
+            trusted_project_root: self
+                .repo_root
+                .clone()
+                .unwrap_or_else(|| self.project_root.clone()),
         }
     }
 
@@ -938,7 +975,7 @@ impl ProjectTrustContext {
         }
 
         let relative_dir = dir.as_path().strip_prefix(checkout_root.as_path()).ok()?;
-        Some(repo_root.join(relative_dir).join(".codex"))
+        Some(repo_root.join(relative_dir).join(PROJECT_CONFIG_DIRECTORY))
     }
 }
 
@@ -1247,7 +1284,7 @@ async fn load_project_layers(
     let mut layers = Vec::new();
     let mut startup_warnings = Vec::new();
     for dir in dirs {
-        let dot_codex_abs = dir.join(".codex");
+        let dot_codex_abs = dir.join(PROJECT_CONFIG_DIRECTORY);
         let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
         if !fs
             .get_metadata(&dot_codex_uri, /*sandbox*/ None)

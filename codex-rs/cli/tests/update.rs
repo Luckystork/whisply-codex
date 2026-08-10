@@ -4,8 +4,9 @@ use std::path::Path;
 use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
-    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home);
+    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("whisply")?);
+    cmd.env("CODEX_HOME", codex_home)
+        .env("WHISPLY_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -17,8 +18,10 @@ async fn update_does_not_start_interactive_prompt() -> Result<()> {
     codex_command(codex_home.path())?
         .arg("update")
         .assert()
-        .failure()
-        .stderr(contains("`codex update` is not available in debug builds"));
+        .success()
+        .stdout(contains(
+            "Whisply updates are installed by the managed app bundle.",
+        ));
 
     Ok(())
 }

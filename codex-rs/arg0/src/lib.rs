@@ -289,12 +289,12 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(builder.build()?)
 }
 
-const ILLEGAL_ENV_VAR_PREFIX: &str = "CODEX_";
+const ILLEGAL_ENV_VAR_PREFIX: &str = "WHISPLY_";
 
-/// Load env vars from ~/.codex/.env.
+/// Load env vars from ~/.whisply/.env.
 ///
 /// Security: Do not allow `.env` files to create or modify any variables
-/// with names starting with `CODEX_`.
+/// with names starting with `WHISPLY_`.
 fn load_dotenv() {
     if let Ok(codex_home) = find_codex_home()
         && let Ok(iter) = dotenvy::from_path_iter(codex_home.join(".env"))
@@ -303,7 +303,7 @@ fn load_dotenv() {
     }
 }
 
-/// Helper to set vars from a dotenvy iterator while filtering out `CODEX_` keys.
+/// Helper to set vars from a dotenvy iterator while filtering out `WHISPLY_` keys.
 fn set_filtered<I>(iter: I)
 where
     I: IntoIterator<Item = Result<(String, String), dotenvy::Error>>,
@@ -349,7 +349,7 @@ fn prepare_path_entry_for_codex_aliases(
     }
 
     std::fs::create_dir_all(&codex_home)?;
-    // Use a CODEX_HOME-scoped temp root to avoid cluttering the top-level directory.
+    // Use a Whisply-home-scoped temp root to avoid cluttering the top-level directory.
     let temp_root = codex_home.join("tmp").join("arg0");
     std::fs::create_dir_all(&temp_root)?;
     #[cfg(unix)]

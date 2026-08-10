@@ -1,5 +1,7 @@
+#![cfg(target_os = "macos")]
+
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
+use app_test_support::ManagedWhisplyConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
@@ -65,9 +67,9 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 async fn thread_unarchive_moves_rollout_back_into_sessions_directory() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    ManagedWhisplyConfig::new().write(codex_home.path())?;
 
-    let mut mcp = TestAppServer::builder()
+    let mut mcp = app_test_support::managed_whisply_app_server_builder!(&server.uri())
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
@@ -234,8 +236,8 @@ async fn thread_unarchive_moves_rollout_back_into_sessions_directory() -> Result
 async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
-    MockResponsesConfig::new("http://127.0.0.1:1")
-        .with_root_config(&format!(
+    ManagedWhisplyConfig::new()
+        .with_additional_config(&format!(
             r#"experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}"#
         ))
         .write(codex_home.path())?;
@@ -298,6 +300,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
         log_db: None,
         state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        managed_gateway_client: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,

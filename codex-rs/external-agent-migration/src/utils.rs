@@ -1,4 +1,5 @@
 use crate::RewriteProfile;
+use codex_core_plugins::validate_skill_package_contents;
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::io;
@@ -46,6 +47,7 @@ pub(super) fn copy_dir_recursive(
     target: &Path,
     rewrite_profile: RewriteProfile,
 ) -> io::Result<()> {
+    validate_skill_package_contents(source)?;
     fs::create_dir_all(target)?;
 
     for entry in fs::read_dir(source)? {

@@ -24,13 +24,13 @@ impl HistoryCell for UpdateAvailableHistoryCell {
         use ratatui_macros::line;
         use ratatui_macros::text;
         let update_instruction = if let Some(update_action) = self.update_action {
-            line!["Run ", update_action.command_str().cyan(), " to update."]
-        } else {
             line![
-                "See ",
-                "https://github.com/openai/codex".cyan().underlined(),
-                " for installation options."
+                "Install ",
+                update_action.command_str().cyan(),
+                " to replace the managed runtime."
             ]
+        } else {
+            line!["Whisply app updates replace the managed runtime automatically."]
         };
 
         let content = text![
@@ -43,9 +43,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             update_instruction,
             "",
             "See full release notes:",
-            "https://github.com/openai/codex/releases/latest"
-                .cyan()
-                .underlined(),
+            "https://whisply.app".cyan().underlined(),
         ];
 
         let inner_width = content
@@ -58,9 +56,12 @@ impl HistoryCell for UpdateAvailableHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let update_instruction = if let Some(update_action) = self.update_action {
-            format!("Run {} to update.", update_action.command_str())
+            format!(
+                "Install {} to replace the managed runtime.",
+                update_action.command_str()
+            )
         } else {
-            "See https://github.com/openai/codex for installation options.".to_string()
+            "Whisply app updates replace the managed runtime automatically.".to_string()
         };
         vec![
             Line::from("Update available!"),
@@ -68,7 +69,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
             Line::from(update_instruction),
             Line::from(""),
             Line::from("See full release notes:"),
-            Line::from("https://github.com/openai/codex/releases/latest"),
+            Line::from("https://whisply.app"),
         ]
     }
 

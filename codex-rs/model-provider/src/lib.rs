@@ -3,6 +3,7 @@ mod auth;
 mod bearer_auth_provider;
 mod models_endpoint;
 mod provider;
+mod whisply;
 
 pub use amazon_bedrock::is_supported_amazon_bedrock_region;
 pub use auth::AgentIdentitySessionFallback;
@@ -25,3 +26,10 @@ pub use provider::ProviderCapabilities;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
+pub use provider::create_model_provider_with_managed_gateway;
+pub use whisply::WHISPLY_GATEWAY_CONNECT_TIMEOUT;
+pub use whisply::WHISPLY_GATEWAY_IDLE_TIMEOUT;
+pub use whisply::WhisplyManagedSessionAvailability;
+pub use whisply::is_whisply_provider;
+pub use whisply::whisply_managed_session_availability;
+pub use whisply::whisply_provider_info;

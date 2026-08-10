@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
@@ -514,11 +515,38 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
             .unwrap_or(default_provider_port)
     );
 
-    let codex_oss_base_url = std::env::var("CODEX_OSS_BASE_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or(default_codex_oss_base_url);
+    let codex_oss_base_url = resolve_local_oss_base_url(
+        std::env::var("CODEX_OSS_BASE_URL").ok(),
+        default_codex_oss_base_url,
+    );
     create_oss_provider_with_base_url(&codex_oss_base_url, wire_api)
+}
+
+/// Resolves the experimental OSS override without granting it arbitrary
+/// network authority. The supported OSS providers are a local-only boundary,
+/// so an invalid or non-local override falls back to the local port route.
+fn resolve_local_oss_base_url(candidate: Option<String>, default_base_url: String) -> String {
+    match candidate.filter(|value| !value.trim().is_empty()) {
+        Some(value) if is_loopback_oss_base_url(&value) => value,
+        Some(_) | None => default_base_url,
+    }
+}
+
+fn is_loopback_oss_base_url(value: &str) -> bool {
+    let Ok(uri) = value.parse::<http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let host = authority.host();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
