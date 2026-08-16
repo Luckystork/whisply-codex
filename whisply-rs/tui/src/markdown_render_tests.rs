@@ -1012,7 +1012,8 @@ fn consecutive_unordered_list_local_file_links_do_not_detach_paths() {
         rendered,
         vec![
             "- whisply-rs/README.md:93: cli is the top-level multitool binary.",
-            "- whisply-rs/core/README.md:1: codex-core owns the real runtime behavior.",
+            "- whisply-rs/core/README.md:1: codex-core owns the real runtime",
+            "  behavior.",
         ]
     );
 }

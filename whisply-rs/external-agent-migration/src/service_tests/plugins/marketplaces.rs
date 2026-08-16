@@ -499,6 +499,8 @@ source = {configured_marketplace_root:?}
 
 [plugins."cloudflare@my-plugins"]
 enabled = true
+mcp_launch_pinned = true
+trusted_package_hash = "sha256:f0ed5cf4732b6422faaf4396ce5231139e05526946bea844b7324ef4378f0edc"
 "#
     ))
     .expect("parse expected config");
