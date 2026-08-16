@@ -1030,6 +1030,26 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         failure_summary: "Code-mode helper build did not complete.",
     },
     VerificationCheck {
+        id: "rust-app-server-helper-stdio",
+        suite: VerifySuite::Rust,
+        availability: CheckAvailability::Runnable,
+        action: CheckAction::Run {
+            program: "cargo",
+            args: &[
+                "build",
+                "--offline",
+                "-p",
+                "whisply-rmcp-client",
+                "--bin",
+                "test_stdio_server",
+            ],
+            working_directory: "Runtime/whisply-codex/whisply-rs",
+            required_paths: &["Runtime/whisply-codex/whisply-rs/rmcp-client/Cargo.toml"],
+        },
+        remediation: "Restore the fixed local stdio MCP helper binary required by the complete Core and app-server protocol suites.",
+        failure_summary: "App-server stdio helper build did not complete.",
+    },
+    VerificationCheck {
         id: "rust-core-full",
         suite: VerifySuite::Rust,
         availability: CheckAvailability::Runnable,
@@ -1427,26 +1447,6 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         },
         remediation: "Restore the fixed Whisply CLI helper binary required by the complete app-server protocol suite.",
         failure_summary: "App-server CLI helper build did not complete.",
-    },
-    VerificationCheck {
-        id: "rust-app-server-helper-stdio",
-        suite: VerifySuite::Rust,
-        availability: CheckAvailability::Runnable,
-        action: CheckAction::Run {
-            program: "cargo",
-            args: &[
-                "build",
-                "--offline",
-                "-p",
-                "whisply-rmcp-client",
-                "--bin",
-                "test_stdio_server",
-            ],
-            working_directory: "Runtime/whisply-codex/whisply-rs",
-            required_paths: &["Runtime/whisply-codex/whisply-rs/rmcp-client/Cargo.toml"],
-        },
-        remediation: "Restore the fixed local stdio MCP helper binary required by the complete Core and app-server protocol suites.",
-        failure_summary: "App-server stdio helper build did not complete.",
     },
     VerificationCheck {
         id: "rust-app-server-v2-full",
@@ -2059,6 +2059,11 @@ fn select_verify_checks(
 
 fn run_check(source_root: &Path, check: &VerificationCheck, dry_run: bool) -> CheckResult {
     let started = Instant::now();
+    // The outer release verifier owns a disposable target tree. Fixed cargo
+    // children start with an empty environment, so carry only this explicit
+    // artifact location through to prevent full-suite output accumulating in
+    // the checked-out runtime source tree.
+    let verifier_cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR");
     let result = match check.action {
         CheckAction::Blocked => CheckResult {
             id: check.id,
@@ -2264,6 +2269,9 @@ fn run_check(source_root: &Path, check: &VerificationCheck, dry_run: bool) -> Ch
                     child
                         .env("CARGO_HOME", tool_home.join(".cargo"))
                         .env("RUSTUP_HOME", tool_home.join(".rustup"));
+                    if let Some(cargo_target_dir) = verifier_cargo_target_dir.as_deref() {
+                        child.env("CARGO_TARGET_DIR", cargo_target_dir);
+                    }
                 }
                 if check.suite == VerifySuite::Rust {
                     // The complete Rust app-server suite reaches deeply nested

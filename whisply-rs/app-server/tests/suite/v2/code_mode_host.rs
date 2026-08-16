@@ -17,7 +17,6 @@ async fn app_server_rejects_remote_code_mode_host_in_broker_only() -> Result<()>
         .args(["--code-mode-host", "ws://127.0.0.1:0"])
         .current_dir(codex_home.path())
         .env("WHISPLY_HOME", codex_home.path())
-        .env_remove("CODEX_HOME")
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.path().join("managed_config.toml"),

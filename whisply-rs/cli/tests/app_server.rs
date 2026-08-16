@@ -9,10 +9,9 @@ use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(whisply_utils_cargo_bin::cargo_bin("whisply")?);
-    // Whisply resolves its home from WHISPLY_HOME. Explicitly clear the
-    // legacy spelling so the strict-config test cannot read host state.
+    // Whisply resolves its home from WHISPLY_HOME, so this strict-config test
+    // cannot read host state after explicitly setting the temporary home.
     cmd.env("WHISPLY_HOME", codex_home)
-        .env_remove("CODEX_HOME")
         // The app-server's debug-only override must not replace this test's
         // temporary home config with inherited runner state.
         .env_remove("CODEX_APP_SERVER_TEST_USER_CONFIG_FILE");
