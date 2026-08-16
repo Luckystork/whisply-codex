@@ -334,8 +334,12 @@ mod tests {
     fn refusing_one_header_still_sends_the_legitimate_ones() {
         let reserved = "WHISPLY_HOME";
         let allowed = "EXTRA_RMCP_ENV";
-        let _reserved_guard = EnvVarGuard::set(reserved, "/managed/home");
         let _allowed_guard = EnvVarGuard::set(allowed, "legitimate-value");
+
+        // `build_default_headers` must reject reserved names before reading
+        // their values. Do not mutate WHISPLY_HOME just to prove that: it is
+        // process-wide storage authority, and parallel OAuth tests correctly
+        // exercise it against a real temporary home.
 
         let headers = build_default_headers(
             /*http_headers*/ None,
