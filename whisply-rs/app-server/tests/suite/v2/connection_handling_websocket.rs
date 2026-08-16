@@ -521,7 +521,7 @@ async fn spawn_websocket_server_with_args_and_env(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("WHISPLY_HOME", codex_home)
-        .env_remove("WHISPLY_HOME")
+        .env_remove("CODEX_HOME")
         .env_remove("OPENAI_API_KEY")
         .env("RUST_LOG", "warn");
     for (key, value) in env_overrides {
@@ -675,7 +675,7 @@ async fn run_websocket_server_to_completion_with_args(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .env("WHISPLY_HOME", codex_home)
-        .env_remove("WHISPLY_HOME")
+        .env_remove("CODEX_HOME")
         .env_remove("OPENAI_API_KEY")
         .env("RUST_LOG", "warn");
     timeout(DEFAULT_READ_TIMEOUT, cmd.output())

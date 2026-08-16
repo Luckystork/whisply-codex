@@ -88,7 +88,8 @@ struct VerifiedRustyV8Artifacts {
 /// Per-child empty user and product state. Developer tool caches are supplied
 /// explicitly for Cargo, so a fixed verification child never falls back to a
 /// user's real `HOME`, Whisply configuration, auth files, or credential-store
-/// selection.
+/// selection. Each test-owned `WHISPLY_HOME` chooses its own SQLite state,
+/// rather than reaching another test's files or the person's account.
 struct IsolatedProductHome {
     _root: TempDir,
     home: PathBuf,
@@ -599,7 +600,13 @@ struct VerificationCheck {
 // coverage claims. They must be selected and run before the dependent check
 // even when a caller narrows verification to a named feature lane.
 const VERIFY_CHECK_PREREQUISITES: &[(&str, &[&str])] = &[
-    ("rust-core-full", &["rust-app-server-helper-code-mode"]),
+    (
+        "rust-core-full",
+        &[
+            "rust-app-server-helper-code-mode",
+            "rust-app-server-helper-stdio",
+        ],
+    ),
     (
         "rust-app-server-v2-full",
         &[
@@ -1438,7 +1445,7 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
             working_directory: "Runtime/whisply-codex/whisply-rs",
             required_paths: &["Runtime/whisply-codex/whisply-rs/rmcp-client/Cargo.toml"],
         },
-        remediation: "Restore the fixed local stdio MCP helper binary required by the complete app-server protocol suite.",
+        remediation: "Restore the fixed local stdio MCP helper binary required by the complete Core and app-server protocol suites.",
         failure_summary: "App-server stdio helper build did not complete.",
     },
     VerificationCheck {
@@ -2970,10 +2977,17 @@ mod tests {
             select_verify_checks(VerifySuite::Rust, &[VerifyFeature::CustomMcpStdioHttpOauth]);
         let selected_ids = custom_mcp.iter().map(|check| check.id).collect::<Vec<_>>();
         assert!(selected_ids.contains(&"rust-app-server-helper-code-mode"));
+        assert!(selected_ids.contains(&"rust-app-server-helper-stdio"));
         assert!(
             selected_ids
                 .iter()
                 .position(|id| *id == "rust-app-server-helper-code-mode")
+                < selected_ids.iter().position(|id| *id == "rust-core-full")
+        );
+        assert!(
+            selected_ids
+                .iter()
+                .position(|id| *id == "rust-app-server-helper-stdio")
                 < selected_ids.iter().position(|id| *id == "rust-core-full")
         );
     }

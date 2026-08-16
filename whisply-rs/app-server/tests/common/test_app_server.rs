@@ -260,7 +260,7 @@ impl TestAppServer {
         cmd.stderr(Stdio::piped());
         cmd.current_dir(codex_home);
         cmd.env("WHISPLY_HOME", codex_home);
-        cmd.env_remove("WHISPLY_HOME");
+        cmd.env_remove("CODEX_HOME");
         cmd.env("RUST_LOG", "warn");
         // Keep integration tests isolated from host managed configuration.
         cmd.env(

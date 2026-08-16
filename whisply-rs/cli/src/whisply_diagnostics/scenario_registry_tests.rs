@@ -221,16 +221,16 @@ fn catalog_replay_bundle_export_is_deterministic_closed_and_consumer_valid() {
     assert_eq!(
         keys,
         vec![
-            "controls",
+            "schemaVersion",
             "protocol",
+            "registrySchemaVersion",
             "registryProtocol",
             "registryRunnerVersion",
-            "registrySchemaVersion",
             "registrySha256",
+            "schemaSha256",
             "scenarioId",
             "scenarioVersion",
-            "schemaSha256",
-            "schemaVersion",
+            "controls",
         ]
     );
     assert!(bundle.get("visibleCopy").is_none());

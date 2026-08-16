@@ -15,7 +15,7 @@ foo = "bar"
 
     let output = Command::new(whisply_utils_cargo_bin::cargo_bin("codex-app-server")?)
         .env("WHISPLY_HOME", codex_home.path())
-        .env_remove("WHISPLY_HOME")
+        .env_remove("CODEX_HOME")
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.path().join("managed_config.toml"),
@@ -44,7 +44,7 @@ fn broker_only_standalone_app_server_ignores_legacy_auth_requirements() -> Resul
 
         let output = Command::new(whisply_utils_cargo_bin::cargo_bin("codex-app-server")?)
             .env("WHISPLY_HOME", codex_home.path())
-            .env_remove("WHISPLY_HOME")
+            .env_remove("CODEX_HOME")
             .env(
                 "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
                 codex_home.path().join("managed_config.toml"),

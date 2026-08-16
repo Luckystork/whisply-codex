@@ -44,7 +44,7 @@ fn sandbox_enforces_local_permission_profile_without_managed_config_io() -> Resu
     );
     if !nested_macos_sandbox_unavailable {
         assert!(
-            String::from_utf8(output.stdout)?.starts_with("codex"),
+            String::from_utf8(output.stdout)?.starts_with("whisply"),
             "expected the sandboxed Whisply version command to run"
         );
     }

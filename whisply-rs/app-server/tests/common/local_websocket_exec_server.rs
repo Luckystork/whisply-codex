@@ -31,7 +31,7 @@ impl LocalWebsocketExecServer {
         command.stderr(Stdio::inherit());
         command.current_dir(codex_home);
         command.env("WHISPLY_HOME", codex_home);
-        command.env_remove("WHISPLY_HOME");
+        command.env_remove("CODEX_HOME");
         #[cfg(target_os = "linux")]
         command.env(
             CODEX_LINUX_SANDBOX_EXE_ENV_VAR,

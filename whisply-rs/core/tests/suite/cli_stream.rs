@@ -36,7 +36,7 @@ fn whisply_exec_command(home: &TempDir) -> Command {
     let bin = whisply_utils_cargo_bin::cargo_bin("whisply").unwrap();
     let mut cmd = Command::new(bin);
     cmd.env("WHISPLY_HOME", home.path())
-        .env_remove("WHISPLY_HOME")
+        .env_remove("CODEX_HOME")
         .env_remove("CODEX_ACCESS_TOKEN")
         .env_remove("CODEX_API_KEY")
         .env_remove("OPENAI_API_KEY")

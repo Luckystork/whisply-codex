@@ -154,7 +154,7 @@ pub fn app_server_json_shutdown_event(
     let output = Command::new(whisply_utils_cargo_bin::cargo_bin(binary)?)
         .stdin(Stdio::null())
         .env("WHISPLY_HOME", codex_home)
-        .env_remove("WHISPLY_HOME")
+        .env_remove("CODEX_HOME")
         // Do not inherit a debug-only test override that would replace the
         // temporary config written above.
         .env_remove("CODEX_APP_SERVER_TEST_USER_CONFIG_FILE")

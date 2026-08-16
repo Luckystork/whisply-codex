@@ -1631,6 +1631,9 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
     test.codex.flush_rollout().await?;
     let rollout_path = test.codex.rollout_path().context("rollout path")?;
     let rollout = fs::read_to_string(rollout_path)?;
+    // Compaction persists its full baseline inside the atomic checkpoint rather
+    // than as a separate JSONL line, so replay the two durable representations
+    // in their original order before checking the transition to ready.
     let world_state_items = rollout
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
@@ -1638,6 +1641,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
         .into_iter()
         .filter_map(|line| match line.item {
             RolloutItem::WorldState(item) => Some(item),
+            RolloutItem::Compacted(compacted) => compacted.world_state_baseline,
             _ => None,
         })
         .collect::<Vec<_>>();
