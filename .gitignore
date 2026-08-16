@@ -43,6 +43,9 @@ AGENTS.override.md
 .jest/
 *.tsbuildinfo
 
+# generated Insta snapshot candidates
+*.snap.new
+
 # logs
 *.log
 npm-debug.log*
