@@ -122,7 +122,7 @@ def test_root_fmt_recipes_use_shared_formatter_driver() -> None:
         ],
     }
     expected = {
-        "working_directory": 'set working-directory := "codex-rs"',
+        "working_directory": 'set working-directory := "whisply-rs"',
         "fmt_comment": (
             "# Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts."
         ),

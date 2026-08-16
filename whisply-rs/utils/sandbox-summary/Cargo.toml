@@ -1,0 +1,19 @@
+[package]
+name = "whisply-utils-sandbox-summary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-protocol = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+
+[dev-dependencies]
+whisply-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }
+
+[lib]
+doctest = false

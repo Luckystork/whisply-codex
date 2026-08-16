@@ -1,0 +1,215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "WhisplyCompactionBudget": {
+      "additionalProperties": false,
+      "description": "How close a conversation is to being shortened.",
+      "properties": {
+        "activeContextTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "autoCompactLimitTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "contextWindowTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limitScope": {
+          "$ref": "#/definitions/WhisplyCompactionLimitScope"
+        },
+        "scopeTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "thresholdReached": {
+          "type": "boolean"
+        },
+        "tokensRemaining": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usedBasisPoints": {
+          "description": "How much of the budget is spent, in hundredths of a percent, or absent when nothing bounds the conversation.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "activeContextTokens",
+        "limitScope",
+        "scopeTokens",
+        "thresholdReached"
+      ],
+      "type": "object"
+    },
+    "WhisplyCompactionLimitScope": {
+      "description": "Which tokens count against the automatic-shortening limit.",
+      "enum": [
+        "total",
+        "body_after_prefix"
+      ],
+      "type": "string"
+    },
+    "WhisplyCompactionMechanism": {
+      "description": "Which mechanism shortened a conversation.",
+      "oneOf": [
+        {
+          "description": "The thread was summarized and the summary replaced its history.",
+          "enum": [
+            "summarized"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A fresh context window was installed without a summarization turn.",
+          "enum": [
+            "window_reset"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "WhisplyCompactionOutcome": {
+      "description": "How a shortening ended.",
+      "enum": [
+        "completed",
+        "interrupted",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "WhisplyCompactionRecord": {
+      "additionalProperties": false,
+      "description": "One shortening that happened to a conversation.\n\nDeliberately a digest rather than the summary: the summary is the person's conversation in compressed form, and a diagnostic surface that carried it would be a way to read a chat without opening it. The digest is enough to show that a resumed thread holds the summary compaction wrote.",
+      "properties": {
+        "activeContextTokensAfter": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "activeContextTokensBefore": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "mechanism": {
+          "$ref": "#/definitions/WhisplyCompactionMechanism"
+        },
+        "outcome": {
+          "$ref": "#/definitions/WhisplyCompactionOutcome"
+        },
+        "persisted": {
+          "description": "Whether the shortened history reached the thread's stored record. A shortening that was not written down is read back long on the next resume.",
+          "type": "boolean"
+        },
+        "recordedAtUnixMs": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "summarySha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summaryTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "trigger": {
+          "$ref": "#/definitions/WhisplyCompactionTrigger"
+        }
+      },
+      "required": [
+        "activeContextTokensAfter",
+        "activeContextTokensBefore",
+        "mechanism",
+        "outcome",
+        "persisted",
+        "recordedAtUnixMs",
+        "sequence",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "WhisplyCompactionTrigger": {
+      "description": "Who asked for a conversation to be shortened.",
+      "oneOf": [
+        {
+          "description": "The runtime reached its budget and shortened the thread on its own.",
+          "enum": [
+            "automatic"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A person asked for it.",
+          "enum": [
+            "requested"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "budget": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WhisplyCompactionBudget"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Absent until the thread has run a turn, because until then nothing has measured the window."
+    },
+    "compactionCount": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "contractVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "records": {
+      "description": "The most recent shortenings, oldest first.",
+      "items": {
+        "$ref": "#/definitions/WhisplyCompactionRecord"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "compactionCount",
+    "contractVersion",
+    "records"
+  ],
+  "title": "WhisplyCompactionReadResponse",
+  "type": "object"
+}

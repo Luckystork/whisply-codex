@@ -1,0 +1,197 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "WhisplyModelCatalogAvailability": {
+      "enum": [
+        "available",
+        "temporarily_unavailable",
+        "deprecated"
+      ],
+      "type": "string"
+    },
+    "WhisplyModelCatalogCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "contextLimit": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "inputModalities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outputLimit": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outputModalities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supportsComputerUse": {
+          "type": "boolean"
+        },
+        "supportsImages": {
+          "type": "boolean"
+        },
+        "supportsNativeVisibleProgress": {
+          "type": "boolean"
+        },
+        "supportsSafeReasoningSummary": {
+          "type": "boolean"
+        },
+        "supportsStructuredOutput": {
+          "type": "boolean"
+        },
+        "supportsToolCalls": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "contextLimit",
+        "inputModalities",
+        "outputLimit",
+        "outputModalities",
+        "supportsComputerUse",
+        "supportsImages",
+        "supportsNativeVisibleProgress",
+        "supportsSafeReasoningSummary",
+        "supportsStructuredOutput",
+        "supportsToolCalls"
+      ],
+      "type": "object"
+    },
+    "WhisplyModelCatalogModel": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedProfiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowedReasoningEfforts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "availability": {
+          "$ref": "#/definitions/WhisplyModelCatalogAvailability"
+        },
+        "capabilities": {
+          "$ref": "#/definitions/WhisplyModelCatalogCapabilities"
+        },
+        "description": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "providerFamily": {
+          "type": "string"
+        },
+        "rateCardRevision": {
+          "type": "string"
+        },
+        "recommendedDefault": {
+          "type": "boolean"
+        },
+        "responseIdleTimeoutSeconds": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "responseStartTimeoutSeconds": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "routeRevision": {
+          "type": "string"
+        },
+        "shortName": {
+          "type": "string"
+        },
+        "subscriptionAvailability": {
+          "$ref": "#/definitions/WhisplyModelCatalogSubscriptionAvailability"
+        },
+        "usageMultiplierMillis": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "allowedProfiles",
+        "allowedReasoningEfforts",
+        "availability",
+        "capabilities",
+        "description",
+        "displayName",
+        "id",
+        "providerFamily",
+        "rateCardRevision",
+        "recommendedDefault",
+        "responseIdleTimeoutSeconds",
+        "responseStartTimeoutSeconds",
+        "routeRevision",
+        "shortName",
+        "subscriptionAvailability",
+        "usageMultiplierMillis"
+      ],
+      "type": "object"
+    },
+    "WhisplyModelCatalogSubscriptionAvailability": {
+      "enum": [
+        "available",
+        "upgrade_required",
+        "unavailable"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "catalogRevision": {
+      "type": "string"
+    },
+    "expiresAtUnixSeconds": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "generatedAtUnixSeconds": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/definitions/WhisplyModelCatalogModel"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "catalogRevision",
+    "expiresAtUnixSeconds",
+    "generatedAtUnixSeconds",
+    "models",
+    "schemaVersion"
+  ],
+  "title": "WhisplyModelCatalogReadResponse",
+  "type": "object"
+}

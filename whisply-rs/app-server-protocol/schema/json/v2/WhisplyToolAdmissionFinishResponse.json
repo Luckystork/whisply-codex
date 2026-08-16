@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Idempotent acknowledgement for a native admission release request.",
+  "properties": {
+    "released": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "released"
+  ],
+  "title": "WhisplyToolAdmissionFinishResponse",
+  "type": "object"
+}

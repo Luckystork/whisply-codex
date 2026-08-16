@@ -1,0 +1,38 @@
+[package]
+name = "whisply-sandboxing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "whisply_sandboxing"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+whisply-network-proxy = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+whisply-utils-pty = { workspace = true }
+whisply-windows-sandbox = { workspace = true }
+dunce = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+regex-lite = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+url = { workspace = true }
+which = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+whisply-utils-home-dir = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

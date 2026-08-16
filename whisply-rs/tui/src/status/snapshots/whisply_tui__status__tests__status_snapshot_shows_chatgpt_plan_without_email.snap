@@ -1,0 +1,21 @@
+---
+source: tui/src/status/tests.rs
+expression: sanitized
+---
+/status
+
+╭─────────────────────────────────────────────────────────────────────────────╮
+│  >_ Whisply (v0.147.0-wsply.1)                                              │
+│                                                                             │
+│  Run whisply usage for up-to-date                                           │
+│  limits, resets, and rate card                                              │
+│                                                                             │
+│  Model:            gpt-5.1-codex-max (reasoning none, summaries auto)       │
+│  Model provider:   Whisply                                                  │
+│  Directory: [[workspace]]                                                   │
+│  Permissions:      Custom (workspace with network access, Ask for approval) │
+│  Agents.md:        <none>                                                   │
+│  Account:          Enterprise (Automation)                                  │
+│                                                                             │
+│  Limits:           data not available yet                                   │
+╰─────────────────────────────────────────────────────────────────────────────╯

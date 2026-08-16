@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Reads the signed customer model catalog used by the Whisply native UI. Unlike `model/list`, this carries the complete verified presentation and capability projection needed by the native selector.",
+  "title": "WhisplyModelCatalogReadParams",
+  "type": "object"
+}

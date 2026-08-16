@@ -1,0 +1,38 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-image-generation-extension"
+version.workspace = true
+
+[lib]
+name = "whisply_image_generation_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+whisply-api = { workspace = true }
+whisply-core = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-extension-items = { workspace = true }
+whisply-login = { workspace = true }
+whisply-model-provider = { workspace = true }
+whisply-model-provider-info = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-tools = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-image = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+http = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

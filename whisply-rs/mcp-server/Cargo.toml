@@ -1,0 +1,61 @@
+[package]
+name = "whisply-mcp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "codex-mcp-server"
+path = "src/main.rs"
+
+[lib]
+name = "whisply_mcp_server"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+whisply-arg0 = { workspace = true }
+whisply-config = { workspace = true }
+whisply-core = { workspace = true }
+whisply-home = { workspace = true }
+whisply-image-generation-extension = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-features = { workspace = true }
+whisply-git-attribution = { workspace = true }
+whisply-login = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-skills-extension = { workspace = true }
+whisply-utils-cli = { workspace = true }
+whisply-utils-json-to-toml = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }
+tracing = { workspace = true, features = ["log"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+app_test_support = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-shell-command = { workspace = true }
+core_test_support = { workspace = true }
+mcp_test_support = { workspace = true }
+os_info = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

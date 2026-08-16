@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Acknowledges that the opaque admission was accepted for one future turn.",
+  "properties": {
+    "accepted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "accepted"
+  ],
+  "title": "WhisplyToolAdmissionRegisterResponse",
+  "type": "object"
+}

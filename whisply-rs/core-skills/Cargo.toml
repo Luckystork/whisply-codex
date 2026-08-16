@@ -1,0 +1,42 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-core-skills"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "whisply_core_skills"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+whisply-analytics = { workspace = true }
+whisply-config = { workspace = true }
+whisply-context-fragments = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-login = { workspace = true }
+whisply-model-provider = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-skills = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+whisply-utils-plugins = { workspace = true }
+whisply-utils-string = { workspace = true }
+dunce = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt"] }
+tracing = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }

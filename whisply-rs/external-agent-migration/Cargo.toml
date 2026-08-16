@@ -1,0 +1,41 @@
+[package]
+name = "whisply-external-agent-migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+name = "whisply_external_agent_migration"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+whisply-analytics = { workspace = true }
+whisply-config = { workspace = true }
+whisply-core = { workspace = true }
+whisply-core-plugins = { workspace = true }
+whisply-hooks = { workspace = true }
+whisply-memories-write = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-plugin = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-rollout = { workspace = true }
+whisply-thread-store = { workspace = true }
+whisply-utils-output-truncation = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+codex-app-server-protocol = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

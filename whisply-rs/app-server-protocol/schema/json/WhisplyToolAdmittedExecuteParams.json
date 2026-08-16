@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "WhisplyToolModelCall": {
+      "additionalProperties": false,
+      "description": "Model-visible first-party tool call. Authority data is deliberately absent.",
+      "properties": {
+        "arguments": true,
+        "executionID": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "toolID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "executionID",
+        "schemaVersion",
+        "toolID"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "A model call that matched a native owner's prior one-turn admission.\n\nThe server targets this request to the exact registering client. The receiving owner must resolve `admission_id` against its retained user-approved state before it uses the existing trusted envelope bridge.",
+  "properties": {
+    "admissionID": {
+      "type": "string"
+    },
+    "call": {
+      "$ref": "#/definitions/WhisplyToolModelCall"
+    },
+    "clientUserMessageID": {
+      "type": "string"
+    },
+    "threadID": {
+      "type": "string"
+    },
+    "turnID": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "admissionID",
+    "call",
+    "clientUserMessageID",
+    "threadID",
+    "turnID"
+  ],
+  "title": "WhisplyToolAdmittedExecuteRequest",
+  "type": "object"
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Releases an activated one-turn native admission after its turn reaches a terminal state. Every field is an opaque runtime correlation; this request deliberately carries no execution envelope, account, target, file grant, or native permission.",
+  "properties": {
+    "admissionID": {
+      "type": "string"
+    },
+    "clientUserMessageID": {
+      "type": "string"
+    },
+    "threadID": {
+      "type": "string"
+    },
+    "turnID": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "admissionID",
+    "clientUserMessageID",
+    "threadID",
+    "turnID"
+  ],
+  "title": "WhisplyToolAdmissionFinishParams",
+  "type": "object"
+}

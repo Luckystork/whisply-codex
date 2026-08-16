@@ -1,0 +1,19 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-guardian"
+version.workspace = true
+
+[lib]
+name = "whisply_guardian"
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-core = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-protocol = { workspace = true }

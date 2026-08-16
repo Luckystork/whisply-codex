@@ -1,0 +1,26 @@
+[package]
+name = "whisply-exec-server-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "whisply_exec_server_protocol"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+whisply-file-system = { workspace = true }
+whisply-network-proxy = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-shell-command = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

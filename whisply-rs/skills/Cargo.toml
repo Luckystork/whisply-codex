@@ -1,0 +1,29 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-skills"
+version.workspace = true
+build = "build.rs"
+
+[lib]
+doctest = false
+name = "whisply_skills"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-protocol = { workspace = true }
+whisply-shell-command = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+include_dir = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+shlex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

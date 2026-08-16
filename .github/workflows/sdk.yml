@@ -99,7 +99,7 @@ jobs:
             --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
             --build_metadata=TAG_job=sdk \
             -- \
-            //codex-rs/cli:codex
+            //whisply-rs/cli:codex
 
           # Resolve the exact output file using the same wrapper/config path as
           # the build instead of guessing which Bazel convenience symlink is
@@ -110,7 +110,7 @@ jobs:
               cquery \
               --output=files \
               -- \
-              //codex-rs/cli:codex \
+              //whisply-rs/cli:codex \
               | grep -E '^(/|bazel-out/)' \
               | tail -n 1
           )"
@@ -120,7 +120,7 @@ jobs:
             codex_bazel_output_path="${GITHUB_WORKSPACE}/${cquery_output}"
           fi
           if [[ -z "${codex_bazel_output_path}" ]]; then
-            echo "Bazel did not report an output path for //codex-rs/cli:codex." >&2
+            echo "Bazel did not report an output path for //whisply-rs/cli:codex." >&2
             exit 1
           fi
           if [[ ! -e "${codex_bazel_output_path}" ]]; then
@@ -161,7 +161,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ steps.setup_bazel.outputs.repository-cache-path }}
-          key: bazel-cache-x86_64-unknown-linux-gnu-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
+          key: bazel-cache-x86_64-unknown-linux-gnu-${{ hashFiles('MODULE.bazel', 'whisply-rs/Cargo.lock', 'whisply-rs/Cargo.toml') }}
 
       - name: Check for a clean worktree
         if: always() && !cancelled()

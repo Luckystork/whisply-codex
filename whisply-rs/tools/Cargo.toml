@@ -1,0 +1,40 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-tools"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+whisply-code-mode = { workspace = true }
+whisply-connectors = { workspace = true }
+whisply-features = { workspace = true }
+whisply-file-system = { workspace = true }
+whisply-extension-items = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-output-truncation = { workspace = true }
+whisply-utils-pty = { workspace = true }
+whisply-utils-string = { workspace = true }
+jsonptr = { workspace = true }
+rmcp = { workspace = true, default-features = false, features = [
+    "base64",
+    "macros",
+    "schemars",
+    "server",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+urlencoding = { workspace = true }
+
+[dev-dependencies]
+whisply-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }
+
+[lib]
+doctest = false

@@ -1,0 +1,17 @@
+[package]
+name = "whisply-exec-server-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "lib.rs"
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-exec-server = { workspace = true }
+whisply-http-client = { workspace = true }

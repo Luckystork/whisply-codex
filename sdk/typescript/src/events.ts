@@ -1,4 +1,4 @@
-// based on event types from codex-rs/exec/src/exec_events.rs
+// based on event types from whisply-rs/exec/src/exec_events.rs
 
 import type { ThreadItem } from "./items";
 
@@ -31,10 +31,58 @@ export type Usage = {
   reasoning_output_tokens: number;
 };
 
+/** One of the account's limit windows. */
+export type AccountUsageWindow = {
+  /** What the window limits: `usage` or `transcription`. */
+  category: string;
+  /** The window's period: `five_hour` or `weekly`. */
+  window: string;
+  /** Cost already charged in this window. */
+  settled: number;
+  /** Cost held for work that has not settled yet. */
+  reserved: number;
+  /** The window's ceiling. */
+  cap: number;
+  /** Settled plus reserved cost as a fraction of the cap. */
+  used_fraction: number;
+  /** When the window next resets, if a reset is scheduled. */
+  resets_at: string | null;
+};
+
+/**
+ * What a Whisply-metered account has spent, in the cost units it is billed in.
+ *
+ * Cost already has each model's rate multiplier applied. The multiplier table
+ * itself is signed and is identified here by `rate_card_version`; read it with
+ * `whisply usage --json` or `whisply models --json`.
+ */
+export type AccountUsage = {
+  /** The account's plan tier. */
+  tier: string;
+  /** What the amounts below measure, as declared by the metering contract. */
+  basis: string;
+  /** The currency the amounts are denominated in. */
+  currency: string;
+  /** The revision of the signed rate card these amounts were priced against. */
+  rate_card_version: string;
+  /** Every limit window the account has, spend and transcription alike. */
+  windows: AccountUsageWindow[];
+  /** When the account produced these amounts. */
+  generated_at: string;
+  /** Whether the amounts are known to be behind the account's live state. */
+  stale: boolean;
+};
+
 /** Emitted when a turn is completed. Typically right after the assistant's response. */
 export type TurnCompletedEvent = {
   type: "turn.completed";
   usage: Usage;
+  /**
+   * What the account was charged, for an account Whisply meters. Absent for a
+   * local or bring-your-own-key run, and for a metered run whose account could
+   * not be read.
+   */
+  account_usage?: AccountUsage;
 };
 
 /** Indicates that a turn failed with an error. */

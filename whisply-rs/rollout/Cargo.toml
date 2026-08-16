@@ -1,0 +1,51 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-rollout"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "whisply_rollout"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+whisply-extension-items = { workspace = true }
+whisply-file-search = { workspace = true }
+whisply-git-utils = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-state = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+time = { workspace = true, features = [
+    "formatting",
+    "local-offset",
+    "macros",
+    "parsing",
+] }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+whisply-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }

@@ -88,7 +88,7 @@ def fetch_codex_v8_artifacts(
 def resolved_v8_crate_version() -> str:
     import tomllib
 
-    cargo_lock = tomllib.loads((REPO_ROOT / "codex-rs" / "Cargo.lock").read_text())
+    cargo_lock = tomllib.loads((REPO_ROOT / "whisply-rs" / "Cargo.lock").read_text())
     versions = sorted(
         {
             package["version"]

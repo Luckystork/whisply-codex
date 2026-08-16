@@ -1,0 +1,23 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-utils-audio"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-utils-cache = { workspace = true }
+whisply-utils-string = { workspace = true }
+symphonia = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[lib]
+doctest = false

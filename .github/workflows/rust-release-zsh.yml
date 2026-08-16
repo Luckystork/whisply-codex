@@ -7,7 +7,7 @@ on:
 
 env:
   ZSH_COMMIT: 77045ef899e53b9598bebc5a41db93a548a40ca6
-  ZSH_PATCH: codex-rs/shell-escalation/patches/zsh-exec-wrapper.patch
+  ZSH_PATCH: whisply-rs/shell-escalation/patches/zsh-exec-wrapper.patch
 
 concurrency:
   group: ${{ github.workflow }}::${{ github.ref_name }}

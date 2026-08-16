@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "A native owner reporting that an admitted call it is still running has reached a describable step.\n\nThis is a report, not an authority: the app-server accepts it only for a call that is in flight right now under this exact connection, thread, turn, and admission, and it can never start, extend, or complete a call. A native tool that takes minutes would otherwise be a silent gap in the thread.",
+  "properties": {
+    "admissionID": {
+      "type": "string"
+    },
+    "executionID": {
+      "type": "string"
+    },
+    "fraction": {
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "iconID": {
+      "default": null,
+      "description": "The icon of the capability doing the work, as its descriptor names it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "label": {
+      "type": "string"
+    },
+    "threadID": {
+      "type": "string"
+    },
+    "turnID": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "admissionID",
+    "executionID",
+    "label",
+    "threadID",
+    "turnID"
+  ],
+  "title": "WhisplyToolProgressReportParams",
+  "type": "object"
+}

@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "WhisplyPromptLayerDigest": {
+      "additionalProperties": false,
+      "description": "One layer's revision-safe fingerprint.\n\nDeliberately a digest rather than the contributed text: a client can prove which prompt revision ran, and compare it across surfaces and releases, without the composed instructions leaving the runtime.",
+      "properties": {
+        "byteLength": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "layerId": {
+          "type": "string"
+        },
+        "originId": {
+          "type": "string"
+        },
+        "precedence": {
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/definitions/WhisplyPromptLayerSource"
+        },
+        "textSha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "byteLength",
+        "layerId",
+        "originId",
+        "precedence",
+        "source",
+        "textSha256"
+      ],
+      "type": "object"
+    },
+    "WhisplyPromptLayerSource": {
+      "description": "Which side contributed a prompt layer.",
+      "enum": [
+        "native_runtime",
+        "whisply_product"
+      ],
+      "type": "string"
+    },
+    "WhisplyPromptProfile": {
+      "description": "Which prompt profile the composition ran under.",
+      "enum": [
+        "general",
+        "workspace"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "contractVersion": {
+      "format": "uint16",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "layers": {
+      "items": {
+        "$ref": "#/definitions/WhisplyPromptLayerDigest"
+      },
+      "type": "array"
+    },
+    "modeId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profile": {
+      "$ref": "#/definitions/WhisplyPromptProfile"
+    }
+  },
+  "required": [
+    "contractVersion",
+    "layers",
+    "profile"
+  ],
+  "title": "WhisplyPromptCompositionReadResponse",
+  "type": "object"
+}

@@ -1,0 +1,23 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-connectors-extension"
+version.workspace = true
+
+[lib]
+name = "whisply_connectors_extension"
+path = "src/lib.rs"
+doctest = false
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-connectors = { workspace = true }
+whisply-core-plugins = { workspace = true }
+whisply-plugin = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

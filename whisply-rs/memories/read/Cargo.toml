@@ -1,0 +1,21 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-memories-read"
+version.workspace = true
+
+[lib]
+name = "whisply_memories_read"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-protocol = { workspace = true }
+whisply-shell-command = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

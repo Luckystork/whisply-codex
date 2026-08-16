@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Reads what can be said about one conversation being shortened.",
+  "properties": {
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "threadId"
+  ],
+  "title": "WhisplyCompactionReadParams",
+  "type": "object"
+}

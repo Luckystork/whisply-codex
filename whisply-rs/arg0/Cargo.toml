@@ -1,0 +1,33 @@
+[package]
+name = "whisply-arg0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "whisply_arg0"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+whisply-apply-patch = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-install-context = { workspace = true }
+whisply-linux-sandbox = { workspace = true }
+whisply-sandboxing = { workspace = true }
+whisply-shell-escalation = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-home-dir = { workspace = true }
+dotenvy = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(windows)'.dependencies]
+whisply-windows-sandbox = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

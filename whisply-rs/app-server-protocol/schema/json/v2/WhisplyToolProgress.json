@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Progress delivered through the normal typed item/event path.\n\nThe thread and turn are part of the notification because user-visible activity has to be attributable: an execution id alone cannot say which conversation a line belongs in, and treating it as routing authority would let one thread's progress be drawn into another.",
+  "properties": {
+    "executionID": {
+      "type": "string"
+    },
+    "fraction": {
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "iconID": {
+      "default": null,
+      "description": "Which capability this line is about, as the tool registry names its icon. A surface that draws activity has only the execution id otherwise, so every capability ends up behind one generic glyph.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "label": {
+      "type": "string"
+    },
+    "threadID": {
+      "type": "string"
+    },
+    "turnID": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "executionID",
+    "label",
+    "threadID",
+    "turnID"
+  ],
+  "title": "WhisplyToolProgress",
+  "type": "object"
+}

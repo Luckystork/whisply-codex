@@ -1,0 +1,48 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-skills-extension"
+version.workspace = true
+
+[lib]
+name = "whisply_skills_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-config = { workspace = true }
+whisply-core-skills = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-mcp = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-skills = { workspace = true }
+whisply-tools = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+whisply-utils-plugins = { workspace = true }
+whisply-utils-string = { workspace = true }
+dirs = { workspace = true }
+futures = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+whisply-models-manager = { workspace = true }
+whisply-utils-cargo-bin = { workspace = true }
+dunce = { workspace = true }
+insta = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

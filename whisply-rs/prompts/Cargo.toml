@@ -1,0 +1,25 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-prompts"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "whisply_prompts"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+whisply-context-fragments = { workspace = true }
+whisply-git-utils = { workspace = true }
+whisply-execpolicy = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-template = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

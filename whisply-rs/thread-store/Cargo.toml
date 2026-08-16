@@ -1,0 +1,42 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-thread-store"
+version.workspace = true
+
+[lib]
+name = "whisply_thread_store"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+codex-app-server-protocol = { workspace = true }
+whisply-git-utils = { workspace = true }
+whisply-install-context = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-rollout = { workspace = true }
+whisply-state = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+futures = { workspace = true }
+pulldown-cmark = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+whisply-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true }

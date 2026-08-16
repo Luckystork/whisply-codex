@@ -1,0 +1,175 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-core"
+version.workspace = true
+
+[lib]
+name = "whisply_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codex-write-config-schema"
+path = "src/bin/config_schema.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+async-channel = { workspace = true }
+base64 = { workspace = true }
+bm25 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+whisply-analytics = { workspace = true }
+whisply-agent-graph-store = { workspace = true }
+whisply-api = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+whisply-apply-patch = { workspace = true }
+whisply-async-utils = { workspace = true }
+whisply-code-mode = { workspace = true }
+whisply-connectors = { workspace = true }
+whisply-context-fragments = { workspace = true }
+whisply-config = { workspace = true }
+whisply-core-plugins = { workspace = true }
+whisply-core-skills = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-extension-items = { workspace = true }
+whisply-features = { workspace = true }
+whisply-feedback = { workspace = true }
+whisply-file-system = { workspace = true }
+whisply-login = { workspace = true }
+whisply-memories-read = { workspace = true }
+whisply-mcp = { workspace = true }
+whisply-model-provider-info = { workspace = true }
+whisply-models-manager = { workspace = true }
+whisply-shell-command = { workspace = true }
+whisply-execpolicy = { workspace = true }
+whisply-git-utils = { workspace = true }
+whisply-hooks = { workspace = true }
+whisply-http-client = { workspace = true }
+whisply-install-context = { workspace = true }
+whisply-network-proxy = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-plugin = { workspace = true }
+whisply-model-provider = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-response-debug-context = { workspace = true }
+whisply-prompts = { workspace = true }
+whisply-rollout = { workspace = true }
+whisply-rollout-trace = { workspace = true }
+whisply-rmcp-client = { workspace = true }
+whisply-sandboxing = { workspace = true }
+whisply-skills = { workspace = true }
+whisply-skills-extension = { workspace = true }
+whisply-state = { workspace = true }
+whisply-terminal-detection = { workspace = true }
+whisply-thread-store = { workspace = true }
+whisply-tools = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-audio = { workspace = true }
+whisply-utils-cache = { workspace = true }
+whisply-utils-image = { workspace = true }
+whisply-utils-home-dir = { workspace = true }
+whisply-utils-output-truncation = { workspace = true }
+whisply-utils-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+whisply-utils-plugins = { workspace = true }
+whisply-utils-pty = { workspace = true }
+whisply-utils-string = { workspace = true }
+whisply-utils-stream-parser = { workspace = true }
+codex-whisply = { workspace = true }
+whisply-windows-sandbox = { package = "whisply-windows-sandbox", path = "../windows-sandbox-rs" }
+dirs = { workspace = true }
+dunce = { workspace = true }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+iana-time-zone = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "webp"] }
+indexmap = { workspace = true }
+libc = { workspace = true }
+once_cell = { workspace = true }
+rand = { workspace = true }
+regex-lite = { workspace = true }
+rmcp = { workspace = true, default-features = false, features = [
+    "base64",
+    "macros",
+    "schemars",
+    "server",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+shlex = { workspace = true }
+similar = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }
+tokio-util = { workspace = true, features = ["rt"] }
+tokio-tungstenite = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4", "v5", "v7"] }
+which = { workspace = true }
+whoami = { workspace = true }
+
+# Build OpenSSL from source for musl builds.
+[target.x86_64-unknown-linux-musl.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
+# Build OpenSSL from source for musl builds.
+[target.aarch64-unknown-linux-musl.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
+[target.'cfg(unix)'.dependencies]
+whisply-shell-escalation = { workspace = true }
+
+[dev-dependencies]
+app_test_support = { workspace = true }
+assert_cmd = { workspace = true }
+assert_matches = { workspace = true }
+whisply-exec-server-test-support = { workspace = true }
+whisply-image-generation-extension = { workspace = true }
+whisply-home = { workspace = true }
+whisply-otel = { workspace = true }
+whisply-test-binary-support = { workspace = true }
+whisply-utils-cargo-bin = { workspace = true }
+whisply-web-search-extension = { workspace = true }
+core_test_support = { workspace = true }
+ctor = { workspace = true }
+insta = { workspace = true }
+maplit = { workspace = true }
+opentelemetry = { workspace = true }
+predicates = { workspace = true }
+pretty_assertions = { workspace = true }
+test-case = "3.3.1"
+opentelemetry_sdk = { workspace = true, features = [
+    "experimental_metrics_custom_reader",
+    "metrics",
+] }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+walkdir = { workspace = true }
+wiremock = { workspace = true }
+zstd = { workspace = true }
+
+[package.metadata.cargo-shear]
+ignored = ["openssl-sys"]
+ignored-paths = ["tests/remote_env_windows/*.rs"]

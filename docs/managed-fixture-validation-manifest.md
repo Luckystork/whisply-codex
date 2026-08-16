@@ -2,7 +2,7 @@
 
 This is a source-derived execution plan, not a record of passing validation.
 All commands below are intentionally queued: execution is blocked while the
-workspace has only 1.3 GiB of free disk. Run from `codex-rs/` only after that
+workspace has only 1.3 GiB of free disk. Run from `whisply-rs/` only after that
 disk gate is cleared.
 
 ## Rules for the validation wave

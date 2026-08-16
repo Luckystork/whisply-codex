@@ -1,0 +1,23 @@
+---
+source: tui/src/status/tests.rs
+expression: sanitized
+---
+/status
+
+╭────────────────────────────────────────╮
+│  >_ Whisply (v0.147.0-wsply.1)         │
+│                                        │
+│  Run whisply usage for up-to-date      │
+│  limits, resets, and rate card         │
+│                                        │
+│  Model:                ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞ  │
+│  Model provider:       Whisply         │
+│  Directory: [[workspace]]              │
+│  Permissions:          Custom (workspa │
+│  Agents.md:            <none>          │
+│  Account:              ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟ@ex │
+│  Thread name:          ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞ  │
+│  Collaboration mode:   ｶﾞﾊﾟ collaborat │
+│                                        │
+│  Limits:               data not availa │
+╰────────────────────────────────────────╯

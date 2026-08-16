@@ -1,0 +1,24 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-plugin"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "whisply_plugin"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-config = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+whisply-utils-plugins = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

@@ -1,0 +1,19 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: strip_osc8_for_snapshot(&popup)
+---
+  Plugins
+  Figma · Installed by admin · ChatGPT Marketplace
+  Runs on its own: ./hook-0-0.sh (PreToolUse); ./hook-1-0.sh, ./hook-1-1.sh (Stop).
+  Turn Figma files into implementation context.
+
+› 1. Back to plugins     Return to the plugin list.
+     Installed by admin  This plugin is installed by your workspace admin.
+     Source              Local · /tmp/codex-plugin-menu-tests/plugins/figma
+     Auth                Auth on install
+     Skills              design-review, extract-copy
+     Hooks               PreToolUse (1), Stop (2) · 3 run commands.
+     Apps                Figma, Slack
+     MCP Servers         figma-mcp, docs-mcp
+
+  Press esc to close.

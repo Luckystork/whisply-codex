@@ -17,7 +17,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: codex-rs
+        working-directory: whisply-rs
     strategy:
       fail-fast: false
       matrix:
@@ -156,7 +156,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: codex-rs
+        working-directory: whisply-rs
     strategy:
       fail-fast: false
       matrix:
@@ -187,7 +187,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.target }}-symbols
-          path: codex-rs/symbols-dist/${{ matrix.target }}/*
+          path: whisply-rs/symbols-dist/${{ matrix.target }}/*
           if-no-files-found: error
 
   build-windows:
@@ -204,7 +204,7 @@ jobs:
       id-token: write
     defaults:
       run:
-        working-directory: codex-rs
+        working-directory: whisply-rs
     strategy:
       fail-fast: false
       matrix:
@@ -410,4 +410,4 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            codex-rs/dist/${{ matrix.target }}/*
+            whisply-rs/dist/${{ matrix.target }}/*

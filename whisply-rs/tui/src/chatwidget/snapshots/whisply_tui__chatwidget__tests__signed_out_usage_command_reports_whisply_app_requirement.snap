@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: rendered
+---
+■ Whisply controls are unavailable. Keep the Whisply app running and try again.

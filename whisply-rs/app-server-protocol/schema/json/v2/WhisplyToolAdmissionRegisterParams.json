@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Registers a short-lived, owner-approved native capability set for exactly one subsequent user message. The app-server binds this opaque record to the connection, thread, and client message before it can reach Core.\n\nThis does not contain an execution envelope, account identity, target, confirmation, browser tab, file grant, or lease. Those remain retained by the native owner and are constructed only after an admitted model call.",
+  "properties": {
+    "admissionID": {
+      "type": "string"
+    },
+    "clientUserMessageID": {
+      "type": "string"
+    },
+    "threadID": {
+      "type": "string"
+    },
+    "toolIDs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "admissionID",
+    "clientUserMessageID",
+    "threadID",
+    "toolIDs"
+  ],
+  "title": "WhisplyToolAdmissionRegisterParams",
+  "type": "object"
+}

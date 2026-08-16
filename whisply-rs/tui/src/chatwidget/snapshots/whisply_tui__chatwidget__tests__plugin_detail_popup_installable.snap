@@ -1,0 +1,23 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: strip_osc8_for_snapshot(&popup)
+---
+  Plugins
+  Figma · Can be installed · Local
+  Data shared with this app is subject to the app's terms of service and privacy policy. Learn
+  more.
+  Runs on its own: ./hook-0-0.sh (PreToolUse); ./hook-1-0.sh, ./hook-1-1.sh (Stop).
+  Updates: runs from that folder in place. Whatever is in it when Whisply loads it is what runs,
+  with no update step and no further review.
+  Turn Figma files into implementation context.
+
+› 1. Back to plugins  Return to the plugin list.
+  2. Install plugin   Install this plugin now.
+     Source           Local · /tmp/codex-plugin-menu-tests/plugins/figma
+     Auth             Auth on install
+     Skills           design-review, extract-copy
+     Hooks            PreToolUse (1), Stop (2) · 3 run commands.
+     Apps             Figma, Slack
+     MCP Servers      figma-mcp, docs-mcp
+
+  Press esc to close.

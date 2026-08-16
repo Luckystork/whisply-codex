@@ -1,0 +1,39 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-mcp-extension"
+version.workspace = true
+
+[lib]
+name = "whisply_mcp_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-core = { workspace = true }
+whisply-core-plugins = { workspace = true }
+whisply-config = { workspace = true }
+whisply-connectors = { workspace = true }
+whisply-connectors-extension = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-features = { workspace = true }
+whisply-mcp = { workspace = true }
+whisply-plugin = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }
+whisply-utils-path-uri = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+whisply-login = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = { workspace = true }

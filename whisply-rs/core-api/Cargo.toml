@@ -1,0 +1,32 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "whisply-core-api"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "whisply_core_api"
+path = "src/lib.rs"
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-app-server-protocol = { workspace = true }
+whisply-arg0 = { workspace = true }
+whisply-analytics = { workspace = true }
+whisply-config = { workspace = true }
+whisply-core = { workspace = true }
+whisply-extension-api = { workspace = true }
+whisply-home = { workspace = true }
+whisply-image-generation-extension = { workspace = true }
+whisply-exec-server = { workspace = true }
+whisply-features = { workspace = true }
+whisply-login = { workspace = true }
+whisply-model-provider-info = { workspace = true }
+whisply-models-manager = { workspace = true }
+whisply-protocol = { workspace = true }
+whisply-state = { workspace = true }
+whisply-utils-absolute-path = { workspace = true }

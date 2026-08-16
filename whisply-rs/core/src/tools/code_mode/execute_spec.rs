@@ -1,0 +1,94 @@
+use std::collections::BTreeMap;
+use whisply_code_mode::ToolDefinition as CodeModeToolDefinition;
+use whisply_tools::FreeformTool;
+use whisply_tools::FreeformToolFormat;
+use whisply_tools::ToolSpec;
+
+pub(crate) fn create_code_mode_tool(
+    enabled_tools: &[CodeModeToolDefinition],
+    deferred_tools: &[CodeModeToolDefinition],
+    namespace_descriptions: &BTreeMap<String, whisply_code_mode::ToolNamespaceDescription>,
+    default_exec_yield_time_ms: u64,
+    code_mode_only: bool,
+) -> ToolSpec {
+    const CODE_MODE_FREEFORM_GRAMMAR: &str = r#"
+start: pragma_source | plain_source
+pragma_source: PRAGMA_LINE NEWLINE SOURCE
+plain_source: SOURCE
+
+PRAGMA_LINE: /[ \t]*\/\/ @exec:[^\r\n]*/
+NEWLINE: /\r?\n/
+SOURCE: /[\s\S]+/
+"#;
+
+    ToolSpec::Freeform(FreeformTool {
+        name: whisply_code_mode::PUBLIC_TOOL_NAME.to_string(),
+        description: whisply_code_mode::build_exec_tool_description(
+            enabled_tools,
+            deferred_tools,
+            namespace_descriptions,
+            default_exec_yield_time_ms,
+            code_mode_only,
+        ),
+        defer_loading: None,
+        format: FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "lark".to_string(),
+            definition: CODE_MODE_FREEFORM_GRAMMAR.to_string(),
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use whisply_tools::ToolName;
+
+    #[test]
+    fn create_code_mode_tool_matches_expected_spec() {
+        let enabled_tools = vec![whisply_code_mode::ToolDefinition {
+            name: "update_plan".to_string(),
+            tool_name: ToolName::plain("update_plan"),
+            description: "Update the plan".to_string(),
+            kind: whisply_code_mode::CodeModeToolKind::Function,
+            input_schema: None,
+            output_schema: None,
+        }];
+
+        assert_eq!(
+            create_code_mode_tool(
+                &enabled_tools,
+                &[],
+                &BTreeMap::new(),
+                whisply_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
+                /*code_mode_only*/ true,
+            ),
+            ToolSpec::Freeform(FreeformTool {
+                name: whisply_code_mode::PUBLIC_TOOL_NAME.to_string(),
+                description: whisply_code_mode::build_exec_tool_description(
+                    &enabled_tools,
+                    &[],
+                    &BTreeMap::new(),
+                    whisply_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
+                    /*code_mode_only*/ true,
+                ),
+                defer_loading: None,
+                format: FreeformToolFormat {
+                    r#type: "grammar".to_string(),
+                    syntax: "lark".to_string(),
+                    definition: r#"
+start: pragma_source | plain_source
+pragma_source: PRAGMA_LINE NEWLINE SOURCE
+plain_source: SOURCE
+
+PRAGMA_LINE: /[ \t]*\/\/ @exec:[^\r\n]*/
+NEWLINE: /\r?\n/
+SOURCE: /[\s\S]+/
+"#
+                    .to_string(),
+                },
+            })
+        );
+    }
+}

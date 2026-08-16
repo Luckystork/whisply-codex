@@ -36,20 +36,20 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
     def test_keyless_invocation_drops_remote_ci_configuration(self) -> None:
         self.assertIsNone(
             run_bazel_with_buildbuddy.remote_config(
-                ["build", "--config=ci-linux", "//codex-rs/cli:codex"],
+                ["build", "--config=ci-linux", "//whisply-rs/cli:codex"],
                 {},
             )
         )
         self.assertEqual(
             run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                ["build", "--config=ci-linux", "--", "//codex-rs/cli:codex"],
+                ["build", "--config=ci-linux", "--", "//whisply-rs/cli:codex"],
                 {},
             ),
-            ["build", "--", "//codex-rs/cli:codex"],
+            ["build", "--", "//whisply-rs/cli:codex"],
         )
 
     def test_program_arguments_after_separator_do_not_select_or_lose_rbe(self) -> None:
-        args = ["run", "//codex-rs/cli:codex", "--", "--config=remote"]
+        args = ["run", "//whisply-rs/cli:codex", "--", "--config=remote"]
 
         self.assertEqual(
             run_bazel_with_buildbuddy.bazel_args_with_remote_config(args, {}),
@@ -68,7 +68,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
 
             self.assertEqual(
                 run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                    ["build", "--config=ci-linux", "--", "//codex-rs/cli:codex"],
+                    ["build", "--config=ci-linux", "--", "//whisply-rs/cli:codex"],
                     env,
                 ),
                 [
@@ -77,7 +77,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
                     "--remote_header=x-buildbuddy-api-key=token",
                     "--config=ci-linux",
                     "--",
-                    "//codex-rs/cli:codex",
+                    "//whisply-rs/cli:codex",
                 ],
             )
 
@@ -86,7 +86,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
 
         self.assertEqual(
             run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                ["build", "--config=ci-windows-cross", "//codex-rs/cli:codex"],
+                ["build", "--config=ci-windows-cross", "//whisply-rs/cli:codex"],
                 env,
             ),
             [
@@ -94,12 +94,12 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
                 "--config=buildbuddy-generic-rbe",
                 "--remote_header=x-buildbuddy-api-key=fork-token",
                 "--config=ci-windows-cross",
-                "//codex-rs/cli:codex",
+                "//whisply-rs/cli:codex",
             ],
         )
 
     def test_query_remote_configuration_is_inserted_before_expression(self) -> None:
-        expression = 'kind("rust_library rule", //codex-rs/...)'
+        expression = 'kind("rust_library rule", //whisply-rs/...)'
         env = {"BUILDBUDDY_API_KEY": "fork-token"}
 
         for command in ("query", "cquery", "aquery"):
@@ -189,20 +189,20 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
         }
 
         self.assertEqual(
-            run_bazel_with_buildbuddy.bazel_command("build", "//codex-rs/...", env=env),
+            run_bazel_with_buildbuddy.bazel_command("build", "//whisply-rs/...", env=env),
             [
                 "bazel",
                 "--output_user_root=/tmp/bazel-output",
                 "--noexperimental_remote_repo_contents_cache",
                 "build",
-                "//codex-rs/...",
+                "//whisply-rs/...",
             ],
         )
         self.assertEqual(
             run_bazel_with_buildbuddy.bazel_command(
                 "--experimental_remote_repo_contents_cache",
                 "build",
-                "//codex-rs/...",
+                "//whisply-rs/...",
                 env=env,
             ),
             [
@@ -210,7 +210,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
                 "--output_user_root=/tmp/bazel-output",
                 "--experimental_remote_repo_contents_cache",
                 "build",
-                "//codex-rs/...",
+                "//whisply-rs/...",
             ],
         )
 
@@ -224,14 +224,14 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
             run_bazel_with_buildbuddy.bazel_command(
                 "build",
                 "--config=local",
-                "//codex-rs/...",
+                "//whisply-rs/...",
                 env=env,
             ),
             [
                 "bazel",
                 "build",
                 "--config=local",
-                "//codex-rs/...",
+                "//whisply-rs/...",
                 "--repo_contents_cache=/tmp/bazel-repo-contents",
                 "--repository_cache=/tmp/bazel-repository",
             ],
@@ -241,7 +241,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
         self.assertEqual(
             run_bazel_with_buildbuddy.bazel_command(
                 "build",
-                "//codex-rs/...",
+                "//whisply-rs/...",
                 "--",
                 "--program-arg",
                 env={"BAZEL_REPOSITORY_CACHE": "/tmp/bazel-repository"},
@@ -249,7 +249,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
             [
                 "bazel",
                 "build",
-                "//codex-rs/...",
+                "//whisply-rs/...",
                 "--repository_cache=/tmp/bazel-repository",
                 "--",
                 "--program-arg",

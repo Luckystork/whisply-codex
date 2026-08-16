@@ -1,0 +1,17 @@
+[package]
+name = "whisply-utils-oss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+whisply-core = { workspace = true }
+whisply-lmstudio = { workspace = true }
+whisply-model-provider-info = { workspace = true }
+whisply-ollama = { workspace = true }
+
+[lib]
+doctest = false
