@@ -2193,7 +2193,10 @@ async fn managed_status_card(
     temp_home: &TempDir,
     snapshot: Option<&codex_whisply::ContextualUsageSnapshot>,
 ) -> String {
-    let config = test_config(temp_home).await;
+    let mut config = test_config(temp_home).await;
+    // The release verifier runs tests with an isolated HOME, so avoid deriving
+    // this usage-meter snapshot's layout from the caller's real workspace.
+    set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
     let usage = TokenUsage::default();
     let now = Local
         .with_ymd_and_hms(2024, 6, 7, 8, 9, 10)
@@ -2220,7 +2223,7 @@ async fn managed_status_card(
         /*refreshing_rate_limits*/ true,
     );
     handle.finish_managed_usage_refresh(snapshot, now);
-    render_lines(&card.display_lines(/*width*/ 100)).join("\n")
+    sanitize_directory(render_lines(&card.display_lines(/*width*/ 100))).join("\n")
 }
 
 #[tokio::test]

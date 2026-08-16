@@ -2059,10 +2059,12 @@ fn select_verify_checks(
 
 fn run_check(source_root: &Path, check: &VerificationCheck, dry_run: bool) -> CheckResult {
     let started = Instant::now();
-    // The outer release verifier owns a disposable target tree. Fixed cargo
+    // The outer release verifier owns a disposable target tree. Fixed
     // children start with an empty environment, so carry only this explicit
     // artifact location through to prevent full-suite output accumulating in
-    // the checked-out runtime source tree.
+    // the checked-out runtime source tree. Static projection checks also use
+    // the already-built runtime from this target, rather than trying to build
+    // one with a deliberately unavailable Cargo toolchain.
     let verifier_cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR");
     let result = match check.action {
         CheckAction::Blocked => CheckResult {
@@ -2262,6 +2264,9 @@ fn run_check(source_root: &Path, check: &VerificationCheck, dry_run: bool) -> Ch
                     // collecting fixed, read-only evidence.
                     .env("PYTHONDONTWRITEBYTECODE", "1")
                     .env("WHISPLY_HOME", &isolated_home.whisply_home);
+                if let Some(cargo_target_dir) = verifier_cargo_target_dir.as_deref() {
+                    child.env("CARGO_TARGET_DIR", cargo_target_dir);
+                }
                 if program == "cargo" {
                     // Cargo needs the already-installed offline registry and
                     // pinned toolchain, but neither needs to become the child
@@ -2269,9 +2274,6 @@ fn run_check(source_root: &Path, check: &VerificationCheck, dry_run: bool) -> Ch
                     child
                         .env("CARGO_HOME", tool_home.join(".cargo"))
                         .env("RUSTUP_HOME", tool_home.join(".rustup"));
-                    if let Some(cargo_target_dir) = verifier_cargo_target_dir.as_deref() {
-                        child.env("CARGO_TARGET_DIR", cargo_target_dir);
-                    }
                 }
                 if check.suite == VerifySuite::Rust {
                     // The complete Rust app-server suite reaches deeply nested
