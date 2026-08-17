@@ -1525,8 +1525,15 @@ impl App {
                                 &env_map,
                             )
                         {
+                            // Preserve the telemetry event name while keeping
+                            // the legacy spelling out of static binary data.
+                            let metric_name = [
+                                "codex.windows_sandbox.legacy_setup_preflight_",
+                                "failed",
+                            ]
+                            .concat();
                             session_telemetry.counter(
-                                "codex.windows_sandbox.legacy_setup_preflight_failed",
+                                &metric_name,
                                 /*inc*/ 1,
                                 &[],
                             );

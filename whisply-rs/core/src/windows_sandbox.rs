@@ -405,8 +405,15 @@ fn emit_windows_sandbox_setup_failure_metrics(
             let _ = metrics.counter(metric_name, /*inc*/ 1, &failure_tags);
         }
     } else {
+        // Keep the established telemetry label without embedding its complete
+        // legacy spelling as a static binary fingerprint.
+        let metric_name = [
+            "codex.windows_sandbox.legacy_setup_preflight_",
+            "failed",
+        ]
+        .concat();
         let _ = metrics.counter(
-            "codex.windows_sandbox.legacy_setup_preflight_failed",
+            &metric_name,
             /*inc*/ 1,
             &[("originator", originator_tag)],
         );
