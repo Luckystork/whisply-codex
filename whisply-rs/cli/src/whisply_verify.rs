@@ -26,7 +26,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tempfile::TempDir;
 
-pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 25;
+pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 26;
 pub(crate) const RELEASE_TEST_MANIFEST_VERSION: u16 = 2;
 
 const ROOT_SENTINELS: &[&str] = &[
@@ -603,6 +603,7 @@ const VERIFY_CHECK_PREREQUISITES: &[(&str, &[&str])] = &[
     (
         "rust-core-full",
         &[
+            "rust-app-server-helper-cli",
             "rust-app-server-helper-code-mode",
             "rust-app-server-helper-stdio",
         ],
@@ -1010,6 +1011,26 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         failure_summary: "Full CLI verification did not complete.",
     },
     VerificationCheck {
+        id: "rust-app-server-helper-cli",
+        suite: VerifySuite::Rust,
+        availability: CheckAvailability::Runnable,
+        action: CheckAction::Run {
+            program: "cargo",
+            args: &[
+                "build",
+                "--offline",
+                "-p",
+                "whisply-cli",
+                "--bin",
+                "whisply",
+            ],
+            working_directory: "Runtime/whisply-codex/whisply-rs",
+            required_paths: &["Runtime/whisply-codex/whisply-rs/cli/Cargo.toml"],
+        },
+        remediation: "Restore the fixed Whisply CLI helper binary required by the complete Core and app-server protocol suites.",
+        failure_summary: "App-server CLI helper build did not complete.",
+    },
+    VerificationCheck {
         id: "rust-app-server-helper-code-mode",
         suite: VerifySuite::Rust,
         availability: CheckAvailability::Runnable,
@@ -1042,6 +1063,8 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
                 "whisply-rmcp-client",
                 "--bin",
                 "test_stdio_server",
+                "--bin",
+                "test_streamable_http_server",
             ],
             working_directory: "Runtime/whisply-codex/whisply-rs",
             required_paths: &["Runtime/whisply-codex/whisply-rs/rmcp-client/Cargo.toml"],
@@ -1427,26 +1450,6 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         },
         remediation: "Repair the local app-server transport and explicit listener security contract before validating higher-level UI protocol behavior.",
         failure_summary: "Full app-server transport verification did not complete.",
-    },
-    VerificationCheck {
-        id: "rust-app-server-helper-cli",
-        suite: VerifySuite::Rust,
-        availability: CheckAvailability::Runnable,
-        action: CheckAction::Run {
-            program: "cargo",
-            args: &[
-                "build",
-                "--offline",
-                "-p",
-                "whisply-cli",
-                "--bin",
-                "whisply",
-            ],
-            working_directory: "Runtime/whisply-codex/whisply-rs",
-            required_paths: &["Runtime/whisply-codex/whisply-rs/cli/Cargo.toml"],
-        },
-        remediation: "Restore the fixed Whisply CLI helper binary required by the complete app-server protocol suite.",
-        failure_summary: "App-server CLI helper build did not complete.",
     },
     VerificationCheck {
         id: "rust-app-server-v2-full",
@@ -2840,7 +2843,7 @@ mod tests {
 
     #[test]
     fn manifest_is_versioned_fixed_and_never_selects_integration_for_all() {
-        assert_eq!(VERIFY_MANIFEST_VERSION, 25);
+        assert_eq!(VERIFY_MANIFEST_VERSION, 26);
         let unique_ids: std::collections::HashSet<_> =
             VERIFY_MANIFEST.iter().map(|check| check.id).collect();
         assert_eq!(VERIFY_MANIFEST.len(), unique_ids.len());
@@ -2986,8 +2989,15 @@ mod tests {
         let custom_mcp =
             select_verify_checks(VerifySuite::Rust, &[VerifyFeature::CustomMcpStdioHttpOauth]);
         let selected_ids = custom_mcp.iter().map(|check| check.id).collect::<Vec<_>>();
+        assert!(selected_ids.contains(&"rust-app-server-helper-cli"));
         assert!(selected_ids.contains(&"rust-app-server-helper-code-mode"));
         assert!(selected_ids.contains(&"rust-app-server-helper-stdio"));
+        assert!(
+            selected_ids
+                .iter()
+                .position(|id| *id == "rust-app-server-helper-cli")
+                < selected_ids.iter().position(|id| *id == "rust-core-full")
+        );
         assert!(
             selected_ids
                 .iter()
