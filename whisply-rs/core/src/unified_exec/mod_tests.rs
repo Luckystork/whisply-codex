@@ -501,6 +501,12 @@ async fn unified_exec_timeouts() -> anyhow::Result<()> {
         "subsequent poll should retrieve output"
     );
 
+    assert!(
+        session.terminate_background_terminal(process_id).await,
+        "interactive test shell should terminate before the session is dropped"
+    );
+    assert!(session.list_background_terminals().await.is_empty());
+
     Ok(())
 }
 
