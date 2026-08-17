@@ -26,7 +26,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tempfile::TempDir;
 
-pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 26;
+pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 27;
 pub(crate) const RELEASE_TEST_MANIFEST_VERSION: u16 = 2;
 
 const ROOT_SENTINELS: &[&str] = &[
@@ -2255,6 +2255,12 @@ fn run_check(source_root: &Path, check: &VerificationCheck, dry_run: bool) -> Ch
                     // for a one-shot release gate and can consume tens of
                     // GiB after a broad test wave.
                     .env("CARGO_INCREMENTAL", "0")
+                    // The helper binaries are built with `cargo build`,
+                    // which uses Cargo's dev profile rather than the test
+                    // profile. They are exercised immediately by the fixed
+                    // suite, so debugger symbols only duplicate artifacts
+                    // in the disposable release target.
+                    .env("CARGO_PROFILE_DEV_DEBUG", "0")
                     // Release verification executes tests; it does not need
                     // debugger symbols in every test binary. Suppress those
                     // test-only artifacts so the complete fixed matrix fits
@@ -2843,7 +2849,7 @@ mod tests {
 
     #[test]
     fn manifest_is_versioned_fixed_and_never_selects_integration_for_all() {
-        assert_eq!(VERIFY_MANIFEST_VERSION, 26);
+        assert_eq!(VERIFY_MANIFEST_VERSION, 27);
         let unique_ids: std::collections::HashSet<_> =
             VERIFY_MANIFEST.iter().map(|check| check.id).collect();
         assert_eq!(VERIFY_MANIFEST.len(), unique_ids.len());
