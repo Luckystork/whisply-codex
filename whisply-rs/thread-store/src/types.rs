@@ -56,6 +56,9 @@ pub struct ThreadPersistenceMetadata {
     ///
     /// `None` means the thread has no filesystem/environment context.
     pub cwd: Option<PathBuf>,
+    /// Effective model associated with the thread, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Model provider associated with the thread.
     pub model_provider: String,
     /// Memory mode associated with the live thread.

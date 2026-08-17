@@ -314,6 +314,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
+                model: None,
                 model_provider: "whisply".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },

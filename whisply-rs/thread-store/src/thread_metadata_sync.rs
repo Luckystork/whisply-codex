@@ -63,6 +63,7 @@ impl ThreadMetadataSync {
             None
         };
         let update = ThreadMetadataPatch {
+            model: params.metadata.model.clone(),
             model_provider: Some(params.metadata.model_provider.clone()),
             created_at: Some(created_at),
             updated_at: Some(created_at),
@@ -751,6 +752,7 @@ mod tests {
             include_archived: false,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
+                model: None,
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },

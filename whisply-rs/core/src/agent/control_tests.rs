@@ -720,6 +720,11 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .await
         .expect("child metadata should be readable");
     assert_eq!(stored_child.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(
+        stored_child.model.as_deref(),
+        Some("gpt-5.6-luna"),
+        "worker model must be durable before an unloaded v2 agent is rehydrated",
+    );
 
     assert!(
         harness

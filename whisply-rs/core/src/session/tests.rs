@@ -4780,6 +4780,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
+                model: config.model.clone(),
                 model_provider: config.model_provider_id.clone(),
                 memory_mode: if config.memories.generate_memories {
                     ThreadMemoryMode::Enabled
@@ -7727,6 +7728,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
+                model: config.model.clone(),
                 model_provider: config.model_provider_id.clone(),
                 memory_mode: if config.memories.generate_memories {
                     ThreadMemoryMode::Enabled
@@ -7808,6 +7810,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
+                model: config.model.clone(),
                 model_provider: config.model_provider_id.clone(),
                 memory_mode: if config.memories.generate_memories {
                     ThreadMemoryMode::Enabled
@@ -10200,6 +10203,7 @@ async fn attach_in_memory_thread_store(
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
+                model: config.model.clone(),
                 model_provider: config.model_provider_id.clone(),
                 memory_mode: if config.memories.generate_memories {
                     ThreadMemoryMode::Enabled

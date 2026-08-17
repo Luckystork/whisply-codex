@@ -194,6 +194,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
             include_archived: false,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.clone()),
+                model: None,
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
@@ -2264,6 +2265,7 @@ async fn create_paginated_subagent_thread(
             initial_window_id: "window-1".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
+                model: None,
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },

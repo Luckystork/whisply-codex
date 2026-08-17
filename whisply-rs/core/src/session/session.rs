@@ -695,6 +695,9 @@ impl Session {
                                 .to_string(),
                             metadata: ThreadPersistenceMetadata {
                                 cwd: Some(config.cwd.to_path_buf()),
+                                model: Some(
+                                    session_configuration.collaboration_mode.model().to_string(),
+                                ),
                                 model_provider: config.model_provider_id.clone(),
                                 memory_mode: if config.memories.generate_memories {
                                     ThreadMemoryMode::Enabled
@@ -725,6 +728,9 @@ impl Session {
                             include_archived: true,
                             metadata: ThreadPersistenceMetadata {
                                 cwd: Some(config.cwd.to_path_buf()),
+                                model: Some(
+                                    session_configuration.collaboration_mode.model().to_string(),
+                                ),
                                 model_provider: config.model_provider_id.clone(),
                                 memory_mode: if config.memories.generate_memories {
                                     ThreadMemoryMode::Enabled

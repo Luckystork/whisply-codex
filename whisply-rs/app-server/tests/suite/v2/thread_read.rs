@@ -498,6 +498,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
+                model: None,
                 model_provider: "whisply".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
@@ -1531,6 +1532,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
+                model: None,
                 model_provider: "whisply".to_string(),
                 memory_mode: ThreadMemoryMode::Enabled,
             },
@@ -2247,6 +2249,7 @@ async fn seed_pathless_store_thread(
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
+                model: None,
                 model_provider: "test-provider".to_string(),
                 memory_mode: ThreadMemoryMode::Disabled,
             },

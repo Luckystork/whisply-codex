@@ -306,6 +306,7 @@ fn persistence_metadata(
     };
     Some(ThreadPersistenceMetadata {
         cwd: Some(meta.cwd.clone()),
+        model: None,
         model_provider: meta.model_provider.clone()?,
         memory_mode,
     })
