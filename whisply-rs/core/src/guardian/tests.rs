@@ -3235,32 +3235,62 @@ async fn whisply_auto_asks_the_user_when_the_review_times_out_body() -> anyhow::
     let (session, turn, rx) = guardian_session_for_stateless_auto_review(&server).await;
     seed_guardian_parent_history(&session, &turn).await;
 
+    let review_task = tokio::spawn({
+        let session = Arc::clone(&session);
+        let turn = Arc::clone(&turn);
+        async move {
+            review_approval_request(
+                &session,
+                &turn,
+                "review-shell-guardian-timeout".to_string(),
+                GuardianApprovalRequest::Shell {
+                    id: "shell-guardian-timeout".to_string(),
+                    command: vec!["git".to_string(), "push".to_string()],
+                    cwd: test_path_buf("/repo/whisply-rs/core").abs(),
+                    sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+                    additional_permissions: None,
+                    justification: Some("Need to push the reviewed docs fix.".to_string()),
+                },
+                ApprovalRequestReasons::default(),
+            )
+            .await
+        }
+    });
+
+    // Advance the paused clock in small, bounded steps until the mock has
+    // observed the request. Otherwise Tokio may jump directly to the review
+    // deadline while a short client setup timer or the loopback handler is
+    // still pending, which makes this full-suite assertion scheduler-dependent.
+    // Ten virtual seconds is ample for loopback setup and remains far below the
+    // ninety-second review deadline this test is intended to exercise.
+    for _ in 0..1_000 {
+        if !request_log.requests().is_empty() {
+            break;
+        }
+        assert!(
+            !review_task.is_finished(),
+            "the Guardian review ended before reaching the mock server"
+        );
+        tokio::time::advance(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        request_log.requests().len(),
+        1,
+        "the Guardian review must start before virtual time reaches its deadline"
+    );
+
     let outcome = tokio::time::timeout(
         GUARDIAN_REVIEW_TIMEOUT + Duration::from_secs(20),
-        review_approval_request(
-            &session,
-            &turn,
-            "review-shell-guardian-timeout".to_string(),
-            GuardianApprovalRequest::Shell {
-                id: "shell-guardian-timeout".to_string(),
-                command: vec!["git".to_string(), "push".to_string()],
-                cwd: test_path_buf("/repo/whisply-rs/core").abs(),
-                sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
-                additional_permissions: None,
-                justification: Some("Need to push the reviewed docs fix.".to_string()),
-            },
-            ApprovalRequestReasons::default(),
-        ),
+        review_task,
     )
     .await
-    .expect("the review should end on its own deadline");
+    .expect("the review should end on its own deadline")
+    .expect("the Guardian review task should not panic");
 
     assert!(
         matches!(outcome, GuardianApprovalOutcome::AskUser { .. }),
         "a review that timed out must not answer for the user: {outcome:?}"
     );
-    assert_eq!(request_log.requests().len(), 1);
-
     let statuses = guardian_assessment_statuses(rx);
     assert!(
         statuses.contains(&GuardianAssessmentStatus::AskUser),
