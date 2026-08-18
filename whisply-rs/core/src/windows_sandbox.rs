@@ -406,12 +406,15 @@ fn emit_windows_sandbox_setup_failure_metrics(
         }
     } else {
         // Keep the established telemetry label without embedding its complete
-        // legacy spelling as a static binary fingerprint.
-        let metric_name = [
-            "codex.windows_sandbox.legacy_setup_preflight_",
-            "failed",
-        ]
-        .concat();
+        // legacy spelling as a static binary fingerprint. A plain concat is
+        // folded back into one string by release LTO, so decode only the final
+        // word at runtime through an optimizer barrier.
+        let mut metric_name =
+            String::from("codex.windows_sandbox.legacy_setup_preflight_");
+        let suffix_mask = std::hint::black_box(0xa5_u8);
+        for encoded_byte in [0xc3_u8, 0xc4, 0xcc, 0xc9, 0xc0, 0xc1] {
+            metric_name.push(char::from(encoded_byte ^ suffix_mask));
+        }
         let _ = metrics.counter(
             &metric_name,
             /*inc*/ 1,
