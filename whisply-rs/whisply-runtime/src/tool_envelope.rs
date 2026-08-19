@@ -558,6 +558,37 @@ mod tests {
     }
 
     #[test]
+    fn shipped_screen_result_matches_the_runtime_descriptor() {
+        let registry = first_party_tool_registry();
+        let descriptor = registry
+            .get("whisply.screen.context")
+            .expect("screen-context descriptor");
+        let call = WhisplyToolModelCall {
+            execution_id: "execution_20260819_screen_0001".to_string(),
+            tool_id: descriptor.id.clone(),
+            schema_version: descriptor.schema_version,
+            arguments: serde_json::json!({"scope": "exact_window"}),
+        };
+        let result = WhisplyToolResult {
+            execution_id: call.execution_id.clone(),
+            status: WhisplyToolTerminalStatus::Succeeded,
+            content: Some(serde_json::json!({
+                "summary": "Viewed Calculator.",
+                "observedText": "Calculator shows 2468.",
+                "targetID": "app.calculator:window_0001",
+                "scope": "exact_window",
+                "width": 512,
+                "height": 640,
+            })),
+            safe_summary: "Viewed Calculator.".to_string(),
+            setup_route: None,
+            receipt_id: None,
+        };
+
+        assert_eq!(validate_result(&result, &call, descriptor), Ok(()));
+    }
+
+    #[test]
     fn shared_tool_lifecycle_fixture_matches_the_runtime_contract() {
         let fixture: ToolLifecycleFixture = serde_json::from_str(include_str!(
             "../../../../contracts/fixtures/whisply-tool-lifecycle-v1.json"

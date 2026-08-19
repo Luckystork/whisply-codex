@@ -347,7 +347,7 @@ pub fn first_party_tool_registry() -> ToolRegistry {
                     "displayID": {"type": "string"},
                 }),
             ),
-            summary_output_schema(),
+            screen_context_output_schema(),
             DescriptorRequirements::new()
                 .target()
                 .native_permission()
@@ -711,6 +711,27 @@ fn summary_output_schema() -> Value {
     )
 }
 
+fn screen_context_output_schema() -> Value {
+    object_schema(
+        &[
+            "summary",
+            "observedText",
+            "targetID",
+            "scope",
+            "width",
+            "height",
+        ],
+        serde_json::json!({
+            "summary": {"type": "string"},
+            "observedText": {"type": "string"},
+            "targetID": {"type": "string"},
+            "scope": {"type": "string", "enum": ["exact_window", "selected_display"]},
+            "width": {"type": "integer"},
+            "height": {"type": "integer"},
+        }),
+    )
+}
+
 /// Registry validation failures are release-manifest blockers.
 #[derive(Debug, Error)]
 pub enum ToolRegistryError {
@@ -781,6 +802,17 @@ mod tests {
         assert_eq!(
             screen.input_schema["properties"]["scope"]["enum"],
             serde_json::json!(["exact_window", "selected_display"])
+        );
+        assert_eq!(
+            screen.output_schema["required"],
+            serde_json::json!([
+                "summary",
+                "observedText",
+                "targetID",
+                "scope",
+                "width",
+                "height"
+            ])
         );
         let files = registry.get("whisply.files").expect("files");
         assert_eq!(
