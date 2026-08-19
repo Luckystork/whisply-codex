@@ -131,7 +131,14 @@ async fn admitted_native_tool_round_trips_only_for_its_registered_user_turn() ->
             serde_json::to_value(WhisplyToolResult {
                 execution_id: CALL_ID.to_string(),
                 status: WhisplyToolTerminalStatus::Succeeded,
-                content: Some(json!({ "summary": "Selected window inspected." })),
+                content: Some(json!({
+                    "summary": "Selected window inspected.",
+                    "observedText": "Selected window inspected.",
+                    "targetID": "app.calculator:window_0001",
+                    "scope": "exact_window",
+                    "width": 512,
+                    "height": 640
+                })),
                 safe_summary: "Selected window inspected.".to_string(),
                 setup_route: None,
                 receipt_id: None,
