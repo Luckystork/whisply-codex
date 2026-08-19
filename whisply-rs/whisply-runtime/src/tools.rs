@@ -395,17 +395,24 @@ pub fn first_party_tool_registry() -> ToolRegistry {
                 ToolOwner::Native,
                 ActionClass::FinalConfirmationRequired,
                 object_schema(
-                    &["action", "targetID"],
+                    &["action"],
                     serde_json::json!({
                         // Closed so the model cannot name an action the Mac
                         // does not implement and read the refusal as the app
                         // being broken.
-                        "action": {"type": "string", "enum": COMPUTER_USE_ACTIONS},
-                        "targetID": {"type": "string"},
+                        "action": {
+                            "type": "string",
+                            "enum": COMPUTER_USE_ACTIONS,
+                            "description": "list_apps may omit targetID; every other action requires the exact approved app identifier."
+                        },
+                        "targetID": {
+                            "type": "string",
+                            "description": "Exact app identifier from the user's request or a prior list_apps result."
+                        },
                         "arguments": {"type": "object"},
                     }),
                 ),
-                summary_output_schema(),
+                computer_use_output_schema(),
                 DescriptorRequirements::new()
                     .target()
                     .native_permission()
@@ -732,6 +739,17 @@ fn screen_context_output_schema() -> Value {
     )
 }
 
+fn computer_use_output_schema() -> Value {
+    object_schema(
+        &["summary"],
+        serde_json::json!({
+            "summary": {"type": "string"},
+            "material": {"type": "string"},
+            "materialKind": {"type": "string"},
+        }),
+    )
+}
+
 /// Registry validation failures are release-manifest blockers.
 #[derive(Debug, Error)]
 pub enum ToolRegistryError {
@@ -813,6 +831,15 @@ mod tests {
                 "width",
                 "height"
             ])
+        );
+        let computer = registry.get("whisply.computer_use").expect("computer use");
+        assert_eq!(
+            computer.input_schema["required"],
+            serde_json::json!(["action"])
+        );
+        assert_eq!(
+            computer.output_schema["required"],
+            serde_json::json!(["summary"])
         );
         let files = registry.get("whisply.files").expect("files");
         assert_eq!(

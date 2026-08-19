@@ -589,6 +589,37 @@ mod tests {
     }
 
     #[test]
+    fn shipped_computer_use_result_matches_the_runtime_descriptor() {
+        let registry = first_party_tool_registry();
+        let descriptor = registry
+            .get("whisply.computer_use")
+            .expect("computer-use descriptor");
+        let call = WhisplyToolModelCall {
+            execution_id: "execution_20260819_computer_0001".to_string(),
+            tool_id: descriptor.id.clone(),
+            schema_version: descriptor.schema_version,
+            arguments: serde_json::json!({
+                "action": "get_app_state",
+                "targetID": "Calculator"
+            }),
+        };
+        let result = WhisplyToolResult {
+            execution_id: call.execution_id.clone(),
+            status: WhisplyToolTerminalStatus::Succeeded,
+            content: Some(serde_json::json!({
+                "summary": "Looked at Calculator.",
+                "material": "Calculator shows 2468.",
+                "materialKind": "computer_use_observation",
+            })),
+            safe_summary: "Looked at Calculator.".to_string(),
+            setup_route: None,
+            receipt_id: None,
+        };
+
+        assert_eq!(validate_result(&result, &call, descriptor), Ok(()));
+    }
+
+    #[test]
     fn shared_tool_lifecycle_fixture_matches_the_runtime_contract() {
         let fixture: ToolLifecycleFixture = serde_json::from_str(include_str!(
             "../../../../contracts/fixtures/whisply-tool-lifecycle-v1.json"
