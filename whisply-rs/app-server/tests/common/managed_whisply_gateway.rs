@@ -97,7 +97,8 @@ impl ManagedWhisplyGatewayFixture {
         fs::create_dir(&broker_dir).context("create managed Whisply broker fixture directory")?;
         fs::set_permissions(&broker_dir, fs::Permissions::from_mode(0o700))
             .context("restrict managed Whisply broker fixture directory")?;
-        let socket_path = broker_dir.join("v1.sock");
+        let socket_path =
+            broker_dir.join(format!("v1-{}.sock", &TEST_RELEASE_MANIFEST_SHA256[..16]));
         let listener = UnixListener::bind(&socket_path)
             .context("bind managed Whisply broker fixture socket")?;
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
