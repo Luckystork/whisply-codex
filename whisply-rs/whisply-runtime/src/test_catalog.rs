@@ -119,9 +119,19 @@ fn apply_current_test_selector(catalog: &mut crate::ModelCatalog) -> Result<(), 
     }
 
     for model in &mut catalog.models {
-        let Some(selector) = configured.remove(model.id.as_str()) else {
+        // The checked-in signature fixture is deliberately historical. Map
+        // only the two reviewed product replacements before re-signing this
+        // test-only envelope; every other stable identity must still match
+        // exactly and an unreviewed rename remains InvalidCatalog.
+        let selector_id = match model.id.as_str() {
+            "gemini-3.5-flash" => "gemini-3.7-flash",
+            "grok-4.5" => "grok-4.6",
+            unchanged => unchanged,
+        };
+        let Some(selector) = configured.remove(selector_id) else {
             return Err(CatalogError::InvalidCatalog);
         };
+        model.id = crate::ModelId::parse(selector.id.clone())?;
         model.display_name = selector.display_name;
         model.short_name = selector.short_name;
         model.description = selector.description;
@@ -300,5 +310,13 @@ mod tests {
         assert!(grok.capabilities.supports_computer_use);
         assert!(!grok.capabilities.supports_native_visible_progress);
         assert_eq!(grok.response_start_timeout_seconds, 120);
+        assert!(
+            envelope
+                .catalog
+                .models
+                .iter()
+                .all(|model| model.id.as_str() != "gemini-3.5-flash"
+                    && model.id.as_str() != "grok-4.5")
+        );
     }
 }
