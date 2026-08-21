@@ -390,7 +390,7 @@ pub fn first_party_tool_registry() -> ToolRegistry {
             descriptor(
                 "whisply.computer_use",
                 "Computer Use",
-                "Act only on the approved app or window target.",
+                "Act only on the approved app or window target. Prefer perform_actions for two or more stable indexed buttons from one current observation.",
                 "computer.use",
                 ToolOwner::Native,
                 ActionClass::FinalConfirmationRequired,
@@ -403,13 +403,16 @@ pub fn first_party_tool_registry() -> ToolRegistry {
                         "action": {
                             "type": "string",
                             "enum": COMPUTER_USE_ACTIONS,
-                            "description": "list_apps may omit targetID; every other action requires the exact approved app identifier."
+                            "description": "list_apps may omit targetID; every other action requires the exact approved app identifier. perform_actions executes 2-12 ordered click steps from one pinned observation and returns one fresh final state."
                         },
                         "targetID": {
                             "type": "string",
                             "description": "Exact app identifier from the user's request or a prior list_apps result."
                         },
-                        "arguments": {"type": "object"},
+                        "arguments": {
+                            "type": "object",
+                            "description": "Action-specific arguments. For perform_actions use {actions:[{action:\"click\",element_index:N}, ...]}; every step must be a stable indexed button from the latest get_app_state result."
+                        },
                     }),
                 ),
                 computer_use_output_schema(),
@@ -633,9 +636,10 @@ impl DescriptorRequirements {
 /// has gone silent still ends quickly.
 /// The Computer Use actions the Mac owner implements. Kept in the same order
 /// as the native catalog so the two descriptions stay comparable.
-const COMPUTER_USE_ACTIONS: [&str; 10] = [
+const COMPUTER_USE_ACTIONS: [&str; 11] = [
     "list_apps",
     "get_app_state",
+    "perform_actions",
     "click",
     "drag",
     "perform_secondary_action",
