@@ -50,8 +50,9 @@ const MAX_GATEWAY_ENDPOINT_BYTES: u64 = 4 * 1024;
 const GATEWAY_ENDPOINT_SCHEMA_VERSION: u16 = 1;
 const WHISPLY_GATEWAY_ORIGIN_HOST: &str = "proxy.whisply.net";
 const REFRESH_SKEW_MS: i64 = 60_000;
-const NATIVE_BROKER_SOCKET_FILENAME: &str = "v1.sock";
 const NATIVE_BROKER_DIRECTORY: &str = ".native-broker";
+const NATIVE_BROKER_SOCKET_PREFIX: &str = "v1-";
+const NATIVE_BROKER_SOCKET_SUFFIX: &str = ".sock";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -517,7 +518,7 @@ impl NativeBrokerClient {
             .ok_or(BrokerError::InvalidCapabilityDescriptor)?;
         let capability = read_exact_inherited_capability(capability_fd)?;
         let socket_path = PathBuf::from(socket_path);
-        validate_broker_socket_path(&socket_path)?;
+        validate_broker_socket_path(&socket_path, &release_manifest_sha256, false)?;
         Ok(Some(Arc::new(Self {
             socket_path,
             capability: Zeroizing::new(capability),
@@ -964,7 +965,7 @@ impl ManagedGatewayClient {
             },
         )?;
         let capability = read_exact_owned_capability(launch.capability_descriptor)?;
-        validate_broker_socket_path(&launch.socket_path)?;
+        validate_broker_socket_path(&launch.socket_path, &launch.release_manifest_sha256, true)?;
         let broker = Arc::new(NativeBrokerClient {
             socket_path: launch.socket_path,
             capability: Zeroizing::new(capability),
@@ -1786,13 +1787,21 @@ fn read_exact_inherited_capability(_: i32) -> Result<[u8; 32], BrokerError> {
 }
 
 #[cfg(unix)]
-fn validate_broker_socket_path(path: &Path) -> Result<(), BrokerError> {
+fn validate_broker_socket_path(
+    path: &Path,
+    release_manifest_sha256: &str,
+    allow_legacy_test_socket: bool,
+) -> Result<(), BrokerError> {
     use std::fs;
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::fs::MetadataExt;
 
+    let expected_filename = broker_socket_filename(release_manifest_sha256)?;
+    let actual_filename = path.file_name().and_then(|name| name.to_str());
+    let filename_matches = actual_filename == Some(expected_filename.as_str())
+        || (allow_legacy_test_socket && actual_filename == Some("v1.sock"));
     if !path.is_absolute()
-        || path.file_name().and_then(|name| name.to_str()) != Some(NATIVE_BROKER_SOCKET_FILENAME)
+        || !filename_matches
         || path
             .parent()
             .and_then(Path::file_name)
@@ -1817,8 +1826,22 @@ fn validate_broker_socket_path(path: &Path) -> Result<(), BrokerError> {
     Ok(())
 }
 
+fn broker_socket_filename(release_manifest_sha256: &str) -> Result<String, BrokerError> {
+    if release_manifest_sha256.len() != 64
+        || !release_manifest_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(BrokerError::MissingReleaseManifest);
+    }
+    Ok(format!(
+        "{NATIVE_BROKER_SOCKET_PREFIX}{}{NATIVE_BROKER_SOCKET_SUFFIX}",
+        &release_manifest_sha256[..16]
+    ))
+}
+
 #[cfg(not(unix))]
-fn validate_broker_socket_path(_: &Path) -> Result<(), BrokerError> {
+fn validate_broker_socket_path(_: &Path, _: &str, _: bool) -> Result<(), BrokerError> {
     Err(BrokerError::UnsupportedPlatform)
 }
 
@@ -2184,6 +2207,20 @@ mod tests {
         ] {
             assert!(parse_gateway_endpoint_descriptor(descriptor).is_err());
         }
+    }
+
+    #[test]
+    fn broker_socket_filename_is_bound_to_the_release_manifest() {
+        assert_eq!(
+            broker_socket_filename(&"a".repeat(64)).expect("release-bound socket"),
+            "v1-aaaaaaaaaaaaaaaa.sock"
+        );
+        assert_ne!(
+            broker_socket_filename(&"a".repeat(64)).expect("first release"),
+            broker_socket_filename(&"b".repeat(64)).expect("second release")
+        );
+        assert!(broker_socket_filename(&"A".repeat(64)).is_err());
+        assert!(broker_socket_filename(&"a".repeat(63)).is_err());
     }
 
     #[test]
