@@ -1954,9 +1954,28 @@ pub(crate) fn run(command: VerifyCommand) -> anyhow::Result<()> {
         );
     }
 
-    let mut results = Vec::with_capacity(selected_checks.len());
-    for check in selected_checks {
+    let check_count = selected_checks.len();
+    let mut results = Vec::with_capacity(check_count);
+    for (index, check) in selected_checks.into_iter().enumerate() {
+        // Structured JSON remains on stdout. Human progress goes to stderr so
+        // a long release matrix never looks hung and the durable JSON report
+        // remains machine-parseable after both streams are captured together.
+        eprintln!(
+            "[verify] {}/{} starting {} ({:?})",
+            index + 1,
+            check_count,
+            check.id,
+            check.suite
+        );
         let result = run_check(&source_root, check, command.dry_run);
+        eprintln!(
+            "[verify] {}/{} finished {}: {:?} ({}ms)",
+            index + 1,
+            check_count,
+            result.id,
+            result.status,
+            result.duration_ms
+        );
         results.push(result);
     }
 

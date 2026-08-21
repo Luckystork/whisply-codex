@@ -136,6 +136,7 @@ pub use broker::ManagedGatewaySessionAvailability;
 #[cfg(feature = "test-support")]
 pub use broker::ManagedGatewayTestLaunch;
 pub use broker::NativeBrokerClient;
+pub use broker::broker_supplied_gateway_connect_host;
 pub use broker::managed_gateway_client_from_environment;
 pub use catalog::CATALOG_KEY_SET_RESOURCE_FILENAME;
 pub use catalog::CATALOG_KEY_SET_SCHEMA_VERSION;

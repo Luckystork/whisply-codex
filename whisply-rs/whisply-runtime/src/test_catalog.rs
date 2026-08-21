@@ -251,8 +251,8 @@ mod tests {
                 ("sonnet-5", 1_000),
                 ("opus-5", 2_500),
                 ("gemini-3.1-pro", 1_100),
-                ("gemini-3.5-flash", 800),
-                ("grok-4.5", 700),
+                ("gemini-3.7-flash", 800),
+                ("grok-4.6", 700),
             ]
         );
         assert_eq!(
@@ -294,9 +294,9 @@ mod tests {
             .catalog
             .models
             .iter()
-            .find(|model| model.id.as_str() == "grok-4.5")
+            .find(|model| model.id.as_str() == "grok-4.6")
             .expect("Grok fixture model");
-        assert_eq!(grok.short_name, "Grok 4.5");
+        assert_eq!(grok.short_name, "Grok 4.6");
         assert!(grok.capabilities.supports_computer_use);
         assert!(!grok.capabilities.supports_native_visible_progress);
         assert_eq!(grok.response_start_timeout_seconds, 120);

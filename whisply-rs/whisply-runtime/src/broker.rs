@@ -48,7 +48,28 @@ const MAX_ACCOUNT_READ_PAYLOAD_BYTES: usize = 94 * 1024;
 const MAX_GATEWAY_TOKEN_BYTES: u64 = 8 * 1024;
 const MAX_GATEWAY_ENDPOINT_BYTES: u64 = 4 * 1024;
 const GATEWAY_ENDPOINT_SCHEMA_VERSION: u16 = 1;
+// The LOGICAL gateway origin host. Intentionally fixed and validated
+// byte-for-byte against the inherited endpoint descriptor on BOTH sides (Swift
+// `WhisplyGatewayEndpointDescriptor.exactJSON` and
+// `parse_release_gateway_endpoint_descriptor` below). It is the name used for
+// TLS SNI, the Host header, certificate pinning, and the gateway-JWT binding,
+// so it must never be caller-selectable.
+//
+// Netshield decision (plan phase2-chat-runtime): the runtime does NOT get its
+// own DoH/ECH transport. The Swift app already owns the full DoH + ECH stack
+// (`WhisplyEdge` EdgeResolver/EdgeTransport) and holds the per-network
+// `EdgeRouter` decision, so duplicating that here would be a second resilience
+// stack (out of scope) and would split origin-selection authority across two
+// processes. The runtime instead CONSUMES a parent-supplied connection: the
+// logical origin stays exactly this host (pinning + exact-JSON descriptor
+// validation unchanged) while an OPTIONAL, parent-set connect host may redirect
+// only the network path. See `broker_supplied_gateway_connect_host`.
 const WHISPLY_GATEWAY_ORIGIN_HOST: &str = "proxy.whisply.net";
+// Env var through which the verified parent (which holds the `EdgeRouter`
+// decision) may hand the runtime a router-selected CONNECT host/IP for the
+// gateway WITHOUT changing the logical origin above. Unset by default → connect
+// to the origin host directly (byte-for-byte as today).
+const WHISPLY_GATEWAY_CONNECT_HOST_ENV: &str = "WHISPLY_GATEWAY_CONNECT_HOST";
 const REFRESH_SKEW_MS: i64 = 60_000;
 const NATIVE_BROKER_DIRECTORY: &str = ".native-broker";
 const NATIVE_BROKER_SOCKET_PREFIX: &str = "v1-";
@@ -1611,6 +1632,34 @@ fn parse_release_gateway_endpoint_descriptor(bytes: &[u8]) -> Result<String, Man
         "{}/v1",
         document.gateway_base_url.trim_end_matches('/')
     ))
+}
+
+/// Optional, parent-supplied gateway CONNECT host/IP (Netshield seam,
+/// plan phase2-chat-runtime). Returns `None` unless the verified parent
+/// explicitly set `WHISPLY_GATEWAY_CONNECT_HOST` to a non-empty, bare host or IP
+/// (no scheme, no path, no whitespace); a malformed value fails closed to
+/// `None` (the direct path) rather than redirecting traffic.
+///
+/// This is the single consumption seam for a router-selected edge path: the app
+/// (which holds the `EdgeRouter` decision) sets the env when spawning the
+/// runtime, and the gateway HTTP client applies the value as a connect/resolve
+/// override while keeping TLS SNI + the Host header + the exact-JSON descriptor
+/// fixed to `WHISPLY_GATEWAY_ORIGIN_HOST`. It performs no networking itself and
+/// does not affect descriptor validation, so with the env unset (the default,
+/// and always until a resilience agent installs an edge pool) the chat lane is
+/// byte-for-byte as today.
+pub fn broker_supplied_gateway_connect_host() -> Option<String> {
+    let raw = std::env::var(WHISPLY_GATEWAY_CONNECT_HOST_ENV).ok()?;
+    let value = raw.trim();
+    if value.is_empty()
+        || value.len() > 255
+        || value.contains("://")
+        || value.contains('/')
+        || value.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 fn validate_status_payload(payload: &StatusPayload) -> Result<(), BrokerError> {
