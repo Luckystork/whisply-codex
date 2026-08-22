@@ -403,11 +403,11 @@ pub fn first_party_tool_registry() -> ToolRegistry {
                         "action": {
                             "type": "string",
                             "enum": COMPUTER_USE_ACTIONS,
-                            "description": "list_apps may omit targetID; every other action requires the exact approved app identifier. perform_actions executes 2-12 ordered click steps from one pinned observation and returns one fresh final state."
+                            "description": "list_apps and the first targetless get_app_state may omit targetID; Whisply binds only the signed external app remembered before its overlay opened. Every state-changing action requires that exact approved app identifier. perform_actions executes 2-12 ordered click steps from one pinned observation and returns one fresh final state."
                         },
                         "targetID": {
                             "type": "string",
-                            "description": "Exact app identifier from the user's request or a prior list_apps result."
+                            "description": "Exact app identifier from the user's request, a prior list_apps result, or the native target binding returned by a targetless get_app_state."
                         },
                         "arguments": {
                             "type": "object",
