@@ -16,6 +16,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::thread;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -26,7 +27,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tempfile::TempDir;
 
-pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 27;
+pub(crate) const VERIFY_MANIFEST_VERSION: u16 = 28;
 pub(crate) const RELEASE_TEST_MANIFEST_VERSION: u16 = 2;
 
 const ROOT_SENTINELS: &[&str] = &[
@@ -154,6 +155,14 @@ pub(crate) enum VerifySuite {
     Integration,
     All,
 }
+
+const VERIFY_EXECUTION_LANES: [VerifySuite; 5] = [
+    VerifySuite::Static,
+    VerifySuite::Rust,
+    VerifySuite::Mac,
+    VerifySuite::Website,
+    VerifySuite::Integration,
+];
 
 /// A fixed, user-facing selector for the existing automated feature-coverage
 /// matrix. This is not a capability allowlist: it only makes the reviewed
@@ -389,7 +398,7 @@ const USER_CONFIGURED_FEATURE_COVERAGE: &[UserConfiguredFeatureCoverage] = &[
             "rust-external-agent-migration-full",
             "rust-app-server-v2-full",
             "rust-tui-full",
-            "mac-managed-skills-plugins-contracts",
+            "mac-swift-package-full",
             "website-managed-skills-plugins-contracts",
         ],
         fixture_paths: &[
@@ -414,7 +423,7 @@ const USER_CONFIGURED_FEATURE_COVERAGE: &[UserConfiguredFeatureCoverage] = &[
             "rust-external-agent-migration-full",
             "rust-app-server-v2-full",
             "rust-tui-full",
-            "mac-managed-skills-plugins-contracts",
+            "mac-swift-package-full",
             "website-managed-skills-plugins-contracts",
         ],
         fixture_paths: &[
@@ -461,7 +470,7 @@ const USER_CONFIGURED_FEATURE_COVERAGE: &[UserConfiguredFeatureCoverage] = &[
     UserConfiguredFeatureCoverage {
         feature: "memory_audio_and_transcripts",
         release_group: ReleaseTestGroup::Native,
-        automated_check_ids: &["mac-memory-audio-transcript-contracts"],
+        automated_check_ids: &["mac-swift-package-full"],
         fixture_paths: &[
             "WhisplyCore/Tests/WhisplyCoreTests/ContextualMemoryCommandSafetyTests.swift",
             "WhisplyCore/Tests/WhisplyCoreTests/ContextualAccountServiceTests.swift",
@@ -658,7 +667,7 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         availability: CheckAvailability::Runnable,
         action: CheckAction::Run {
             program: "python3",
-            args: &["scripts/verify_contextual_action_artifacts.py"],
+            args: &["scripts/verify_contextual_action_artifacts.py", "--require-spec"],
             working_directory: ".",
             required_paths: &["scripts/verify_contextual_action_artifacts.py"],
         },
@@ -1496,89 +1505,6 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         failure_summary: "Full terminal UI verification did not complete.",
     },
     VerificationCheck {
-        id: "mac-managed-skills-plugins-contracts",
-        suite: VerifySuite::Mac,
-        availability: CheckAvailability::Runnable,
-        action: CheckAction::Run {
-            program: "swift",
-            args: &[
-                "test",
-                // SwiftPM otherwise tries to nest its own sandbox inside the
-                // fixed outer sandbox-exec policy below. The outer policy
-                // remains the authority boundary and denies every external
-                // network destination.
-                "--disable-sandbox",
-                "--skip-update",
-                "--quiet",
-                "--package-path",
-                "WhisplyCore",
-                "--filter",
-                "ContextualRuntimeContractTests|SkillPluginServiceEndpointTests|SkillCreatorTeachingRecoveryTests|SkillSemanticGenerationTests|SkillsPluginsSettingsVisualContractTests|BuiltinSkillPluginPolicyTests|SkillInvocationRoutingTests|PluginTryNowDeepLinkTests|LocalArtifactWorkflowCatalogTests",
-            ],
-            working_directory: ".",
-            required_paths: &[
-                "WhisplyCore/Package.resolved",
-                "WhisplyCore/.build/checkouts/Sparkle",
-                "WhisplyCore/.build/checkouts/supabase-swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ContextualRuntimeContractTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/SkillPluginServiceEndpointTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/SkillCreatorTeachingRecoveryTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/SkillSemanticGenerationTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/SkillsPluginsSettingsVisualContractTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/BuiltinSkillPluginPolicyTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/SkillInvocationRoutingTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/PluginTryNowDeepLinkTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/LocalArtifactWorkflowCatalogTests.swift",
-            ],
-        },
-        remediation: "Repair managed skill and plugin account binding, versioning, creation, protected-tool, and UI routing contracts without removing compatible upstream skill or plugin support.",
-        failure_summary: "Managed skill or plugin contract verification did not complete.",
-    },
-    VerificationCheck {
-        id: "mac-memory-audio-transcript-contracts",
-        suite: VerifySuite::Mac,
-        availability: CheckAvailability::Runnable,
-        action: CheckAction::Run {
-            program: "swift",
-            args: &[
-                "test",
-                // SwiftPM otherwise tries to nest its own sandbox inside the
-                // fixed outer sandbox-exec policy below. The outer policy
-                // remains the authority boundary and denies every external
-                // network destination.
-                "--disable-sandbox",
-                "--skip-update",
-                "--quiet",
-                "--package-path",
-                "WhisplyCore",
-                "--filter",
-                "ContextualMemoryCommandSafetyTests|ContextualAccountServiceTests|ConversationContextCompactionBoundaryTests|ConversationContextCompactionTests|ConversationResponseContextTests|RealtimeTranscriptionContractTests|TranscriptPrivacyContractTests|TranscriptPrivacyOverrideStoreTests|TranscriptStopLifecycleTests|TranscriptTaskOpportunityTests|TranscriptionArtifactFilterTests|PreferencesProductContractTests|SessionWorkspaceContractTests|ChatHistoryMutationBarrierTests",
-            ],
-            working_directory: ".",
-            required_paths: &[
-                "WhisplyCore/Package.resolved",
-                "WhisplyCore/.build/checkouts/Sparkle",
-                "WhisplyCore/.build/checkouts/supabase-swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ContextualMemoryCommandSafetyTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ContextualAccountServiceTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ConversationContextCompactionBoundaryTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ConversationContextCompactionTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ConversationResponseContextTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/RealtimeTranscriptionContractTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/TranscriptPrivacyContractTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/TranscriptPrivacyOverrideStoreTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/TranscriptStopLifecycleTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/TranscriptTaskOpportunityTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/TranscriptionArtifactFilterTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/PreferencesProductContractTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/SessionWorkspaceTests.swift",
-                "WhisplyCore/Tests/WhisplyCoreTests/ChatHistoryMutationBarrierTests.swift",
-            ],
-        },
-        remediation: "Repair the fixed offline memory, compaction, audio/transcription, and transcript privacy contracts without adding an unreviewed capture or provider path.",
-        failure_summary: "Memory, audio, or transcript contract verification did not complete.",
-    },
-    VerificationCheck {
         id: "mac-swift-package-full",
         suite: VerifySuite::Mac,
         availability: CheckAvailability::Runnable,
@@ -1955,29 +1881,52 @@ pub(crate) fn run(command: VerifyCommand) -> anyhow::Result<()> {
     }
 
     let check_count = selected_checks.len();
-    let mut results = Vec::with_capacity(check_count);
-    for (index, check) in selected_checks.into_iter().enumerate() {
-        // Structured JSON remains on stdout. Human progress goes to stderr so
-        // a long release matrix never looks hung and the durable JSON report
-        // remains machine-parseable after both streams are captured together.
-        eprintln!(
-            "[verify] {}/{} starting {} ({:?})",
-            index + 1,
-            check_count,
-            check.id,
-            check.suite
-        );
-        let result = run_check(&source_root, check, command.dry_run);
-        eprintln!(
-            "[verify] {}/{} finished {}: {:?} ({}ms)",
-            index + 1,
-            check_count,
-            result.id,
-            result.status,
-            result.duration_ms
-        );
-        results.push(result);
-    }
+    let indexed_checks = selected_checks.into_iter().enumerate().collect::<Vec<_>>();
+    let dry_run = command.dry_run;
+    let source_root_path = source_root.as_path();
+    // Cargo, SwiftPM, npm, and the static verifier do not share build graphs.
+    // Running those independent lanes one after another made a clean release
+    // wait for the sum of every toolchain. Keep each lane internally serial so
+    // its package cache, prerequisite order, and shared fixtures retain their
+    // existing behavior, while the four isolated toolchains make progress at
+    // the same time. Results are restored to manifest order before the signed
+    // JSON receipt is emitted.
+    let mut indexed_results = thread::scope(|scope| -> anyhow::Result<Vec<_>> {
+        let mut lane_handles = Vec::new();
+        for suite in VERIFY_EXECUTION_LANES {
+            let lane = indexed_checks
+                .iter()
+                .copied()
+                .filter(|(_, check)| check.suite == suite)
+                .collect::<Vec<_>>();
+            if lane.is_empty() {
+                continue;
+            }
+            lane_handles.push((
+                suite,
+                scope.spawn(move || {
+                    run_verification_lane(source_root_path, lane, check_count, dry_run)
+                }),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(check_count);
+        for (suite, handle) in lane_handles {
+            let lane_results = handle.join().map_err(|_| {
+                anyhow::anyhow!(
+                    "Whisply {:?} verification lane terminated unexpectedly",
+                    suite
+                )
+            })?;
+            results.extend(lane_results);
+        }
+        Ok(results)
+    })?;
+    indexed_results.sort_by_key(|(index, _)| *index);
+    let results = indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect::<Vec<_>>();
 
     print_results(command.dry_run, command.json, &command.features, &results)?;
     let failed = results
@@ -1988,6 +1937,39 @@ pub(crate) fn run(command: VerifyCommand) -> anyhow::Result<()> {
         anyhow::bail!("{failed} Whisply developer verification check(s) did not pass")
     }
     Ok(())
+}
+
+fn run_verification_lane(
+    source_root: &Path,
+    checks: Vec<(usize, &'static VerificationCheck)>,
+    check_count: usize,
+    dry_run: bool,
+) -> Vec<(usize, CheckResult)> {
+    checks
+        .into_iter()
+        .map(|(index, check)| {
+            // Structured JSON remains on stdout. Human progress goes to stderr
+            // so a long release matrix never looks hung and the durable JSON
+            // report remains machine-parseable after both streams are captured.
+            eprintln!(
+                "[verify] {}/{} starting {} ({:?})",
+                index + 1,
+                check_count,
+                check.id,
+                check.suite
+            );
+            let result = run_check(source_root, check, dry_run);
+            eprintln!(
+                "[verify] {}/{} finished {}: {:?} ({}ms)",
+                index + 1,
+                check_count,
+                result.id,
+                result.status,
+                result.duration_ms
+            );
+            (index, result)
+        })
+        .collect()
 }
 
 fn find_whisply_source_root() -> anyhow::Result<PathBuf> {
@@ -2785,6 +2767,35 @@ mod tests {
     }
 
     #[test]
+    fn all_checks_partition_once_into_serial_toolchain_lanes() {
+        let selected = select_verify_checks(VerifySuite::All, &[]);
+        let mut partitioned = std::collections::HashSet::new();
+        for suite in VERIFY_EXECUTION_LANES {
+            let lane = selected
+                .iter()
+                .copied()
+                .filter(|check| check.suite == suite)
+                .collect::<Vec<_>>();
+            for pair in lane.windows(2) {
+                let first = VERIFY_MANIFEST
+                    .iter()
+                    .position(|check| check.id == pair[0].id)
+                    .expect("lane check must belong to the manifest");
+                let second = VERIFY_MANIFEST
+                    .iter()
+                    .position(|check| check.id == pair[1].id)
+                    .expect("lane check must belong to the manifest");
+                assert!(first < second, "{suite:?} lane lost manifest order");
+            }
+            for check in lane {
+                assert!(partitioned.insert(check.id), "{} ran in two lanes", check.id);
+            }
+        }
+        assert_eq!(partitioned.len(), selected.len());
+        assert!(selected.iter().all(|check| partitioned.contains(check.id)));
+    }
+
+    #[test]
     fn parser_accepts_only_named_fixed_feature_lanes() {
         let parsed = VerifyParserHarness::try_parse_from([
             "verify",
@@ -2868,7 +2879,7 @@ mod tests {
 
     #[test]
     fn manifest_is_versioned_fixed_and_never_selects_integration_for_all() {
-        assert_eq!(VERIFY_MANIFEST_VERSION, 27);
+        assert_eq!(VERIFY_MANIFEST_VERSION, 28);
         let unique_ids: std::collections::HashSet<_> =
             VERIFY_MANIFEST.iter().map(|check| check.id).collect();
         assert_eq!(VERIFY_MANIFEST.len(), unique_ids.len());
@@ -2957,7 +2968,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "static-release-feature-coverage",
-                "mac-memory-audio-transcript-contracts",
+                "mac-swift-package-full",
             ]
         );
         assert_eq!(
