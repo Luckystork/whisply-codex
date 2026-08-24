@@ -12,6 +12,8 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1967,9 +1969,55 @@ fn run_verification_lane(
                 result.status,
                 result.duration_ms
             );
+            if check.suite == VerifySuite::Rust && !dry_run {
+                let pruned = prune_completed_cargo_test_executables();
+                if pruned > 0 {
+                    eprintln!(
+                        "[verify] pruned {pruned} completed Rust test executable(s); compiled dependencies retained"
+                    );
+                }
+            }
             (index, result)
         })
         .collect()
+}
+
+/// Cargo leaves every per-target test executable in `debug/deps`. The fixed
+/// Rust lane runs packages serially, so those already-finished executables are
+/// never reused by a later check, while their accumulated link products can
+/// exhaust a normal developer volume. Remove only extensionless executable
+/// files after each Rust child exits; `.rlib`, `.rmeta`, proc-macro dylibs,
+/// build-script output, and the top-level helper binaries remain cached.
+fn prune_completed_cargo_test_executables() -> usize {
+    let Some(target) = std::env::var_os("CARGO_TARGET_DIR") else {
+        return 0;
+    };
+    prune_completed_cargo_test_executables_in(&PathBuf::from(target))
+}
+
+fn prune_completed_cargo_test_executables_in(target: &Path) -> usize {
+    let deps = target.join("debug").join("deps");
+    let Ok(entries) = std::fs::read_dir(deps) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some() {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            #[cfg(unix)]
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return None;
+            }
+            std::fs::remove_file(path).ok().map(|_| ())
+        })
+        .count()
 }
 
 fn find_whisply_source_root() -> anyhow::Result<PathBuf> {
@@ -2743,6 +2791,29 @@ mod tests {
     struct TestParserHarness {
         #[command(subcommand)]
         command: TestSubcommand,
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_lane_cleanup_removes_only_completed_test_executables() -> anyhow::Result<()> {
+        let target = tempfile::tempdir()?;
+        let deps = target.path().join("debug/deps");
+        std::fs::create_dir_all(&deps)?;
+        let test_binary = deps.join("screen_context-1234");
+        let library = deps.join("libscreen_context-1234.rlib");
+        let non_executable = deps.join("build-script-1234");
+        std::fs::write(&test_binary, b"test")?;
+        std::fs::write(&library, b"library")?;
+        std::fs::write(&non_executable, b"metadata")?;
+        std::fs::set_permissions(&test_binary, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o644))?;
+
+        assert_eq!(prune_completed_cargo_test_executables_in(target.path()), 1);
+        assert!(!test_binary.exists());
+        assert!(library.exists());
+        assert!(non_executable.exists());
+        Ok(())
     }
 
     #[test]
