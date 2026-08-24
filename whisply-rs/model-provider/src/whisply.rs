@@ -509,13 +509,24 @@ fn model_info_from_catalog_model(index: usize, model: &CatalogModel) -> CoreResu
         context_window: Some(context_limit),
         max_context_window: Some(context_limit),
         auto_compact_token_limit: Some((context_limit / 10) * 9),
-        comp_hash: Some(format!("whisply:{}", model.route_revision)),
+        // `comp_hash` describes whether persisted conversation items need a
+        // compaction handoff before another model can consume them. A catalog
+        // route revision is deployment/routing identity, not a history format:
+        // using it here compacted every ordinary model switch even when the
+        // active history was far below the newly selected model's budget.
+        // Bump this protocol marker only when the managed Responses history
+        // contract actually becomes incompatible.
+        comp_hash: Some("whisply:runtime-responses-v1".to_string()),
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
         input_modalities,
         used_fallback_model_metadata: false,
         supports_search_tool: false,
-        use_responses_lite: true,
+        // Responses Lite's `additional_tools` input item is an OpenAI/Codex
+        // extension. The rejected Claude requests never created a provider
+        // generation, so non-OpenAI catalog routes use the portable Responses
+        // shape with top-level tools instead.
+        use_responses_lite: model.provider_family == "openai",
         auto_review_model_override: None,
         model_specialty: None,
         tool_mode: Some(ToolMode::Direct),
@@ -951,6 +962,48 @@ mod tests {
 
         let models = model_infos_from_catalog(&catalog).expect("valid signed catalog projection");
         assert_eq!(models[0].multi_agent_version, None);
+    }
+
+    #[test]
+    fn non_openai_catalog_models_use_the_portable_responses_envelope() {
+        let mut model = signed_catalog_model();
+        model.id = ModelId::parse("sonnet-5").expect("stable public model id");
+        model.display_name = "Claude Sonnet 5".to_string();
+        model.provider_family = "anthropic".to_string();
+
+        let projected =
+            model_info_from_catalog_model(0, &model).expect("valid non-OpenAI catalog projection");
+
+        assert!(
+            !projected.use_responses_lite,
+            "provider-neutral routes must send standard top-level Responses tools"
+        );
+    }
+
+    #[test]
+    fn route_revision_changes_do_not_force_conversation_compaction() {
+        let mut first = signed_catalog_model();
+        first.route_revision = "route-2026-08-23.1".to_string();
+        let first = model_info_from_catalog_model(0, &first).expect("first catalog projection");
+
+        let mut second = signed_catalog_model();
+        second.id = ModelId::parse("opus-5").expect("stable public model id");
+        second.display_name = "Claude Opus 5".to_string();
+        second.provider_family = "anthropic".to_string();
+        second.route_revision = "route-2026-08-24.7".to_string();
+        second.capabilities.context_limit = 1_000_000;
+        let second = model_info_from_catalog_model(1, &second).expect("second catalog projection");
+
+        assert_eq!(
+            first.comp_hash, second.comp_hash,
+            "routing identity must not masquerade as history incompatibility"
+        );
+        assert_eq!(
+            first.comp_hash.as_deref(),
+            Some("whisply:runtime-responses-v1")
+        );
+        assert_eq!(first.auto_compact_token_limit, Some(945_000));
+        assert_eq!(second.auto_compact_token_limit, Some(900_000));
     }
 
     #[test]
