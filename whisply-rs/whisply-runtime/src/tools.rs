@@ -726,7 +726,7 @@ fn screen_context_output_schema() -> Value {
     object_schema(
         &[
             "summary",
-            "observedText",
+            "imageDataURL",
             "targetID",
             "scope",
             "width",
@@ -734,7 +734,7 @@ fn screen_context_output_schema() -> Value {
         ],
         serde_json::json!({
             "summary": {"type": "string"},
-            "observedText": {"type": "string"},
+            "imageDataURL": {"type": "string"},
             "targetID": {"type": "string"},
             "scope": {"type": "string", "enum": ["exact_window", "selected_display"]},
             "width": {"type": "integer"},
@@ -802,6 +802,10 @@ mod tests {
             artifact.registry_sha256,
             registry.artifact_hash().expect("artifact hash")
         );
+        assert_eq!(
+            artifact.registry_sha256,
+            "47f5e753c55a70d8494b6b18947bd40b5396c707ff876d85141eab8a80694ba8"
+        );
         assert_eq!(artifact.descriptors.len(), 12);
         assert_eq!(
             artifact
@@ -829,7 +833,7 @@ mod tests {
             screen.output_schema["required"],
             serde_json::json!([
                 "summary",
-                "observedText",
+                "imageDataURL",
                 "targetID",
                 "scope",
                 "width",

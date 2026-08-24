@@ -574,7 +574,7 @@ mod tests {
             status: WhisplyToolTerminalStatus::Succeeded,
             content: Some(serde_json::json!({
                 "summary": "Viewed Calculator.",
-                "observedText": "Calculator shows 2468.",
+                "imageDataURL": "data:image/png;base64,AQID",
                 "targetID": "app.calculator:window_0001",
                 "scope": "exact_window",
                 "width": 512,

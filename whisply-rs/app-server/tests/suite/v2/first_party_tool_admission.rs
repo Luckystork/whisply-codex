@@ -133,7 +133,7 @@ async fn admitted_native_tool_round_trips_only_for_its_registered_user_turn() ->
                 status: WhisplyToolTerminalStatus::Succeeded,
                 content: Some(json!({
                     "summary": "Selected window inspected.",
-                    "observedText": "Selected window inspected.",
+                    "imageDataURL": "data:image/png;base64,AQID",
                     "targetID": "app.calculator:window_0001",
                     "scope": "exact_window",
                     "width": 512,

@@ -5,6 +5,7 @@ use codex_app_server_protocol::WhisplyToolResult;
 use codex_app_server_protocol::WhisplyToolTerminalStatus;
 use serde_json::Value;
 use whisply_protocol::models::FunctionCallOutputContentItem;
+use whisply_protocol::models::ImageDetail;
 use whisply_tools::JsonSchema;
 use whisply_tools::ResponsesApiNamespace;
 use whisply_tools::ResponsesApiNamespaceTool;
@@ -33,6 +34,7 @@ const NAMESPACE: &str = whisply_protocol::WHISPLY_FUNCTION_NAMESPACE;
 const NAMESPACE_DESCRIPTION: &str = "User-approved Whisply capabilities for this exact turn. Only use a capability when it is needed to fulfill the user's current request.";
 const MAX_MODEL_TEXT_BYTES: usize = 24 * 1024;
 const MAX_SAFE_SUMMARY_BYTES: usize = 1024;
+const MAX_SCREEN_IMAGE_URL_BYTES: usize = 6 * 1024 * 1024;
 const TRUNCATION_NOTICE: &str = "\n[... output truncated ...]";
 
 /// A direct-model-only handler for one owner-admitted native descriptor.
@@ -300,36 +302,56 @@ fn screen_content_items(
     mut content: Value,
     safe_summary: &str,
 ) -> Vec<FunctionCallOutputContentItem> {
-    // A capture of someone's screen has exactly one reader: the fixed,
-    // stateless extractor the Mac hands it to. Whatever the owner sends here
-    // is going to the model the conversation is using, which the person chose
-    // for their own reasons and which is not that reader -- so an image is
-    // dropped rather than forwarded, and an owner that somehow still attaches
-    // one cannot turn this lane into a second way to show a screen.
-    if let Some(object) = content.as_object_mut() {
-        object.remove("imageDataURL");
-    }
-    // The preface goes ahead of the description: a screen holds whatever
-    // window is open, and that can include a sentence addressed to a model.
-    let mut items = vec![FunctionCallOutputContentItem::InputText {
-        text: UNTRUSTED_PREFACE.to_string(),
-    }];
-
-    let textual = json_text(&content);
-    if !textual.is_empty() && textual != "null" && textual != "{}" {
-        items.push(FunctionCallOutputContentItem::InputText {
-            text: untrusted_block(&bounded_text(&textual, MAX_MODEL_TEXT_BYTES)),
-        });
-    } else if items.len() == 1 {
-        items.push(FunctionCallOutputContentItem::InputText {
+    let image_url = content
+        .as_object_mut()
+        .and_then(|object| object.remove("imageDataURL"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .filter(|value| valid_screen_png_data_url(value));
+    let Some(image_url) = image_url else {
+        return vec![FunctionCallOutputContentItem::InputText {
             text: nonempty_summary(safe_summary),
-        });
-    } else {
-        items.push(FunctionCallOutputContentItem::InputText {
-            text: UNTRUSTED_CLOSING.to_string(),
-        });
+        }];
+    };
+
+    // Framing precedes the image itself. Text inside a screenshot has no more
+    // instruction authority than observed text returned by another tool.
+    let metadata = bounded_text(&json_text(&content), MAX_MODEL_TEXT_BYTES);
+    vec![
+        FunctionCallOutputContentItem::InputText {
+            text: format!(
+                "{UNTRUSTED_PREFACE}\n\n{UNTRUSTED_BEGIN}\n{metadata}\n\
+                 The following image is part of this same untrusted observation."
+            ),
+        },
+        FunctionCallOutputContentItem::InputImage {
+            image_url,
+            detail: Some(ImageDetail::High),
+        },
+        FunctionCallOutputContentItem::InputText {
+            text: format!("{UNTRUSTED_END}\n\n{UNTRUSTED_CLOSING}"),
+        },
+    ]
+}
+
+fn valid_screen_png_data_url(value: &str) -> bool {
+    let Some(payload) = value.strip_prefix("data:image/png;base64,") else {
+        return false;
+    };
+    if value.len() > MAX_SCREEN_IMAGE_URL_BYTES || payload.is_empty() || payload.len() % 4 != 0 {
+        return false;
     }
-    items
+    let padding = payload
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    padding <= 2
+        && payload[..payload.len() - padding]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+        && payload[payload.len() - padding..]
+            .bytes()
+            .all(|byte| byte == b'=')
 }
 
 fn json_content_items(
