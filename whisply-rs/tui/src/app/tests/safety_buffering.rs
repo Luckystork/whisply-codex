@@ -363,10 +363,10 @@ async fn run_safety_retry(
         gated_response_chunks("previous-response", ev_completed("previous-response"));
     let (retry_chunks, release_retry_response) =
         gated_response_chunks("retry-response", ev_completed("retry-response"));
-    // Managed routes supply distinct compaction hashes for Terra and Sol. A source
-    // turn that has started with Terra persists its compaction settings even when
-    // interrupted, so every retry with earlier source history compacts before Sol.
-    let requires_model_transition_compaction = previous_prompt.is_some();
+    // Managed routes share one portable Responses compaction contract. Retrying
+    // with the faster model must not compact merely because the model changed;
+    // the fork still inherits the source history and applies Sol to the retry.
+    let requires_model_transition_compaction = false;
     let mut response_sequences = Vec::new();
     if previous_prompt.is_some() {
         if scenario == SafetyRetryScenario::InterruptedPrevious {

@@ -47,7 +47,9 @@ impl App {
             return;
         }
 
-        let retry_config = self.chat_widget.config_ref().clone();
+        let mut retry_config = self.chat_widget.config_ref().clone();
+        retry_config.model = Some(model.clone());
+        retry_config.model_reasoning_effort = Some(ReasoningEffortConfig::Low);
         let input_state = self.chat_widget.capture_thread_input_state();
 
         let AppCommand::UserTurn {
