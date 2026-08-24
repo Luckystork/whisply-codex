@@ -12,8 +12,6 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1973,7 +1971,7 @@ fn run_verification_lane(
                 let pruned = prune_completed_cargo_test_executables();
                 if pruned > 0 {
                     eprintln!(
-                        "[verify] pruned {pruned} completed Rust test executable(s); compiled dependencies retained"
+                        "[verify] pruned {pruned} completed Rust test product(s); compiled dependencies retained"
                     );
                 }
             }
@@ -1983,11 +1981,13 @@ fn run_verification_lane(
 }
 
 /// Cargo leaves every per-target test executable in `debug/deps`. The fixed
-/// Rust lane runs packages serially, so those already-finished executables are
+/// Rust lane runs packages serially, so those already-finished binaries are
 /// never reused by a later check, while their accumulated link products can
-/// exhaust a normal developer volume. Remove only extensionless executable
-/// files after each Rust child exits; `.rlib`, `.rmeta`, proc-macro dylibs,
-/// build-script output, and the top-level helper binaries remain cached.
+/// exhaust a normal developer volume. Cargo also leaves an extensionless,
+/// non-executable partial file when a link runs out of space; retaining it
+/// makes the next run fail with `Permission denied`. Remove every extensionless
+/// regular file in `debug/deps` after each Rust child exits; `.rlib`, `.rmeta`,
+/// proc-macro dylibs, build-script output, and top-level helpers remain cached.
 fn prune_completed_cargo_test_executables() -> usize {
     let Some(target) = std::env::var_os("CARGO_TARGET_DIR") else {
         return 0;
@@ -2007,12 +2007,7 @@ fn prune_completed_cargo_test_executables_in(target: &Path) -> usize {
             if path.extension().is_some() {
                 return None;
             }
-            let metadata = entry.metadata().ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
-            #[cfg(unix)]
-            if metadata.permissions().mode() & 0o111 == 0 {
+            if !entry.metadata().ok()?.is_file() {
                 return None;
             }
             std::fs::remove_file(path).ok().map(|_| ())
@@ -2793,9 +2788,8 @@ mod tests {
         command: TestSubcommand,
     }
 
-    #[cfg(unix)]
     #[test]
-    fn rust_lane_cleanup_removes_only_completed_test_executables() -> anyhow::Result<()> {
+    fn rust_lane_cleanup_removes_only_completed_test_products() -> anyhow::Result<()> {
         let target = tempfile::tempdir()?;
         let deps = target.path().join("debug/deps");
         std::fs::create_dir_all(&deps)?;
@@ -2805,14 +2799,10 @@ mod tests {
         std::fs::write(&test_binary, b"test")?;
         std::fs::write(&library, b"library")?;
         std::fs::write(&non_executable, b"metadata")?;
-        std::fs::set_permissions(&test_binary, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::set_permissions(&library, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o644))?;
-
-        assert_eq!(prune_completed_cargo_test_executables_in(target.path()), 1);
+        assert_eq!(prune_completed_cargo_test_executables_in(target.path()), 2);
         assert!(!test_binary.exists());
         assert!(library.exists());
-        assert!(non_executable.exists());
+        assert!(!non_executable.exists());
         Ok(())
     }
 
