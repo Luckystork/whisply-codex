@@ -390,7 +390,7 @@ pub fn first_party_tool_registry() -> ToolRegistry {
             descriptor(
                 "whisply.computer_use",
                 "Computer Use",
-                "Act only on the approved app or window target. Prefer perform_actions for two or more stable indexed buttons from one current observation.",
+                "Control the current signed Mac target and rebind to another app when the same user-requested workflow moves there. Prefer perform_actions for two or more stable indexed buttons from one current observation.",
                 "computer.use",
                 ToolOwner::Native,
                 ActionClass::FinalConfirmationRequired,
@@ -403,11 +403,11 @@ pub fn first_party_tool_registry() -> ToolRegistry {
                         "action": {
                             "type": "string",
                             "enum": COMPUTER_USE_ACTIONS,
-                            "description": "list_apps and the first targetless get_app_state may omit targetID; Whisply binds only the signed external app remembered before its overlay opened. Every state-changing action requires that exact approved app identifier. perform_actions executes 2-12 ordered click steps from one pinned observation and returns one fresh final state."
+                            "description": "list_apps and the first targetless get_app_state may omit targetID. Every state-changing action names its current signed target; a later action may name another app to continue the same workflow there. perform_actions executes 2-12 ordered click steps from one current observation and returns one fresh final state."
                         },
                         "targetID": {
                             "type": "string",
-                            "description": "Exact app identifier from the user's request, a prior list_apps result, or the native target binding returned by a targetless get_app_state."
+                            "description": "Current app identifier from the user's request, a prior list_apps result, or the native binding returned by a targetless get_app_state. Change it when the requested workflow moves to another app."
                         },
                         "arguments": {
                             "type": "object",
