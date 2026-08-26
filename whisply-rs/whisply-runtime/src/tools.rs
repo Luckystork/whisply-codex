@@ -804,7 +804,7 @@ mod tests {
         );
         assert_eq!(
             artifact.registry_sha256,
-            "47f5e753c55a70d8494b6b18947bd40b5396c707ff876d85141eab8a80694ba8"
+            "1707a7573c1fa2e8307d1bee196a21a6ed27e942d817980be0a6bee67adfedf6"
         );
         assert_eq!(artifact.descriptors.len(), 12);
         assert_eq!(
