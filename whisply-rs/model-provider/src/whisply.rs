@@ -131,8 +131,15 @@ pub fn whisply_provider_info() -> ModelProviderInfo {
             .collect(),
         ),
         env_http_headers: None,
-        request_max_retries: Some(0),
-        stream_max_retries: Some(0),
+        // One request retry reuses the request headers (including the managed
+        // request identity), so the gateway can reject an already-admitted
+        // replay without starting or charging a second provider request.
+        request_max_retries: Some(1),
+        // The core permits this single outer retry only when the failed
+        // attempt delivered no model output. A fresh managed request identity
+        // is then intentional: it is a separately metered recovery attempt,
+        // while the original ambiguous receipt remains reconcilable.
+        stream_max_retries: Some(1),
         stream_idle_timeout_ms: Some(WHISPLY_GATEWAY_IDLE_TIMEOUT.as_millis() as u64),
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
@@ -153,6 +160,17 @@ pub fn is_whisply_provider(info: &ModelProviderInfo) -> bool {
             .as_ref()
             .and_then(|headers| headers.get(DIRECT_PROVIDER_HEADER))
             .is_some_and(|value| value == DIRECT_PROVIDER_VALUE)
+}
+
+/// Returns whether a retryable sampling-stream failure may start another
+/// provider request. Ordinary providers retain the upstream retry behavior.
+/// The managed Whisply route may retry only before any model-authored output
+/// reaches the runtime, preventing duplicated text and tool side effects.
+pub fn sampling_stream_retry_is_safe(
+    info: &ModelProviderInfo,
+    received_model_output: bool,
+) -> bool {
+    !is_whisply_provider(info) || !received_model_output
 }
 
 /// Dynamic auth provider backed by the managed descriptor source. Every actual
@@ -859,8 +877,8 @@ mod tests {
         assert!(info.experimental_bearer_token.is_none());
         assert!(info.auth.is_none());
         assert!(!info.requires_openai_auth);
-        assert_eq!(info.request_max_retries, Some(0));
-        assert_eq!(info.stream_max_retries, Some(0));
+        assert_eq!(info.request_max_retries, Some(1));
+        assert_eq!(info.stream_max_retries, Some(1));
         assert_eq!(
             info.stream_idle_timeout_ms,
             Some(WHISPLY_GATEWAY_IDLE_TIMEOUT.as_millis() as u64)
@@ -902,6 +920,29 @@ mod tests {
             assert!(!mapped.is_retryable(), "{code} should not be retried");
             assert_eq!(mapped.to_string(), expected, "{code}");
         }
+    }
+
+    #[test]
+    fn managed_stream_retry_is_allowed_before_model_output() {
+        assert!(sampling_stream_retry_is_safe(
+            &whisply_provider_info(),
+            false,
+        ));
+    }
+
+    #[test]
+    fn managed_stream_retry_is_blocked_after_model_output() {
+        assert!(!sampling_stream_retry_is_safe(
+            &whisply_provider_info(),
+            true,
+        ));
+    }
+
+    #[test]
+    fn ordinary_provider_retry_policy_is_unchanged_after_model_output() {
+        let mut info = whisply_provider_info();
+        info.name = "ordinary".to_string();
+        assert!(sampling_stream_retry_is_safe(&info, true));
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ pub use whisply::WHISPLY_GATEWAY_IDLE_TIMEOUT;
 pub use whisply::WhisplyManagedSessionAvailability;
 pub use whisply::fetch_verified_whisply_catalog;
 pub use whisply::is_whisply_provider;
+pub use whisply::sampling_stream_retry_is_safe;
 pub use whisply::whisply_managed_session_availability;
 pub use whisply::whisply_provider_info;
 pub use whisply_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;

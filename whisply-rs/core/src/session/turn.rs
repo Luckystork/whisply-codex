@@ -97,6 +97,7 @@ use whisply_file_system::FindUpErrorPolicy;
 use whisply_file_system::find_nearest_ancestor_with_markers;
 use whisply_login::CodexAuth;
 use whisply_model_provider::RemoteCompactionSupport;
+use whisply_model_provider::sampling_stream_retry_is_safe;
 use whisply_protocol::ResponseItemId;
 use whisply_protocol::config_types::AutoCompactTokenLimitScope;
 use whisply_protocol::config_types::ModeKind;
@@ -1459,6 +1460,7 @@ async fn run_sampling_request(
             base_instructions.clone(),
         );
         sess.record_prompt_composition(&prompt, turn_context.as_ref());
+        let mut attempt_progress = SamplingAttemptProgress::default();
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1469,6 +1471,7 @@ async fn run_sampling_request(
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
+            &mut attempt_progress,
         )
         .await
         {
@@ -1495,7 +1498,12 @@ async fn run_sampling_request(
             original_input = Some(prompt.input);
         }
 
-        if !err.is_retryable() {
+        if !err.is_retryable()
+            || !sampling_stream_retry_is_safe(
+                turn_context.provider.info(),
+                attempt_progress.received_model_output,
+            )
+        {
             return Err(err);
         }
 
@@ -1701,6 +1709,15 @@ fn dropped_tool_message(dropped: &DroppedTool) -> String {
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+}
+
+/// Facts that make repeating a sampling request unsafe for the managed
+/// provider. Once any model-authored output has reached the runtime, a retry
+/// could duplicate visible text or a tool action. Transport metadata alone is
+/// not model output and does not close the one-retry recovery window.
+#[derive(Clone, Copy, Debug, Default)]
+struct SamplingAttemptProgress {
+    received_model_output: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2299,6 +2316,7 @@ async fn try_run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
     cancellation_token: CancellationToken,
+    attempt_progress: &mut SamplingAttemptProgress,
 ) -> CodexResult<SamplingRequestResult> {
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
@@ -2400,6 +2418,7 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
+                attempt_progress.received_model_output = true;
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
@@ -2511,6 +2530,7 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemAdded(mut item) => {
+                attempt_progress.received_model_output = true;
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
                 if let ResponseItem::CustomToolCall {
                     call_id,
@@ -2690,6 +2710,7 @@ async fn try_run_sampling_request(
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
+                attempt_progress.received_model_output = true;
                 // In review child threads, suppress assistant text deltas; the
                 // UI will show a selection popup from the final ReviewOutput.
                 if let Some(active) = active_item.as_ref() {
@@ -2726,6 +2747,7 @@ async fn try_run_sampling_request(
                 call_id,
                 delta,
             } => {
+                attempt_progress.received_model_output = true;
                 let Some((active_call_id, consumer)) = active_tool_argument_diff_consumer.as_mut()
                 else {
                     continue;
@@ -2743,6 +2765,7 @@ async fn try_run_sampling_request(
                 delta,
                 summary_index,
             } => {
+                attempt_progress.received_model_output = true;
                 if uses_sequential_cutoff_reasoning_summaries {
                     continue;
                 }
@@ -2764,6 +2787,7 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
+                attempt_progress.received_model_output = true;
                 if uses_sequential_cutoff_reasoning_summaries {
                     continue;
                 }
@@ -2786,6 +2810,7 @@ async fn try_run_sampling_request(
                 text,
                 summary_index,
             } => {
+                attempt_progress.received_model_output = true;
                 if !uses_sequential_cutoff_reasoning_summaries {
                     continue;
                 }
@@ -2819,6 +2844,7 @@ async fn try_run_sampling_request(
                 delta,
                 content_index,
             } => {
+                attempt_progress.received_model_output = true;
                 if let Some(active) = active_item.as_ref() {
                     if !active_item_is_streaming_to_client {
                         continue;
