@@ -238,11 +238,8 @@ async fn thread_unsubscribe_during_turn_keeps_turn_running() -> Result<()> {
 #[tokio::test]
 async fn thread_unsubscribe_preserves_cached_status_before_idle_unload() -> Result<()> {
     let server = responses::start_mock_server().await;
-    let _response_mock = responses::mount_sse_once(
-        &server,
-        responses::sse_failed("resp-1", "server_error", "simulated failure"),
-    )
-    .await;
+    let failed = responses::sse_failed("resp-1", "server_error", "simulated failure");
+    let _response_mock = responses::mount_sse_sequence(&server, vec![failed.clone(), failed]).await;
     let codex_home = TempDir::new()?;
     ManagedWhisplyConfig::new()
         .with_sandbox_mode("danger-full-access")
@@ -275,11 +272,28 @@ async fn thread_unsubscribe_preserves_cached_status_before_idle_unload() -> Resu
             },
         })
         .await?;
-    timeout(
+    let retrying = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("error"),
     )
     .await??;
+    let retrying: codex_app_server_protocol::ErrorNotification = serde_json::from_value(
+        retrying
+            .params
+            .expect("retrying error notification must include params"),
+    )?;
+    assert!(retrying.will_retry);
+    let terminal = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("error"),
+    )
+    .await??;
+    let terminal: codex_app_server_protocol::ErrorNotification = serde_json::from_value(
+        terminal
+            .params
+            .expect("terminal error notification must include params"),
+    )?;
+    assert!(!terminal.will_retry);
 
     let ThreadReadResponse { thread, .. } = mcp
         .request(|request_id| ClientRequest::ThreadRead {
