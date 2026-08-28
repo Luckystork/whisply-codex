@@ -135,11 +135,13 @@ pub fn whisply_provider_info() -> ModelProviderInfo {
         // request identity), so the gateway can reject an already-admitted
         // replay without starting or charging a second provider request.
         request_max_retries: Some(1),
-        // The core permits this single outer retry only when the failed
-        // attempt delivered no model output. A fresh managed request identity
-        // is then intentional: it is a separately metered recovery attempt,
-        // while the original ambiguous receipt remains reconcilable.
-        stream_max_retries: Some(1),
+        // The core permits two outer retries only when every failed attempt
+        // delivered no model output. A fresh managed request identity is then
+        // intentional: each is a separately metered recovery attempt, while
+        // every earlier ambiguous receipt remains reconcilable. Three total
+        // attempts cover a short provider outage without ever duplicating
+        // visible text or tool side effects.
+        stream_max_retries: Some(2),
         stream_idle_timeout_ms: Some(WHISPLY_GATEWAY_IDLE_TIMEOUT.as_millis() as u64),
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
@@ -878,7 +880,7 @@ mod tests {
         assert!(info.auth.is_none());
         assert!(!info.requires_openai_auth);
         assert_eq!(info.request_max_retries, Some(1));
-        assert_eq!(info.stream_max_retries, Some(1));
+        assert_eq!(info.stream_max_retries, Some(2));
         assert_eq!(
             info.stream_idle_timeout_ms,
             Some(WHISPLY_GATEWAY_IDLE_TIMEOUT.as_millis() as u64)
