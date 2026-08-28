@@ -1019,8 +1019,19 @@ async fn load_verified_whisply_catalog() -> anyhow::Result<ModelCatalog> {
 }
 
 fn whisply_public_model_projection(catalog: &ModelCatalog) -> anyhow::Result<serde_json::Value> {
-    serde_json::to_value(catalog)
-        .map_err(|_| anyhow::anyhow!("The signed Whisply model catalog is invalid."))
+    let mut projection = serde_json::to_value(catalog)
+        .map_err(|_| anyhow::anyhow!("The signed Whisply model catalog is invalid."))?;
+    if let Some(models) = projection
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for model in models {
+            if let Some(object) = model.as_object_mut() {
+                object.remove("usageMultiplierMillis");
+            }
+        }
+    }
+    Ok(projection)
 }
 
 async fn run_whisply_models(json: bool) -> anyhow::Result<()> {
@@ -1035,7 +1046,7 @@ async fn run_whisply_models(json: bool) -> anyhow::Result<()> {
         .get("models")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("The signed Whisply model catalog is invalid."))?;
-    println!("MODEL\tNAME\tCOST\tAVAILABILITY\tPLAN\tREASONING");
+    println!("MODEL\tNAME\tAVAILABILITY\tPLAN\tREASONING");
     for model in models {
         let id = model
             .get("id")
@@ -1045,17 +1056,6 @@ async fn run_whisply_models(json: bool) -> anyhow::Result<()> {
             .get("displayName")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("?");
-        // The signed catalog carries the cost multiplier, release availability,
-        // and plan entitlement alongside the reasoning set. Printing only the
-        // identifier and name would hide what the model actually costs and
-        // whether this account can select it at all.
-        let multiplier = model
-            .get("usageMultiplierMillis")
-            .and_then(serde_json::Value::as_u64)
-            .map_or_else(
-                || "unavailable".to_string(),
-                |millis| format_usage_multiplier(millis as u32),
-            );
         let availability = model
             .get("availability")
             .and_then(serde_json::Value::as_str)
@@ -1075,7 +1075,7 @@ async fn run_whisply_models(json: bool) -> anyhow::Result<()> {
                     .join(", ")
             })
             .unwrap_or_default();
-        println!("{id}\t{name}\t{multiplier}\t{availability}\t{entitlement}\t{efforts}");
+        println!("{id}\t{name}\t{availability}\t{entitlement}\t{efforts}");
     }
     Ok(())
 }
@@ -1338,11 +1338,6 @@ async fn run_whisply_usage(json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Usage remains useful if the separately refreshed presentation catalog is
-    // momentarily unavailable. The account snapshot is broker-authoritative;
-    // the catalog only adds the signed customer-facing multiplier table.
-    let catalog = load_verified_whisply_catalog().await.ok();
-
     println!("Usage ({})", snapshot.tier);
     for window in &snapshot.windows {
         let category = match window.category {
@@ -1366,45 +1361,7 @@ async fn run_whisply_usage(json: bool) -> anyhow::Result<()> {
         "Rate card {} · {} {}",
         snapshot.metering.rate_card_version, snapshot.metering.basis, snapshot.metering.currency,
     );
-    match catalog {
-        Some(catalog) => {
-            let models = catalog
-                .models
-                .iter()
-                .filter(|model| {
-                    model.rate_card_revision == snapshot.metering.rate_card_version
-                        && model.availability == codex_whisply::ModelAvailability::Available
-                        && model.subscription_availability
-                            == codex_whisply::SubscriptionAvailability::Available
-                })
-                .collect::<Vec<_>>();
-            if !models.is_empty() {
-                println!("Model cost multipliers:");
-                for model in models {
-                    println!(
-                        "  {} ({}) — {}",
-                        model.display_name,
-                        model.id.as_str(),
-                        format_usage_multiplier(model.usage_multiplier_millis),
-                    );
-                }
-            }
-        }
-        None => println!("Model cost multipliers: temporarily unavailable."),
-    }
     Ok(())
-}
-
-fn format_usage_multiplier(millis: u32) -> String {
-    let value = millis as f64 / 1_000.0;
-    let mut value = format!("{value:.3}");
-    while value.ends_with('0') {
-        value.pop();
-    }
-    if value.ends_with('.') {
-        value.pop();
-    }
-    format!("{value}×")
 }
 
 fn load_broker_connections() -> anyhow::Result<codex_whisply::ContextualConnectionsSnapshot> {
@@ -4083,7 +4040,7 @@ mod tests {
         assert_eq!(projection["catalogRevision"], "catalog-test-1");
         assert_eq!(model["shortName"], "GPT Sol");
         assert_eq!(model["routeRevision"], "opaque-route-revision-1");
-        assert_eq!(model["usageMultiplierMillis"], 2_500);
+        assert!(model.get("usageMultiplierMillis").is_none());
         assert_eq!(model["capabilities"]["outputLimit"], 4_096);
         assert_eq!(
             model["capabilities"]["outputModalities"],
@@ -4091,15 +4048,6 @@ mod tests {
         );
         assert!(model["recommendedDefault"].as_bool().unwrap_or(false));
         assert!(!projection.to_string().contains("openrouter"));
-    }
-
-    #[test]
-    fn usage_multiplier_labels_preserve_signed_millis_precision() {
-        assert_eq!(format_usage_multiplier(500), "0.5×");
-        assert_eq!(format_usage_multiplier(1_000), "1×");
-        assert_eq!(format_usage_multiplier(1_300), "1.3×");
-        assert_eq!(format_usage_multiplier(2_500), "2.5×");
-        assert_eq!(format_usage_multiplier(1_125), "1.125×");
     }
 
     #[test]
