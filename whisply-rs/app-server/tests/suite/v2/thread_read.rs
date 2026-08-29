@@ -2014,16 +2014,24 @@ async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Resul
             .expect("retrying error notification must include params"),
     )?;
     assert!(retrying.will_retry);
-    let terminal = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("error"),
-    )
-    .await??;
-    let terminal: codex_app_server_protocol::ErrorNotification = serde_json::from_value(
-        terminal
-            .params
-            .expect("terminal error notification must include params"),
-    )?;
+    // Debug test builds intentionally expose every reconnect attempt, while
+    // release builds suppress the first transient one. Read through either
+    // valid sequence until the canonical non-retrying terminal notification.
+    let terminal = loop {
+        let notification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("error"),
+        )
+        .await??;
+        let parsed: codex_app_server_protocol::ErrorNotification = serde_json::from_value(
+            notification
+                .params
+                .expect("error notification must include params"),
+        )?;
+        if !parsed.will_retry {
+            break parsed;
+        }
+    };
     assert!(!terminal.will_retry);
 
     let read_id = mcp
