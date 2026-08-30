@@ -602,6 +602,28 @@ async fn doc_smaller_than_limit_is_returned() {
 }
 
 #[tokio::test]
+async fn selected_workspace_loads_project_memory_beside_agents() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "project rules").unwrap();
+    fs::write(tmp.path().join("MEMORY.md"), "Sam is the Whisply CEO").unwrap();
+
+    let mut selected = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+    selected.config.workspace_directory_selected = true;
+    let selected_text = get_user_instructions(&selected)
+        .await
+        .expect("selected workspace docs");
+    assert!(selected_text.contains("project rules"));
+    assert!(selected_text.contains("Sam is the Whisply CEO"));
+
+    let hidden = get_user_instructions(
+        &make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await,
+    )
+    .await
+    .expect("agents without a selected workspace");
+    assert_eq!(hidden, "project rules");
+}
+
+#[tokio::test]
 async fn project_doc_invalid_utf8_uses_lossy_text() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("AGENTS.md");

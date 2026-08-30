@@ -38,6 +38,8 @@ use whisply_utils_path_uri::PathUri;
 pub const DEFAULT_AGENTS_MD_FILENAME: &str = "AGENTS.md";
 /// Preferred local override for AGENTS.md instructions.
 pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
+/// Project-local memory file. Loaded only when a workspace directory is selected.
+pub const DEFAULT_PROJECT_MEMORY_FILENAME: &str = "MEMORY.md";
 
 /// When both user and project AGENTS.md docs are present, they will be
 /// concatenated with the following separator.
@@ -213,35 +215,48 @@ async fn agents_md_paths(
 
     let candidate_filenames = candidate_filenames(config);
     let candidate_filenames = &candidate_filenames;
+    let include_project_memory = config.workspace_directory_selected;
     let mut results = futures::stream::iter(search_dirs)
         .map(|directory| async move {
+            let mut agents: Option<PathUri> = None;
+            let mut memory: Option<PathUri> = None;
             for name in candidate_filenames {
                 let candidate = directory
                     .join(name)
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
                 match fs.get_metadata(&candidate, /*sandbox*/ None).await {
-                    Ok(metadata) if metadata.is_file => return Ok(Some(candidate)),
+                    Ok(metadata) if metadata.is_file => {
+                        if *name == DEFAULT_PROJECT_MEMORY_FILENAME {
+                            if include_project_memory && memory.is_none() {
+                                memory = Some(candidate);
+                            }
+                        } else if agents.is_none() {
+                            agents = Some(candidate);
+                        }
+                    }
                     Ok(_) => {}
                     Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                     Err(err) => return Err(err),
                 }
             }
-            Ok(None)
+            Ok(agents.into_iter().chain(memory).collect::<Vec<_>>())
         })
         .buffered(MAX_CONCURRENT_ANCESTOR_PROBES);
     let mut found = Vec::new();
     while let Some(result) = results.next().await {
-        if let Some(candidate) = result? {
-            found.push(candidate);
-        }
+        found.extend(result?);
     }
     Ok(found)
 }
 
 fn candidate_filenames(config: &Config) -> Vec<&str> {
-    let mut names: Vec<&str> = Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
+    let mut names: Vec<&str> =
+        Vec::with_capacity(3 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_AGENTS_MD_FILENAME);
     names.push(DEFAULT_AGENTS_MD_FILENAME);
+    if config.workspace_directory_selected {
+        names.push(DEFAULT_PROJECT_MEMORY_FILENAME);
+    }
     for candidate in &config.project_doc_fallback_filenames {
         let candidate = candidate.as_str();
         if candidate.is_empty() {
