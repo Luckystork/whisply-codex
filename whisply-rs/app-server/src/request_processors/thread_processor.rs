@@ -3736,14 +3736,7 @@ impl ThreadRequestProcessor {
                 let is_running =
                     matches!(existing_thread.agent_status().await, AgentStatus::Running);
 
-                let cwd_retarget = !is_running
-                    && mismatch_details.iter().all(|detail| {
-                        detail.starts_with("cwd requested=")
-                            || detail.starts_with("runtime_workspace_roots requested=")
-                    });
-                if (!has_subscribers && matches!(loaded_status, ThreadStatus::Idle) && !is_running)
-                    || cwd_retarget
-                {
+                if !has_subscribers && matches!(loaded_status, ThreadStatus::Idle) && !is_running {
                     // A loaded idle thread is only a cache entry. Shut it down
                     // before removing it so cold resume cannot duplicate a
                     // thread that timed out during shutdown.
