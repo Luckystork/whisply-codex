@@ -124,7 +124,7 @@ fn apply_current_test_selector(catalog: &mut crate::ModelCatalog) -> Result<(), 
         // test-only envelope; every other stable identity must still match
         // exactly and an unreviewed rename remains InvalidCatalog.
         let selector_id = match model.id.as_str() {
-            "gemini-3.5-flash" => "gemini-3.7-flash",
+            "gemini-3.5-flash" => "gemini-3.8-flash",
             "grok-4.5" => "grok-4.6",
             unchanged => unchanged,
         };
@@ -261,7 +261,7 @@ mod tests {
                 ("sonnet-5", 1_000),
                 ("opus-5", 2_500),
                 ("gemini-3.1-pro", 1_100),
-                ("gemini-3.7-flash", 800),
+                ("gemini-3.8-flash", 800),
                 ("grok-4.6", 700),
             ]
         );
