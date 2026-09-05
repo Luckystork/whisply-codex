@@ -79,9 +79,9 @@
           "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 1200, "recommendedDefault": false
         },
         {
-          "id": "gemini-3.5-flash", "displayName": "Gemini 3.5 Flash", "providerFamily": "google", "routeRevision": "route-fixture-gemini-3.5-flash-1",
-          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1000000, "outputLimit": 8192},
-          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 600, "recommendedDefault": false
+          "id": "gemini-3.8-flash", "displayName": "Gemini 3.8 Flash", "providerFamily": "google", "routeRevision": "route-fixture-gemini-3.8-flash-1",
+          "capabilities": {"inputModalities": ["text", "image"], "supportsToolCalls": true, "supportsImages": true, "supportsStructuredOutput": true, "supportsSafeReasoningSummary": true, "contextLimit": 1000000, "outputLimit": 2048},
+          "allowedProfiles": ["general", "workspace"], "allowedReasoningEfforts": ["minimal", "low", "medium", "high"], "availability": "available", "subscriptionAvailability": "available", "rateCardRevision": "rate-card-fixture-2026-08", "usageMultiplierMillis": 800, "recommendedDefault": false
         },
         {
           "id": "grok-4.5", "displayName": "Grok 4.5", "providerFamily": "xai", "routeRevision": "route-fixture-grok-4.5-1",
