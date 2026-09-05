@@ -256,8 +256,8 @@
     },
     {
       "id": "gemini-3.8-flash",
-      "displayName": "Gemini 3.7 Flash",
-      "shortName": "Gemini 3.7 Flash",
+      "displayName": "Gemini 3.8 Flash",
+      "shortName": "Gemini 3.8 Flash",
       "description": "Google fast agentic and coding model",
       "providerFamily": "google",
       "routeRevision": "openrouter-google-gemini-3.8-flash-2026-09-05.1",
