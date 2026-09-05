@@ -901,22 +901,24 @@ mod tests {
     /// Maps reviewed worker-contract product IDs back to the signed historical
     /// catalog bytes checked into the runtime fixture.
     fn normalize_worker_catalog_for_historical_parity(
-        catalog: &mut ModelCatalog,
+        worker: &mut ModelCatalog,
+        runtime: &ModelCatalog,
     ) -> Result<(), CatalogError> {
-        for model in &mut catalog.models {
-            match model.id.as_str() {
-                "gemini-3.8-flash" => {
-                    model.id = ModelId::parse("gemini-3.5-flash")?;
-                    model.display_name = "Gemini 3.5 Flash".to_string();
-                    model.route_revision = "route-fixture-gemini-3.5-flash-1".to_string();
-                }
-                "grok-4.6" => {
-                    model.id = ModelId::parse("grok-4.5")?;
-                    model.display_name = "Grok 4.5".to_string();
-                    model.route_revision = "route-fixture-grok-4.5-1".to_string();
-                }
-                _ => {}
-            }
+        for model in &mut worker.models {
+            let historical_id = match model.id.as_str() {
+                "gemini-3.8-flash" => Some("gemini-3.5-flash"),
+                "grok-4.6" => Some("grok-4.5"),
+                _ => None,
+            };
+            let Some(historical_id) = historical_id else {
+                continue;
+            };
+            let historical = runtime
+                .models
+                .iter()
+                .find(|candidate| candidate.id.as_str() == historical_id)
+                .ok_or(CatalogError::InvalidCatalog)?;
+            *model = historical.clone();
         }
         Ok(())
     }
@@ -931,8 +933,11 @@ mod tests {
             "../../../../contracts/fixtures/whisply-model-catalog-v1.json"
         ))
         .expect("worker static catalog fixture");
-        normalize_worker_catalog_for_historical_parity(&mut worker.envelope.catalog)
-            .expect("worker reviewed replacements must map to the signed historical fixture");
+        normalize_worker_catalog_for_historical_parity(
+            &mut worker.envelope.catalog,
+            &runtime.envelope.catalog,
+        )
+        .expect("worker reviewed replacements must map to the signed historical fixture");
 
         assert_eq!(runtime.key_set, worker.key_set);
         assert_eq!(runtime.envelope.key_id, worker.envelope.key_id);
