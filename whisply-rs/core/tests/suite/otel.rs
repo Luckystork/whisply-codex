@@ -457,6 +457,14 @@ async fn process_sse_failed_event_logs_missing_error() {
         })]),
     )
     .await;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "local shell done"),
+            ev_completed("done"),
+        ]),
+    )
+    .await;
 
     let TestCodex { codex, .. } = test_codex()
         .with_config(move |config| {
