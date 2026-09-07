@@ -1072,6 +1072,7 @@ impl AppServerSession {
             .request_typed(ClientRequest::ThreadInjectItems {
                 request_id,
                 params: ThreadInjectItemsParams {
+                    whisply_history_recovery: None,
                     thread_id: thread_id.to_string(),
                     items,
                 },

@@ -5642,3 +5642,875 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
 
     Ok(())
 }
+
+// Stored-history recovery uses real core turns and the normal provider-backed
+// compactor. The local SSE server supplies deterministic responses only.
+fn whisply_history_frames(
+    records: &[Value],
+) -> Vec<whisply_protocol::protocol::WhisplyHistoryRecoveryFrame> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let mut bytes = Vec::new();
+    for record in records {
+        bytes.extend(serde_json::to_vec(record).unwrap());
+        bytes.push(b'\n');
+    }
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    bytes
+        .chunks(192 * 1_024)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let end = index * 192 * 1_024 + chunk.len();
+            whisply_protocol::protocol::WhisplyHistoryRecoveryFrame {
+                archive_id: "a".repeat(64),
+                offset: (index * 192 * 1_024) as u64,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(chunk),
+                final_byte_count: (end == bytes.len()).then_some(bytes.len() as u64),
+                final_sha256: (end == bytes.len()).then(|| digest.clone()),
+            }
+        })
+        .collect()
+}
+
+fn whisply_history_status() -> whisply_protocol::protocol::WhisplyHistoryRecoveryFrame {
+    whisply_protocol::protocol::WhisplyHistoryRecoveryFrame {
+        archive_id: "a".repeat(64),
+        offset: 0,
+        data_base64: String::new(),
+        final_byte_count: None,
+        final_sha256: None,
+    }
+}
+
+fn whisply_recovery_builder(
+    server: &MockServer,
+) -> core_test_support::test_codex::TestCodexBuilder {
+    let provider = non_openai_model_provider(server);
+    test_codex().with_config(move |config| {
+        config.model_provider = provider;
+        config.model_context_window = Some(32_000);
+        config.model_auto_compact_token_limit = Some(28_000);
+        config.include_environment_context = false;
+        set_test_compact_prompt(config);
+    })
+}
+
+async fn whisply_request_bodies(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .map(|request| {
+            let bytes = if request
+                .headers
+                .get("content-encoding")
+                .is_some_and(|value| value == "zstd")
+            {
+                zstd::stream::decode_all(request.body.as_slice()).unwrap()
+            } else {
+                request.body.clone()
+            };
+            serde_json::from_slice(&bytes).unwrap()
+        })
+        .collect()
+}
+
+fn whisply_message_texts(body: &Value, role: &str) -> Vec<String> {
+    body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["role"] == role)
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter_map(|part| part["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
+const WHISPLY_RECOVERY_IMAGE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_exceeds_model_window_without_losing_text_or_images() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .respond_with(responses::sse_response(sse(vec![
+            ev_assistant_message("summary", "SYNTHETIC_RECOVERY_SUMMARY"),
+            ev_completed_with_tokens("summary-response", 100),
+        ])))
+        .mount(&server)
+        .await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let mut records = Vec::new();
+    let mut expected_user = String::new();
+    let mut expected_assistant = String::new();
+    for index in 0..40 {
+        // One original part alone exceeds both this model's context and the
+        // direct gateway's per-part text bound. It must be split, not clipped.
+        let text = if index == 0 {
+            "HISTORICAL_LARGE_🙂 ".repeat(25_000)
+        } else {
+            format!("HISTORICAL_{index:02} ").repeat(600)
+        };
+        let speaker = if index % 2 == 0 { "user" } else { "assistant" };
+        if speaker == "user" {
+            expected_user.push_str(&text);
+        } else {
+            expected_assistant.push_str(&text);
+        }
+        records.push(json!({"speaker": speaker, "kind": "text", "value": text}));
+        if index % 4 == 0 {
+            records.push(json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}));
+        }
+    }
+    let frames = whisply_history_frames(&records);
+    for frame in &frames {
+        let receipt = test.codex.recover_whisply_history(frame.clone()).await?;
+        assert!(!receipt.hydrated);
+        // Lost acknowledgements do not append duplicate source frames.
+        assert_eq!(
+            test.codex.recover_whisply_history(frame.clone()).await?,
+            receipt
+        );
+    }
+    assert!(whisply_request_bodies(&server).await.is_empty());
+    let fresh = "FRESH_UNSAMPLED_QUESTION";
+    let turn_id = test
+        .codex
+        .submit(Op::UserInput {
+            items: vec![
+                UserInput::Text {
+                    text: fresh.to_owned(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Image {
+                    image_url: WHISPLY_RECOVERY_IMAGE.to_owned(),
+                    detail: None,
+                },
+            ],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let EventMsg::TurnComplete(completion) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(completion.turn_id, turn_id);
+    assert!(completion.error.is_none(), "{completion:?}");
+    let bodies = whisply_request_bodies(&server).await;
+    assert!(
+        bodies.len() > 4 && bodies.len() < 24,
+        "bounded productive compactions: {}",
+        bodies.len()
+    );
+    let historical = |text: &String| {
+        !text.starts_with(SUMMARY_PREFIX) && text != SUMMARIZATION_PROMPT && text != fresh
+    };
+    let user: String = bodies
+        .iter()
+        .flat_map(|body| whisply_message_texts(body, "user"))
+        .filter(historical)
+        .collect();
+    let assistant: String = bodies
+        .iter()
+        .flat_map(|body| whisply_message_texts(body, "assistant"))
+        .filter(|text| text != "SYNTHETIC_RECOVERY_SUMMARY")
+        .collect();
+    assert_eq!(user, expected_user);
+    assert_eq!(assistant, expected_assistant);
+    assert!(
+        bodies[..bodies.len() - 1]
+            .iter()
+            .all(|body| !body.to_string().contains(fresh))
+    );
+    assert_eq!(
+        whisply_message_texts(bodies.last().unwrap(), "user")
+            .iter()
+            .filter(|text| *text == fresh)
+            .count(),
+        1
+    );
+    let mut image_count = 0;
+    for body in &bodies {
+        let items = body["input"].as_array().unwrap();
+        assert!(items.len() <= 1_024);
+        assert!(serde_json::to_vec(body)?.len() < 12 * 1_024 * 1_024);
+        let images = items
+            .iter()
+            .filter_map(|item| item["content"].as_array())
+            .flatten()
+            .filter(|part| part["type"] == "input_image")
+            .count();
+        assert!(
+            images <= 4,
+            "history images must not evade the normal per-request limit"
+        );
+        image_count += images;
+        for text in [
+            whisply_message_texts(body, "user"),
+            whisply_message_texts(body, "assistant"),
+        ]
+        .concat()
+        {
+            assert!(text.encode_utf16().count() <= 200_000);
+        }
+    }
+    assert_eq!(image_count, 11);
+    let effective_window = test
+        .codex
+        .token_usage_info()
+        .await
+        .unwrap()
+        .model_context_window
+        .unwrap();
+    assert!(
+        test.codex
+            .compaction_status()
+            .records
+            .iter()
+            .all(|record| record.active_context_tokens_before < effective_window),
+        "base instructions must already be included when choosing every recovery prefix"
+    );
+    assert!(
+        test.codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    let path = test.session_configured.rollout_path.clone().unwrap();
+    test.codex.shutdown_and_wait().await?;
+    let persisted: Vec<RolloutLine> = fs::read_to_string(&path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|line| matches!(
+                &line.item,
+                RolloutItem::WhisplyHistoryRecovery(
+                    whisply_protocol::protocol::WhisplyHistoryRecoveryRecord::Frame { .. }
+                )
+            ))
+            .count(),
+        frames.len()
+    );
+    assert!(persisted.iter().any(|line| matches!(&line.item, RolloutItem::Compacted(checkpoint) if checkpoint.whisply_history_recovery.is_some() && checkpoint.replacement_history.is_some())));
+    let resumed = builder
+        .resume(&server, Arc::clone(&test.home), path)
+        .await?;
+    assert!(
+        resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    let before = bodies.len();
+    resumed.submit_text_turn("HEALTHY_NEXT_TURN").await?;
+    assert_eq!(
+        whisply_request_bodies(&server).await.len(),
+        before + 1,
+        "completed recovery never purchases a second import"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_resumes_partial_transfer_before_any_model_work() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let frames = whisply_history_frames(&[
+        json!({"speaker":"user", "kind":"text", "value":"partial original ".repeat(30_000)}),
+    ]);
+    assert!(frames.len() > 2);
+    let first = test
+        .codex
+        .recover_whisply_history(frames[0].clone())
+        .await?;
+    assert!(!first.committed);
+    let resumed = builder.restart(&server, &test).await?;
+    assert_eq!(
+        resumed
+            .codex
+            .recover_whisply_history(frames[0].clone())
+            .await?,
+        first
+    );
+    for frame in &frames[1..] {
+        resumed.codex.recover_whisply_history(frame.clone()).await?;
+    }
+    assert!(
+        resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .committed
+    );
+    assert!(whisply_request_bodies(&server).await.is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_requires_new_user_turn_after_uncertain_compaction() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let _response = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_assistant_message(
+                "partial",
+                "An incomplete summary",
+            )]),
+            sse(vec![
+                ev_assistant_message("retried", "An explicitly retried summary"),
+                ev_completed_with_tokens("retried-summary", 100),
+            ]),
+            sse(vec![
+                ev_assistant_message("final", "Continued"),
+                ev_completed_with_tokens("continued-final", 100),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let records: Vec<_> = (0..5)
+        .map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}))
+        .collect();
+    for frame in whisply_history_frames(&records) {
+        test.codex.recover_whisply_history(frame).await?;
+    }
+    test.submit_text_turn("FRESH_AFTER_ARCHIVE").await?;
+    assert_eq!(whisply_request_bodies(&server).await.len(), 1);
+    assert!(
+        !test
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    let resumed = builder.restart(&server, &test).await?;
+    resumed.submit_text_turn("EXPLICIT_RETRY").await?;
+    assert_eq!(
+        whisply_request_bodies(&server).await.len(),
+        3,
+        "only the new user turn authorizes another paid summary and its answer"
+    );
+    assert!(
+        resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    let later = whisply_request_bodies(&server).await;
+    assert!(!later[1].to_string().contains("An incomplete summary"));
+    let stored = fs::read_to_string(resumed.session_configured.rollout_path.as_ref().unwrap())?;
+    assert!(stored.contains("compactionContinued"));
+    assert!(stored.contains("compactionStarted"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_stop_keeps_durable_prefix_and_rejects_live_injection()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_assistant_message("saved-summary", "FIRST_DURABLE_HISTORY_SUMMARY"),
+                ev_completed_with_tokens("saved-summary-response", 100),
+            ])),
+            sse_response(sse(vec![
+                ev_assistant_message("late-summary", "must not be replayed"),
+                ev_completed("late-summary-response"),
+            ]))
+            .set_delay(std::time::Duration::from_secs(4)),
+            sse_response(sse(vec![
+                ev_assistant_message("explicit-summary", "EXPLICIT_CONTINUATION_SUMMARY"),
+                ev_completed_with_tokens("explicit-summary-response", 100),
+            ])),
+            sse_response(sse(vec![
+                ev_assistant_message("explicit-final", "Continued"),
+                ev_completed_with_tokens("explicit-final-response", 100),
+            ])),
+        ],
+    )
+    .await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let records: Vec<_> = (0..9)
+        .map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}))
+        .collect();
+    let frames = whisply_history_frames(&records);
+    for frame in &frames {
+        test.codex.recover_whisply_history(frame.clone()).await?;
+    }
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "FRESH_STOPPED_QUESTION".to_owned(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while requests.requests().len() < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert!(
+        test.codex
+            .recover_whisply_history(frames[0].clone())
+            .await
+            .is_err(),
+        "active turn owns its writer"
+    );
+    let stop_started = std::time::Instant::now();
+    test.codex.submit(Op::Interrupt).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnAborted(_))
+        }),
+    )
+    .await?;
+    assert!(stop_started.elapsed() < std::time::Duration::from_secs(1));
+    let path = test.session_configured.rollout_path.clone().unwrap();
+    let resumed = builder.restart(&server, &test).await?;
+    let persisted: Vec<RolloutLine> = fs::read_to_string(path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(persisted.iter().filter(|line| matches!(&line.item, RolloutItem::Compacted(checkpoint)
+        if checkpoint.whisply_history_recovery.is_some() && checkpoint.message.contains("FIRST_DURABLE_HISTORY_SUMMARY"))).count(), 1);
+    assert!(!persisted.iter().any(|line| matches!(&line.item, RolloutItem::ResponseItem(item) if serde_json::to_string(item).unwrap().contains("FRESH_STOPPED_QUESTION"))), "fresh question must not precede still-unrestored old history");
+    resumed.submit_text_turn("CONTINUE_AFTER_STOP").await?;
+    assert_eq!(
+        requests.requests().len(),
+        4,
+        "the saved first summary is retained; the new user turn authorizes one retry of the uncertain second summary"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_context_rejection_never_trims_unsampled_source() -> Result<()> {
+    assert_whisply_history_rejection_recovery("context_length_exceeded").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_quota_rejection_preserves_source_and_does_not_retry() -> Result<()>
+{
+    assert_whisply_history_rejection_recovery("insufficient_quota").await
+}
+
+async fn assert_whisply_history_rejection_recovery(error_code: &str) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse_failed("too-large", error_code, CONTEXT_LIMIT_MESSAGE),
+            sse(vec![
+                ev_assistant_message("retry-summary", "SAVED_RETRY_SUMMARY"),
+                ev_completed_with_tokens("retry-summary-response", 100),
+            ]),
+            sse(vec![
+                ev_assistant_message("retry-final", "Recovered"),
+                ev_completed_with_tokens("retry-final-response", 100),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let records: Vec<_> = (0..5)
+        .map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}))
+        .collect();
+    for frame in whisply_history_frames(&records) {
+        test.codex.recover_whisply_history(frame).await?;
+    }
+    test.submit_text_turn("FIRST_REJECTED_QUESTION").await?;
+    assert_eq!(
+        requests.requests().len(),
+        1,
+        "context overflow must not trim and retry an unsummarized archive prefix"
+    );
+    let resumed = builder.restart(&server, &test).await?;
+    resumed.submit_text_turn("EXPLICIT_CONTEXT_RETRY").await?;
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].message_input_image_urls("user"),
+        requests[1].message_input_image_urls("user")
+    );
+    assert_eq!(requests[0].message_input_image_urls("user").len(), 4);
+    assert_eq!(requests[2].message_input_image_urls("user").len(), 1);
+    assert!(
+        resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_stops_after_unproductive_summaries() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let too_large = "NO_REDUCTION ".repeat(9_000);
+    let requests = mount_sse_sequence(
+        &server,
+        (0..2)
+            .map(|index| {
+                sse(vec![
+                    ev_assistant_message(&format!("summary-{index}"), &too_large),
+                    ev_completed_with_tokens(&format!("response-{index}"), 100),
+                ])
+            })
+            .collect(),
+    )
+    .await;
+    let test = whisply_recovery_builder(&server)
+        .with_config(|config| {
+            config.base_instructions = Some("Test history restoration.".to_owned());
+        })
+        .build(&server)
+        .await?;
+    let records: Vec<_> = (0..5)
+        .map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}))
+        .collect();
+    for frame in whisply_history_frames(&records) {
+        test.codex.recover_whisply_history(frame).await?;
+    }
+    test.submit_text_turn("FRESH_CANNOT_FIT").await?;
+    assert_eq!(
+        requests.requests().len(),
+        2,
+        "unproductive history compaction must not buy an unlimited sequence"
+    );
+    assert!(
+        !test
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_does_not_substitute_an_old_answer_for_an_empty_summary()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_once(&server, sse(vec![ev_completed("empty-summary")])).await;
+    let test = whisply_recovery_builder(&server).build(&server).await?;
+    let mut records = vec![
+        json!({"speaker":"assistant", "kind":"text", "value":"An old answer is not a summary of later images."}),
+    ];
+    records.extend(
+        (0..5).map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE})),
+    );
+    for frame in whisply_history_frames(&records) {
+        test.codex.recover_whisply_history(frame).await?;
+    }
+    test.submit_text_turn("FRESH_NEEDS_HISTORY").await?;
+    assert_eq!(requests.requests().len(), 1);
+    assert_eq!(test.codex.compaction_status().compaction_count, 0);
+    assert!(
+        !test
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_extends_source_after_stop_in_final_compaction() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_assistant_message("late-final-summary", "unknown summary"),
+                ev_completed("unknown-final-summary"),
+            ]))
+            .set_delay(std::time::Duration::from_secs(4)),
+            sse_response(sse(vec![
+                ev_assistant_message("new-summary", "Explicitly continued history"),
+                ev_completed_with_tokens("new-summary-response", 100),
+            ])),
+            sse_response(sse(vec![
+                ev_assistant_message("continued-final", "Continued"),
+                ev_completed_with_tokens("continued-final-response", 100),
+            ])),
+        ],
+    )
+    .await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let mut records: Vec<_> = (0..4)
+        .map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}))
+        .collect();
+    for frame in whisply_history_frames(&records) {
+        test.codex.recover_whisply_history(frame).await?;
+    }
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![
+                UserInput::Text {
+                    text: "SAVED_STOPPED_QUESTION".to_owned(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Image {
+                    image_url: WHISPLY_RECOVERY_IMAGE.to_owned(),
+                    detail: None,
+                },
+            ],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while requests.requests().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    test.codex.submit(Op::Interrupt).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnAborted(_))
+        }),
+    )
+    .await?;
+    let resumed = builder.restart(&server, &test).await?;
+    records.push(json!({"speaker":"user", "kind":"text", "value":"SAVED_STOPPED_QUESTION"}));
+    records.push(json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}));
+    let extended = whisply_history_frames(&records);
+    for frame in &extended {
+        let receipt = resumed.codex.recover_whisply_history(frame.clone()).await?;
+        assert!(!receipt.hydrated);
+        if let Some(count) = frame.final_byte_count {
+            assert_eq!(receipt.accepted_bytes, count);
+        }
+    }
+    resumed
+        .submit_text_turn("NEW_EXPLICIT_CONTINUATION")
+        .await?;
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].body_contains_text("SAVED_STOPPED_QUESTION"));
+    assert_eq!(
+        requests[1]
+            .message_input_texts("user")
+            .iter()
+            .filter(|text| text.as_str() == "SAVED_STOPPED_QUESTION")
+            .count(),
+        1
+    );
+    assert_eq!(requests[2].message_input_image_urls("user").len(), 1);
+    assert!(
+        resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_extends_source_after_quota_rejection_at_eof() -> Result<()> {
+    assert_whisply_history_eof_rejection_preserves_fresh_input("insufficient_quota", false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_extends_source_after_context_rejection_at_eof() -> Result<()> {
+    assert_whisply_history_eof_rejection_preserves_fresh_input("context_length_exceeded", false)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whisply_history_recovery_retries_same_question_once_after_rejection_at_eof() -> Result<()>
+{
+    assert_whisply_history_eof_rejection_preserves_fresh_input("insufficient_quota", true).await
+}
+
+async fn assert_whisply_history_eof_rejection_preserves_fresh_input(
+    error_code: &str,
+    retry_same_question: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse_failed("rejected-at-eof", error_code, CONTEXT_LIMIT_MESSAGE),
+            sse(vec![
+                ev_assistant_message("new-summary", "An explicitly continued history summary"),
+                ev_completed_with_tokens("new-summary-response", 100),
+            ]),
+            sse(vec![
+                ev_assistant_message("continued-answer", "Continued"),
+                ev_completed_with_tokens("continued-answer-response", 100),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = whisply_recovery_builder(&server);
+    let test = builder.build(&server).await?;
+    let mut records: Vec<_> = (0..4)
+        .map(|_| json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}))
+        .collect();
+    for frame in whisply_history_frames(&records) {
+        test.codex.recover_whisply_history(frame).await?;
+    }
+    let failed_question = "FAILED_AT_EOF_QUESTION";
+    let fresh_items = vec![
+        UserInput::Text {
+            text: failed_question.to_owned(),
+            text_elements: Vec::new(),
+        },
+        UserInput::Image {
+            image_url: WHISPLY_RECOVERY_IMAGE.to_owned(),
+            detail: None,
+        },
+    ];
+    test.codex
+        .submit(Op::UserInput {
+            items: fresh_items.clone(),
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        requests.requests().len(),
+        1,
+        "a known rejection is not automatically retried"
+    );
+    assert!(!requests.requests()[0].body_contains_text(failed_question));
+    assert!(
+        !test
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated,
+        "archive EOF cannot clear the debt for a fresh question that was not recorded"
+    );
+    let resumed = builder.restart(&server, &test).await?;
+    assert!(
+        !resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    if retry_same_question {
+        // The product Retry keeps this same question as current input, not an
+        // earlier archived turn. An unchanged archive receipt must permit it.
+        for frame in whisply_history_frames(&records) {
+            resumed.codex.recover_whisply_history(frame).await?;
+        }
+        resumed
+            .codex
+            .submit(Op::UserInput {
+                items: fresh_items,
+                final_output_json_schema: None,
+                responsesapi_client_metadata: None,
+                additional_context: Default::default(),
+                thread_settings: Default::default(),
+            })
+            .await?;
+        wait_for_event(&resumed.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    } else {
+        // A new distinct product turn restores the saved rejected question in
+        // its original chronological position, including its original image.
+        records.push(json!({"speaker":"user", "kind":"text", "value":failed_question}));
+        records.push(json!({"speaker":"user", "kind":"image", "value":WHISPLY_RECOVERY_IMAGE}));
+        for frame in whisply_history_frames(&records) {
+            resumed.codex.recover_whisply_history(frame).await?;
+        }
+        resumed.submit_text_turn("NEXT_DISTINCT_QUESTION").await?;
+    }
+    let requests = requests.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "one explicit turn buys one new summary and its answer"
+    );
+    assert_eq!(requests[0].message_input_image_urls("user").len(), 4);
+    assert_eq!(requests[1].message_input_image_urls("user").len(), 4);
+    assert_eq!(requests[2].message_input_image_urls("user").len(), 1);
+    assert_eq!(
+        requests[1..]
+            .iter()
+            .flat_map(|request| request.message_input_texts("user"))
+            .filter(|text| text == failed_question)
+            .count(),
+        1
+    );
+    if retry_same_question {
+        assert!(!requests[1].body_contains_text(failed_question));
+        assert!(requests[2].body_contains_text(failed_question));
+    } else {
+        assert!(requests[1].body_contains_text(failed_question));
+        assert!(!requests[1].body_contains_text("NEXT_DISTINCT_QUESTION"));
+        assert!(requests[2].body_contains_text("NEXT_DISTINCT_QUESTION"));
+    }
+    assert!(
+        resumed
+            .codex
+            .recover_whisply_history(whisply_history_status())
+            .await?
+            .hydrated
+    );
+    let stored = fs::read_to_string(resumed.session_configured.rollout_path.as_ref().unwrap())?;
+    assert!(stored.contains("compactionRejected"));
+    assert!(
+        !stored.contains("compactionContinued"),
+        "a definitive refusal is not an unknown paid attempt"
+    );
+    Ok(())
+}

@@ -81,6 +81,8 @@ pub(crate) struct Session {
     /// exactly where it started, and every lap is a paid request the person
     /// did not ask for.
     pub(crate) unproductive_auto_compactions: std::sync::atomic::AtomicU32,
+    pub(crate) history_recovery: Mutex<super::history_recovery::HistoryRecoveryState>,
+    pub(crate) history_recovery_running: std::sync::atomic::AtomicBool,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) pending_user_message_admissions:
@@ -1257,6 +1259,8 @@ impl Session {
                     codex_whisply::ConversationCompactionLog::new(),
                 ),
                 unproductive_auto_compactions: std::sync::atomic::AtomicU32::new(0),
+                history_recovery: Mutex::new(Default::default()),
+                history_recovery_running: std::sync::atomic::AtomicBool::new(false),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 pending_user_message_admissions: Default::default(),

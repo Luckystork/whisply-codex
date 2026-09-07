@@ -21,6 +21,7 @@ impl<'de> Deserialize<'de> for CompactedItem {
         };
         Ok(Self {
             message: serialized.message,
+            whisply_history_recovery: serialized.whisply_history_recovery,
             replacement_history: serialized.replacement_history,
             reference_context_item: serialized.reference_context_item,
             world_state_baseline: serialized.world_state_baseline,
@@ -35,6 +36,8 @@ impl<'de> Deserialize<'de> for CompactedItem {
 #[derive(Deserialize)]
 struct SerializedCompactedItem {
     message: String,
+    #[serde(default)]
+    whisply_history_recovery: Option<crate::protocol::WhisplyHistoryRecoveryCursor>,
     #[serde(default)]
     replacement_history: Option<Vec<ResponseItem>>,
     #[serde(default)]

@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "WhisplyBrowserReceiptStatus": {
+      "enum": [
+        "settled"
+      ],
+      "type": "string"
+    },
+    "WhisplyBrowserSampleReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "receiptId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WhisplyBrowserReceiptStatus"
+        }
+      },
+      "required": [
+        "receiptId",
+        "status"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "componentId": {
+      "type": "string"
+    },
+    "modelId": {
+      "type": "string"
+    },
+    "outputJSON": {
+      "type": "string"
+    },
+    "receipt": {
+      "$ref": "#/definitions/WhisplyBrowserSampleReceipt"
+    },
+    "requestId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "componentId",
+    "modelId",
+    "outputJSON",
+    "receipt",
+    "requestId"
+  ],
+  "title": "WhisplyBrowserSampleResponse",
+  "type": "object"
+}

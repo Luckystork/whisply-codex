@@ -176,7 +176,24 @@ pub(crate) async fn run_turn(
     .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+            // The product already persists this fresh message. Do not insert
+            // it ahead of older, still-unrestored history on a cancelled
+            // recovery. The next owed-history transfer can append that saved
+            // failed turn in its original chronological position.
+            let recovery_pending = {
+                let recovery = sess.history_recovery.lock().await;
+                recovery.invalid
+                    || (recovery.archive_id.is_some()
+                        && (!recovery.committed
+                            || !recovery
+                                .cursor
+                                .as_ref()
+                                .is_some_and(|cursor| cursor.completed)
+                            || recovery.in_flight.is_some()))
+            };
+            if !recovery_pending {
+                run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+            }
             return Err(err);
         }
         if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
@@ -1021,8 +1038,41 @@ async fn run_pre_sampling_compact(
     cancellation_token: &CancellationToken,
     pending_input: &[TurnInput],
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
+    let recovery_pending = {
+        let recovery = sess.history_recovery.lock().await;
+        recovery.invalid
+            || (recovery.archive_id.is_some()
+                && (!recovery.committed
+                    || !recovery
+                        .cursor
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.completed)
+                    || recovery.in_flight.is_some()))
+    };
+    let _recovery_guard = recovery_pending.then(|| {
+        sess.history_recovery_running
+            .store(true, std::sync::atomic::Ordering::Release);
+        super::history_recovery::RecoveryRunningGuard(Arc::clone(sess))
+    });
+    if recovery_pending {
+        let explicit_user_turn = pending_input.iter().any(|input| {
+            matches!(input,
+            TurnInput::UserInput { content, .. } if !content.is_empty())
+        });
+        if explicit_user_turn {
+            sess.continue_history_recovery_compaction(&turn_context.sub_id)
+                .await?;
+        }
+        hydrate_owed_history(sess, turn_context, client_session, cancellation_token).await?;
+    } else {
+        maybe_run_previous_model_inline_compact(
+            sess,
+            turn_context,
+            client_session,
+            cancellation_token,
+        )
         .await?;
+    }
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -1052,7 +1102,25 @@ async fn run_pre_sampling_compact(
         && !sess.clone_history().await.raw_items().is_empty();
     let pending_reaches_limit =
         can_make_room_for_pending && token_status.reaches_limit_with_pending_input(pending_tokens);
-    if token_status.token_limit_reached || pending_reaches_limit {
+    let recovery_media_full = recovery_pending && {
+        let pending_items: Vec<ResponseItem> = pending_input
+            .iter()
+            .map(|input| match input {
+                TurnInput::UserInput { content, .. } => {
+                    ResponseItem::from(ResponseInputItem::from(content.clone()))
+                }
+                TurnInput::ResponseItem(item) => item.clone(),
+                TurnInput::InterAgentCommunication(communication) => {
+                    communication.to_model_input_item()
+                }
+            })
+            .collect();
+        !super::history_recovery::fits_request_media(
+            sess.clone_history().await.raw_items(),
+            &pending_items,
+        )
+    };
+    if token_status.token_limit_reached || pending_reaches_limit || recovery_media_full {
         // Pre-turn compaction runs before run_turn creates the normal sampling step.
         let step_context = sess
             .capture_step_context(Arc::clone(turn_context), cancellation_token)
@@ -1069,6 +1137,132 @@ async fn run_pre_sampling_compact(
         .await?;
     }
     Ok(())
+}
+
+/// Restore only a bounded model-visible portion at a time. The original
+/// archive and every persisted prefix remain in the same account-owned rollout.
+async fn hydrate_owed_history(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    client_session: &mut ModelClientSession,
+    cancellation_token: &CancellationToken,
+) -> CodexResult<()> {
+    use super::history_recovery::{RecoveryPartKind, fitting_text_prefix, invalid, response_item};
+    // Any append accepted before a transport/flush error must reach durable
+    // storage before recovery can buy a compaction or a new model response.
+    sess.flush_rollout().await?;
+    // A brand-new runtime has no provider token receipt yet. Account for its
+    // actual base instructions before choosing the first source prefix.
+    sess.recompute_token_usage(turn_context).await;
+    let mut compaction_cursor = None;
+    let mut compactions_without_source_progress = 0;
+    loop {
+        if cancellation_token.is_cancelled() {
+            return Err(CodexErr::TurnAborted);
+        }
+        let next = {
+            let mut recovery = sess.history_recovery.lock().await;
+            if recovery.invalid || !recovery.committed {
+                return Err(invalid(
+                    "Stored conversation history has not finished transferring. Nothing was sent to a model.",
+                ));
+            }
+            if recovery.in_flight.is_some() {
+                return Err(invalid(
+                    "History restoration stopped before its compaction result was saved. Your original history is intact; send a new message to continue with a new Usage-authorized attempt.",
+                ));
+            }
+            match recovery.next_record()? {
+                Some((record, next_offset)) => Some((
+                    record,
+                    next_offset,
+                    recovery.cursor.clone().expect("verified recovery cursor"),
+                )),
+                None => {
+                    if let Some(cursor) = &mut recovery.cursor {
+                        cursor.completed = true;
+                    }
+                    None
+                }
+            }
+        };
+        let Some((record, next_offset, mut cursor)) = next else {
+            return Ok(());
+        };
+        let status = super::context_window::context_window_token_status(
+            sess.as_ref(),
+            turn_context.as_ref(),
+        )
+        .await;
+        let room = status.base_window_tokens_remaining.ok_or_else(|| {
+            invalid("The selected model has no verified context window for history restoration")
+        })?;
+        if record.kind == RecoveryPartKind::Image
+            && !turn_context
+                .model_info
+                .input_modalities
+                .contains(&whisply_protocol::openai_models::InputModality::Image)
+        {
+            return Err(invalid(
+                "The selected model cannot read images in this saved conversation. The original images are intact; choose a model with image input to restore it.",
+            ));
+        }
+        let start = usize::try_from(cursor.text_offset)
+            .map_err(|_| invalid("Invalid stored history cursor"))?;
+        let remainder = &record.value[start..];
+        let taken = match record.kind {
+            RecoveryPartKind::Text => fitting_text_prefix(&record, remainder, room),
+            RecoveryPartKind::Image => {
+                let cost = estimate_item_token_count(&response_item(&record, remainder.to_owned()));
+                if cost < room { remainder.len() } else { 0 }
+            }
+        };
+        let history = sess.clone_history().await;
+        let fits_media = taken > 0
+            && super::history_recovery::fits_request_media(
+                history.raw_items(),
+                &[response_item(&record, remainder[..taken].to_owned())],
+            );
+        if !fits_media {
+            if history.raw_items().is_empty() {
+                return Err(CodexErr::ContextWindowExceeded);
+            }
+            let position = (cursor.record_offset, cursor.text_offset);
+            if compaction_cursor == Some(position) {
+                compactions_without_source_progress += 1;
+            } else {
+                compaction_cursor = Some(position);
+                compactions_without_source_progress = 0;
+            }
+            if compactions_without_source_progress >= MAX_UNPRODUCTIVE_AUTO_COMPACTIONS {
+                return Err(CodexErr::ContextWindowExceeded);
+            }
+            let step_context = sess
+                .capture_step_context(Arc::clone(turn_context), cancellation_token)
+                .await?;
+            run_auto_compact(
+                sess,
+                step_context,
+                None,
+                client_session,
+                InitialContextInjection::DoNotInject,
+                CompactionReason::ContextLimit,
+                CompactionPhase::PreTurn,
+            )
+            .await?;
+            continue;
+        }
+        let item = response_item(&record, remainder[..taken].to_owned());
+        if start + taken == record.value.len() {
+            cursor.record_offset = next_offset;
+            cursor.text_offset = 0;
+        } else {
+            cursor.text_offset = (start + taken) as u64;
+        }
+        cursor.completed = false;
+        sess.append_history_recovery_item(turn_context.as_ref(), item, cursor)
+            .await?;
+    }
 }
 
 /// Returns true only when both turns declare compaction compatibility hashes and they differ.
@@ -1249,7 +1443,23 @@ async fn run_auto_compact(
     let turn_context = Arc::clone(&step_context.turn);
     // Boxed: the compaction paths carry large futures, and nesting one inside
     // this accounting frame is enough to overflow a worker stack.
-    Box::pin(run_auto_compact_attempt(
+    let recovering = sess
+        .history_recovery_running
+        .load(std::sync::atomic::Ordering::Acquire);
+    if recovering {
+        let status = super::context_window::context_window_token_status(sess, &turn_context).await;
+        if status.full_context_window_limit_reached
+            || !super::history_recovery::fits_request_media(
+                sess.clone_history().await.raw_items(),
+                &[],
+            )
+        {
+            return Err(CodexErr::ContextWindowExceeded);
+        }
+        sess.begin_history_recovery_compaction(&turn_context.sub_id)
+            .await?;
+    }
+    let result = Box::pin(run_auto_compact_attempt(
         sess,
         step_context,
         fallback_step_context,
@@ -1258,7 +1468,23 @@ async fn run_auto_compact(
         reason,
         phase,
     ))
-    .await?;
+    .await;
+    if let Err(error) = result {
+        if recovering
+            && matches!(
+                error.details(),
+                CodexErrorDetails::ContextWindowExceeded
+                    | CodexErrorDetails::SessionBudgetExceeded
+                    | CodexErrorDetails::UsageLimitReached(_)
+                    | CodexErrorDetails::QuotaExceeded
+                    | CodexErrorDetails::UsageNotIncluded
+                    | CodexErrorDetails::InvalidImageRequest()
+            )
+        {
+            sess.reject_history_recovery_compaction().await?;
+        }
+        return Err(error);
+    }
     // Read after the shortened history is installed and re-measured, so this
     // is the same question the loop is about to ask again.
     let status =
@@ -1284,6 +1510,22 @@ async fn run_auto_compact_attempt(
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
+    if sess
+        .history_recovery_running
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        // Use the existing normal provider-backed summarizer. The token-budget
+        // reset and remote fallback trimming paths may discard old input that
+        // has never been sampled, which cannot complete a history recovery.
+        return run_inline_auto_compact_task(
+            Arc::clone(sess),
+            Arc::clone(turn_context),
+            initial_context_injection,
+            reason,
+            phase,
+        )
+        .await;
+    }
     if turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
@@ -2694,6 +2936,7 @@ async fn try_run_sampling_request(
                 response_id,
                 token_usage,
                 end_turn,
+                ..
             } => {
                 sess.services
                     .analytics_events_client

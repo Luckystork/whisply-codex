@@ -889,6 +889,7 @@ mod tests {
                     codex_rollout_budget_units: None,
                 }),
                 end_turn: Some(true),
+                whisply_browser_receipt: None,
             }),
         ]);
 

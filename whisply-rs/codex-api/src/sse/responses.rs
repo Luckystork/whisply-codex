@@ -128,6 +128,8 @@ struct ResponseCompleted {
     usage: Option<ResponseCompletedUsage>,
     #[serde(default)]
     end_turn: Option<bool>,
+    #[serde(default)]
+    whisply_browser_receipt: Option<crate::common::WhisplyBrowserReceipt>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -460,6 +462,7 @@ pub fn process_responses_event(
                             response_id: resp.id,
                             token_usage: resp.usage.map(Into::into),
                             end_turn: resp.end_turn,
+                            whisply_browser_receipt: resp.whisply_browser_receipt,
                         }));
                     }
                     Err(err) => {
@@ -916,6 +919,7 @@ mod tests {
                 response_id,
                 token_usage,
                 end_turn,
+                ..
             }) => {
                 assert_eq!(response_id, "resp1");
                 assert!(token_usage.is_none());
@@ -952,6 +956,28 @@ mod tests {
                 codex_rollout_budget_units: serde_json::Number::from_f64(2.5),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn parses_gateway_browser_receipt_from_shared_responses_wire_fixture() {
+        let wire = include_bytes!(
+            "../../../whisply-runtime/fixtures/browser-runtime-settled-response-v1.sse"
+        );
+        let events = collect_events(&[wire.as_slice()]).await;
+        assert_eq!(events.len(), 3);
+        let Ok(ResponseEvent::Completed {
+            whisply_browser_receipt: Some(receipt),
+            token_usage: Some(usage),
+            ..
+        }) = &events[2]
+        else {
+            panic!("the gateway receipt must remain typed terminal metadata");
+        };
+        assert_eq!(receipt.status, "settled");
+        assert_eq!(receipt.component_id, "70000000-0000-4000-8000-000000000007");
+        assert_eq!(receipt.receipt_id, "80000000-0000-4000-8000-000000000008");
+        assert_eq!(usage.total_tokens, 64);
+        assert!(!format!("{receipt:?}").contains(&receipt.receipt_id));
     }
 
     #[tokio::test]
@@ -1112,6 +1138,7 @@ mod tests {
                 response_id,
                 token_usage,
                 end_turn,
+                ..
             }) => {
                 assert_eq!(response_id, "resp1");
                 assert!(token_usage.is_none());
@@ -1565,6 +1592,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 end_turn: None,
+                whisply_browser_receipt: None,
             } if response_id == "resp-1"
         );
     }
@@ -1602,6 +1630,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 end_turn: None,
+                whisply_browser_receipt: None,
             } if response_id == "resp-1"
         );
     }
@@ -1637,6 +1666,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 end_turn: None,
+                whisply_browser_receipt: None,
             } if response_id == "resp-1"
         );
     }
@@ -1672,6 +1702,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 end_turn: None,
+                whisply_browser_receipt: None,
             } if response_id == "resp-1"
         );
     }

@@ -9,6 +9,7 @@ pub(crate) struct CatalogRequestProcessor {
     pub(super) thread_manager: Arc<ThreadManager>,
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
+    pub(super) browser_samples: super::browser_sampling::BrowserSampleRegistry,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -112,6 +113,7 @@ impl CatalogRequestProcessor {
             thread_manager,
             config,
             config_manager,
+            browser_samples: Default::default(),
         }
     }
 

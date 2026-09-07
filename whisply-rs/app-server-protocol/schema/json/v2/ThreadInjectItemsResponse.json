@@ -1,5 +1,50 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "WhisplyHistoryRecoveryReceipt": {
+      "properties": {
+        "acceptedBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "archiveId": {
+          "type": "string"
+        },
+        "archiveSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "committed": {
+          "type": "boolean"
+        },
+        "hydrated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "acceptedBytes",
+        "archiveId",
+        "committed",
+        "hydrated"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "whisplyHistoryRecovery": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WhisplyHistoryRecoveryReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
   "title": "ThreadInjectItemsResponse",
   "type": "object"
 }

@@ -90,6 +90,7 @@ pub enum BrokerOperation {
     AuthSwitch,
     RuntimeDescriptors,
     ExamTurnProof,
+    BrowserStepProof,
     AccountUsageRead,
     AccountConnectionsRead,
     HostControlsSnapshot,
@@ -109,6 +110,7 @@ impl BrokerOperation {
             Self::AuthSwitch => "auth.switch",
             Self::RuntimeDescriptors => "runtime.descriptors",
             Self::ExamTurnProof => "exam.turn.proof",
+            Self::BrowserStepProof => "browser.step.proof",
             Self::AccountUsageRead => "account.usage.read",
             Self::AccountConnectionsRead => "account.connections.read",
             Self::HostControlsSnapshot => "host.controls.snapshot",
@@ -957,6 +959,130 @@ pub struct RuntimeExamProof {
     installation_id: String,
     expires_at_ms: i64,
 }
+
+/// Private one-step authority obtained from the authenticated native broker.
+/// This is not serializable into a model request or generic metadata.
+pub struct RuntimeBrowserStepProof {
+    account_id: String,
+    installation_id: String,
+    task_id: String,
+    component_id: String,
+    request_id: String,
+    lease_token: Zeroizing<String>,
+    payload_digest: String,
+    expires_at_ms: i64,
+}
+
+impl fmt::Debug for RuntimeBrowserStepProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeBrowserStepProof([REDACTED])")
+    }
+}
+
+impl RuntimeBrowserStepProof {
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+    pub fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+    pub fn component_id(&self) -> &str {
+        &self.component_id
+    }
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+    pub fn payload_digest(&self) -> &str {
+        &self.payload_digest
+    }
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+    pub fn is_current(&self) -> bool {
+        now_unix_ms().is_ok_and(|now| now < self.expires_at_ms)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserStepProofDescriptor {
+    schema_version: u8,
+    #[serde(rename = "accountID")]
+    account_id: String,
+    #[serde(rename = "installationID")]
+    installation_id: String,
+    #[serde(rename = "taskID")]
+    task_id: String,
+    #[serde(rename = "componentID")]
+    component_id: String,
+    #[serde(rename = "requestID")]
+    request_id: String,
+    execution_lease_token: String,
+    payload_digest: String,
+    #[serde(rename = "expiresAtMS")]
+    expires_at_ms: i64,
+}
+
+fn parse_browser_step_proof(bytes: &[u8]) -> Result<RuntimeBrowserStepProof, BrokerError> {
+    parse_browser_step_proof_at(
+        bytes,
+        now_unix_ms().map_err(|_| BrokerError::InvalidMessage)?,
+    )
+}
+
+fn parse_browser_step_proof_at(
+    bytes: &[u8],
+    now_ms: i64,
+) -> Result<RuntimeBrowserStepProof, BrokerError> {
+    if bytes.len() > 1_024 {
+        return Err(BrokerError::InvalidMessage);
+    }
+    let mut value: BrowserStepProofDescriptor = deserialize_payload(bytes)?;
+    let lease_token = Zeroizing::new(std::mem::take(&mut value.execution_lease_token));
+    let ids = [
+        &value.account_id,
+        &value.installation_id,
+        &value.task_id,
+        &value.component_id,
+        &value.request_id,
+    ];
+    if value.schema_version != 1
+        || now_ms < 0
+        || ids
+            .into_iter()
+            .any(|raw| !Uuid::parse_str(raw).is_ok_and(|id| !id.is_nil() && id.to_string() == *raw))
+        || !(32..=512).contains(&lease_token.len())
+        || !lease_token.bytes().all(|byte| (33..=126).contains(&byte))
+        || value.payload_digest.len() != 64
+        || !value
+            .payload_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || value.expires_at_ms <= now_ms
+        || value.expires_at_ms
+            > now_ms
+                .checked_add(1_800_000)
+                .ok_or(BrokerError::InvalidMessage)?
+    {
+        return Err(BrokerError::InvalidMessage);
+    }
+    Ok(RuntimeBrowserStepProof {
+        account_id: value.account_id,
+        installation_id: value.installation_id,
+        task_id: value.task_id,
+        component_id: value.component_id,
+        request_id: value.request_id,
+        lease_token,
+        payload_digest: value.payload_digest,
+        expires_at_ms: value.expires_at_ms,
+    })
+}
 impl fmt::Debug for RuntimeExamProof {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RuntimeExamProof([REDACTED])")
@@ -1071,6 +1197,38 @@ impl fmt::Debug for ManagedGatewayClient {
 }
 
 impl ManagedGatewayClient {
+    /// Retrieves one compact task/component proof for this exact runtime.
+    /// The large immutable model payload is carried separately by app-server.
+    pub fn browser_step_proof(
+        &self,
+        reference: Uuid,
+    ) -> Result<RuntimeBrowserStepProof, ManagedGatewayError> {
+        if reference.get_version_num() != 4 {
+            return Err(BrokerError::InvalidMessage.into());
+        }
+        let snapshot = self.ensure_fresh()?;
+        let epoch = snapshot
+            .account_epoch()
+            .ok_or(BrokerError::InvalidMessage)?;
+        let response = self.broker.call(
+            BrokerOperation::BrowserStepProof,
+            Some(epoch),
+            &serde_json::json!({ "reference": reference }),
+        )?;
+        if response.metadata.account_epoch.as_deref() != Some(epoch) || !response.payload.is_empty()
+        {
+            return Err(BrokerError::InvalidMessage.into());
+        }
+        let [descriptor]: [std::os::fd::OwnedFd; 1] = response
+            .fds
+            .try_into()
+            .map_err(|_| BrokerError::InvalidMessage)?;
+        // Reuse the existing bounded closed-pipe reader and its unclosed-
+        // writer timeout; no larger secret payload or descriptor is accepted.
+        let bytes = read_exam_proof_pipe(descriptor)?;
+        parse_browser_step_proof(&bytes).map_err(Into::into)
+    }
+
     /// Called only for an explicit reference. Ordinary Mac/Workspace/CLI work
     /// acquires no new broker or funding dependency.
     pub fn exam_turn_proof(
@@ -1697,7 +1855,10 @@ fn validate_response_envelope(
                 {
                     return Err(BrokerError::InvalidMessage);
                 }
-            } else if operation == BrokerOperation::ExamTurnProof {
+            } else if matches!(
+                operation,
+                BrokerOperation::ExamTurnProof | BrokerOperation::BrowserStepProof
+            ) {
                 if fds.len() != 1
                     || !payload.is_empty()
                     || !matches!(response.account_epoch.as_deref(), Some(value) if validate_account_epoch(value).is_ok())

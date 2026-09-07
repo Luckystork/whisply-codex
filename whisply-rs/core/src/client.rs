@@ -24,6 +24,8 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 use std::collections::HashMap;
+#[path = "client_browser.rs"]
+mod browser_request;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -287,6 +289,7 @@ pub struct ModelClient {
 /// contract and can cause routing bugs.
 pub struct ModelClientSession {
     client: ModelClient,
+    browser_request: Option<Arc<codex_whisply::ValidatedBrowserSamplingRequest>>,
     websocket_session: WebsocketSession,
     /// Turn state for sticky routing.
     ///
@@ -543,9 +546,22 @@ impl ModelClient {
     pub fn new_session(&self) -> ModelClientSession {
         ModelClientSession {
             client: self.clone(),
+            browser_request: None,
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub fn new_browser_session(
+        &self,
+        request: Arc<codex_whisply::ValidatedBrowserSamplingRequest>,
+    ) -> Result<ModelClientSession> {
+        if !self.is_whisply_direct_provider() || !request.proof().is_current() {
+            return Err(crate::browser_sampling::invalid_browser_request());
+        }
+        let mut session = self.new_session();
+        session.browser_request = Some(request);
+        Ok(session)
     }
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
@@ -1643,7 +1659,21 @@ impl ModelClientSession {
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
-            let stream_result = client.stream_request(request, options).await;
+            let stream_result = if let Some(browser) = self.browser_request.as_ref() {
+                let body =
+                    self.browser_request_body(&request, prompt, browser, responses_metadata)?;
+                self.add_browser_request_headers(&mut options.extra_headers, browser)?;
+                client
+                    .stream(
+                        body,
+                        options.extra_headers,
+                        options.compression,
+                        options.turn_state,
+                    )
+                    .await
+            } else {
+                client.stream_request(request, options).await
+            };
 
             match stream_result {
                 Ok(stream) => {
@@ -1993,6 +2023,23 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        if self.browser_request.is_some() {
+            if !prompt.tools.is_empty() || model_info.use_responses_lite {
+                return Err(crate::browser_sampling::invalid_browser_request());
+            }
+            return self
+                .stream_responses_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await;
+        }
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -2194,6 +2241,7 @@ where
                     response_id,
                     token_usage,
                     end_turn,
+                    whisply_browser_receipt,
                 }) => {
                     feedback_tags!(last_model_response_id = &response_id);
                     if let Some(usage) = &token_usage {
@@ -2216,6 +2264,7 @@ where
                             response_id,
                             token_usage,
                             end_turn,
+                            whisply_browser_receipt,
                         }))
                         .await
                         .is_err()

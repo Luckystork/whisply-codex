@@ -942,6 +942,16 @@ client_request_definitions! {
         serialization: global_shared_read("whisply-model-catalog"),
         response: v2::WhisplyModelCatalogReadResponse,
     },
+    WhisplyBrowserSample => "whisply/browser/sample" {
+        params: v2::WhisplyBrowserSampleParams,
+        serialization: None,
+        response: v2::WhisplyBrowserSampleResponse,
+    },
+    WhisplyBrowserCancel => "whisply/browser/cancel" {
+        params: v2::WhisplyBrowserCancelParams,
+        serialization: None,
+        response: v2::WhisplyBrowserCancelResponse,
+    },
     WhisplyPromptCompositionRead => "whisply/promptComposition/read" {
         params: v2::WhisplyPromptCompositionReadParams,
         serialization: None,

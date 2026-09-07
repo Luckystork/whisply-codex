@@ -81,6 +81,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::WhisplyHistoryRecovery(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::EventMsg(_) => ThreadHistoryChangeSet::default(),
     }

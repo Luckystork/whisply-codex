@@ -5,6 +5,9 @@ use anyhow::Result;
 use app_test_support::ManagedWhisplyConfig;
 use app_test_support::ManagedWhisplyGatewayFixture;
 use app_test_support::TestAppServer;
+use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::InitializeCapabilities;
+use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ThreadInjectItemsParams;
 use codex_app_server_protocol::ThreadInjectItemsResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -26,6 +29,29 @@ use whisply_protocol::protocol::RolloutItem;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+async fn initialize_stable(mcp: &mut TestAppServer) -> Result<()> {
+    let initialized = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.initialize_with_capabilities(
+            ClientInfo {
+                name: "whisply-history-stable-test".to_owned(),
+                title: None,
+                version: "0.1.0".to_owned(),
+            },
+            Some(InitializeCapabilities {
+                experimental_api: false,
+                ..Default::default()
+            }),
+        ),
+    )
+    .await??;
+    anyhow::ensure!(
+        matches!(initialized, JSONRPCMessage::Response(_)),
+        "stable history initialization failed"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -43,11 +69,14 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_managed_whisply_gateway(managed_gateway)
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .build()
         .await?;
+    initialize_stable(&mut mcp).await?;
 
+    // The automatic-environment helper adds an experimental request field;
+    // the shipping Mac sends ordinary thread/start with that field omitted.
     let thread_req = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams {
+        .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -68,6 +97,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
 
     let inject_req = mcp
         .send_thread_inject_items_request(ThreadInjectItemsParams {
+            whisply_history_recovery: None,
             thread_id: thread.id.clone(),
             items: vec![serde_json::to_value(&injected_item)?],
         })
@@ -156,11 +186,12 @@ async fn thread_inject_items_adds_raw_response_items_after_a_turn() -> Result<()
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_managed_whisply_gateway(managed_gateway)
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .build()
         .await?;
+    initialize_stable(&mut mcp).await?;
 
     let thread_req = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams {
+        .send_thread_start_request(ThreadStartParams {
             model: Some("mock-model".to_string()),
             ..Default::default()
         })
@@ -200,6 +231,7 @@ async fn thread_inject_items_adds_raw_response_items_after_a_turn() -> Result<()
 
     let inject_req = mcp
         .send_thread_inject_items_request(ThreadInjectItemsParams {
+            whisply_history_recovery: None,
             thread_id: thread.id.clone(),
             items: vec![injected_value.clone()],
         })
@@ -261,4 +293,135 @@ fn response_item_text_position(items: &[Value], needle: &str) -> Option<usize> {
                     .is_some_and(|text| text.contains(needle))
             })
     })
+}
+
+#[tokio::test]
+async fn thread_inject_items_restores_whisply_history_with_stable_typed_receipts() -> Result<()> {
+    use base64::Engine;
+    use codex_app_server_protocol::RequestId;
+    use sha2::{Digest, Sha256};
+    use whisply_protocol::protocol::{WhisplyHistoryRecoveryFrame, WhisplyHistoryRecoveryRecord};
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_assistant_message("restored-answer", "Recovered"),
+            responses::ev_completed("restored-response"),
+        ]),
+    )
+    .await;
+    let home = TempDir::new()?;
+    ManagedWhisplyConfig::new().write(home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_managed_whisply_gateway(ManagedWhisplyGatewayFixture::new(&server.uri())?)
+        .build()
+        .await?;
+    initialize_stable(&mut mcp).await?;
+    let request = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_owned()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request)).await??;
+    let old = "original saved history ".repeat(700);
+    let mut bytes =
+        serde_json::to_vec(&serde_json::json!({"speaker":"user","kind":"text","value":old}))?;
+    bytes.push(b'\n');
+    let frame = WhisplyHistoryRecoveryFrame {
+        archive_id: "a".repeat(64),
+        offset: 0,
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        final_byte_count: Some(bytes.len() as u64),
+        final_sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+    };
+    for _ in 0..2 {
+        let request = mcp
+            .send_thread_inject_items_request(ThreadInjectItemsParams {
+                thread_id: thread.id.clone(),
+                items: Vec::new(),
+                whisply_history_recovery: Some(frame.clone()),
+            })
+            .await?;
+        let receipt: ThreadInjectItemsResponse =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request)).await??;
+        let receipt = receipt
+            .whisply_history_recovery
+            .context("typed recovery receipt")?;
+        assert!(receipt.committed && !receipt.hydrated);
+        assert_eq!(receipt.accepted_bytes, bytes.len() as u64);
+    }
+    assert!(
+        response_mock.requests().is_empty(),
+        "transferring stored history cannot buy a model response"
+    );
+    let rollout = RolloutRecorder::get_rollout_history(thread.path.as_ref().unwrap()).await?;
+    let InitialHistory::Resumed(rollout) = rollout else {
+        unreachable!()
+    };
+    assert_eq!(
+        rollout
+            .history
+            .iter()
+            .filter(|item| matches!(
+                item,
+                RolloutItem::WhisplyHistoryRecovery(WhisplyHistoryRecoveryRecord::Frame { .. })
+            ))
+            .count(),
+        1
+    );
+    let invalid = mcp.send_thread_inject_items_request(ThreadInjectItemsParams {
+        thread_id: thread.id.clone(), items: vec![serde_json::json!({"type":"message","role":"developer","content":[{"type":"input_text","text":"never promote this"}]})],
+        whisply_history_recovery: Some(frame.clone()),
+    }).await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    let turn = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "FRESH_AFTER_STORED_HISTORY".to_owned(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let _: TurnStartResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let request = response_mock.single_request();
+    let texts = request.message_input_texts("user");
+    assert_eq!(texts.iter().filter(|text| **text == old).count(), 1);
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.as_str() == "FRESH_AFTER_STORED_HISTORY")
+            .count(),
+        1
+    );
+    let mut other = frame;
+    other.archive_id = "b".repeat(64);
+    let changed = mcp
+        .send_thread_inject_items_request(ThreadInjectItemsParams {
+            thread_id: thread.id,
+            items: Vec::new(),
+            whisply_history_recovery: Some(other),
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(changed)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    Ok(())
 }

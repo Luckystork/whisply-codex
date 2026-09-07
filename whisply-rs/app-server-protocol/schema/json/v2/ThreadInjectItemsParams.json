@@ -1,5 +1,44 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "WhisplyHistoryRecoveryFrame": {
+      "additionalProperties": false,
+      "description": "One bounded transfer frame for a product conversation that a new runtime thread has never seen. This moves stored data; it never starts model work.",
+      "properties": {
+        "archiveId": {
+          "type": "string"
+        },
+        "dataBase64": {
+          "type": "string"
+        },
+        "finalByteCount": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "finalSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "archiveId",
+        "dataBase64",
+        "offset"
+      ],
+      "type": "object"
+    }
+  },
   "properties": {
     "items": {
       "description": "Raw Responses API items to append to the thread's model-visible history.",
@@ -8,6 +47,17 @@
     },
     "threadId": {
       "type": "string"
+    },
+    "whisplyHistoryRecovery": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WhisplyHistoryRecoveryFrame"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Whisply's bounded, idle-only stored-history recovery transfer. When present, `items` must be empty; only the next normal user turn hydrates the durable archive using normal model/Usage/compaction authority."
     }
   },
   "required": [

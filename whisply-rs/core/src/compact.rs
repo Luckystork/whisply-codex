@@ -311,6 +311,15 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
+                if sess
+                    .history_recovery_running
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    // These source records have not been summarized yet. A
+                    // recovery may stop with its archive intact, never discard
+                    // unseen older content merely to make a request fit.
+                    return Err(e);
+                }
                 if turn_input_len > 1 {
                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
                     error!(
@@ -327,6 +336,12 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) => {
+                if sess
+                    .history_recovery_running
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return Err(e);
+                }
                 if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
@@ -352,7 +367,17 @@ async fn run_compact_task_inner_impl(
     let history_items = history_snapshot.raw_items();
     let summary_suffix = get_last_assistant_message_from_turn(history_items).unwrap_or_default();
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-    let user_messages = collect_user_messages(history_items);
+    // Every recovered prefix has just been sampled by this summary and its
+    // raw archive remains persistent. Repeating the normal raw user tail can
+    // itself exceed the next request's media/item limits on long imports.
+    let user_messages = if sess
+        .history_recovery_running
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        Vec::new()
+    } else {
+        collect_user_messages(history_items)
+    };
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
     if let Some(summary_item) = new_history.last_mut() {
@@ -714,6 +739,10 @@ async fn drain_to_completed(
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
 ) -> CodexResult<()> {
+    let recovery = sess
+        .history_recovery_running
+        .load(std::sync::atomic::Ordering::Acquire);
+    let mut recovery_output = Vec::new();
     let mut stream = client_session
         .stream(
             prompt,
@@ -737,8 +766,12 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
+                if recovery {
+                    recovery_output.push(item);
+                } else {
+                    sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
+                        .await;
+                }
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -751,6 +784,16 @@ async fn drain_to_completed(
                 token_usage,
                 ..
             }) => {
+                // A completed response without a usable summary must never
+                // re-label the last archived assistant answer as its summary.
+                let missing_recovery_summary = recovery
+                    && get_last_assistant_message_from_turn(&recovery_output)
+                        .is_none_or(|text| text.trim().is_empty());
+                // Partial failed output is not evidence for a later attempt.
+                if recovery && !missing_recovery_summary {
+                    sess.record_conversation_items(turn_context, &recovery_output)
+                        .await;
+                }
                 sess.send_event(
                     turn_context,
                     EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
@@ -761,6 +804,9 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await?;
+                if missing_recovery_summary {
+                    return Err(CodexErr::Stream("History compaction completed without a usable summary. The saved source is intact.".to_owned()));
+                }
                 return Ok(());
             }
             Ok(_) => continue,

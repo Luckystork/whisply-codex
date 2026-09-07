@@ -622,3 +622,125 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         ..Default::default()
     })
 }
+
+#[tokio::test]
+async fn whisply_history_recovery_keeps_pending_archive_across_bounded_resume_and_fork() {
+    use whisply_protocol::protocol::{
+        WhisplyHistoryRecoveryCursor, WhisplyHistoryRecoveryFrame, WhisplyHistoryRecoveryRecord,
+    };
+    let home = TempDir::new().unwrap();
+    let uuid = Uuid::from_u128(1080);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).unwrap();
+    let archive = RolloutItem::WhisplyHistoryRecovery(WhisplyHistoryRecoveryRecord::Frame {
+        frame: WhisplyHistoryRecoveryFrame {
+            archive_id: "a".repeat(64),
+            offset: 0,
+            data_base64: "eyJzcGVha2VyIjoidXNlciIsImtpbmQiOiJ0ZXh0IiwidmFsdWUiOiJzb3VyY2UifQo="
+                .to_owned(),
+            final_byte_count: Some(50),
+            final_sha256: Some(
+                "d64fa4ad28f63fbae02d7d3a53faacfdf2d8890c45103c0d47e1b345975fb07d".to_owned(),
+            ),
+        },
+    });
+    let mut checkpoint = compacted("partial recovery", Some(Vec::new()));
+    let RolloutItem::Compacted(value) = &mut checkpoint else {
+        unreachable!()
+    };
+    value.whisply_history_recovery = Some(WhisplyHistoryRecoveryCursor {
+        archive_id: "a".repeat(64),
+        record_offset: 0,
+        text_offset: 3,
+        completed: false,
+        compaction_id: Some("saved-attempt".to_owned()),
+    });
+    let path = write_ordinaled_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-01-00",
+        uuid,
+        [
+            archive.clone(),
+            turn_started("recovery-turn"),
+            user_message("visible user"),
+            completed_user_message("recovery-turn", "visible user"),
+            turn_context(home.path(), "recovery-turn"),
+            checkpoint,
+            turn_complete("recovery-turn"),
+        ],
+    );
+    let history_base = history_position(&path, thread_id, 8);
+    let store = LocalThreadStore::new(test_config(home.path()), None);
+    let resumed = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        resumed
+            .items
+            .iter()
+            .any(|item| serde_json::to_value(item).unwrap()
+                == serde_json::to_value(&archive).unwrap())
+    );
+    append_items(&path, [user_message("after frozen fork")]);
+    let lineage = store.resolve_rollout_lineage(thread_id).await.unwrap();
+    let fork = load_for_fork(lineage, Some(history_base)).await.unwrap();
+    assert!(
+        fork.iter()
+            .any(|item| matches!(item, RolloutItem::WhisplyHistoryRecovery(_)))
+    );
+    assert!(
+        !serde_json::to_string(&fork)
+            .unwrap()
+            .contains("after frozen fork")
+    );
+}
+
+#[tokio::test]
+async fn whisply_completed_history_recovery_retains_normal_bounded_resume() {
+    use whisply_protocol::protocol::WhisplyHistoryRecoveryCursor;
+    let home = TempDir::new().unwrap();
+    let uuid = Uuid::from_u128(1081);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).unwrap();
+    let mut checkpoint = compacted("completed recovery", Some(Vec::new()));
+    let RolloutItem::Compacted(value) = &mut checkpoint else {
+        unreachable!()
+    };
+    value.whisply_history_recovery = Some(WhisplyHistoryRecoveryCursor {
+        archive_id: "a".repeat(64),
+        record_offset: 1024,
+        text_offset: 0,
+        completed: true,
+        compaction_id: Some("done".to_owned()),
+    });
+    write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-01-01",
+        uuid,
+        [
+            user_message("old raw history is not needed by a completed model checkpoint"),
+            turn_started("turn"),
+            user_message("current user"),
+            completed_user_message("turn", "current user"),
+            turn_context(home.path(), "turn"),
+            checkpoint,
+            turn_complete("turn"),
+        ],
+    );
+    let store = LocalThreadStore::new(test_config(home.path()), None);
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&context.items)
+            .unwrap()
+            .contains("old raw history is not needed")
+    );
+    assert!(context.items.iter().any(|item| matches!(item, RolloutItem::Compacted(checkpoint) if checkpoint.whisply_history_recovery.as_ref().is_some_and(|cursor| cursor.completed))));
+}

@@ -1491,12 +1491,22 @@ pub struct ThreadInjectItemsParams {
     pub thread_id: String,
     /// Raw Responses API items to append to the thread's model-visible history.
     pub items: Vec<JsonValue>,
+    /// Whisply's bounded, idle-only stored-history recovery transfer. When
+    /// present, `items` must be empty; only the next normal user turn hydrates
+    /// the durable archive using normal model/Usage/compaction authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub whisply_history_recovery: Option<whisply_protocol::protocol::WhisplyHistoryRecoveryFrame>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
-pub struct ThreadInjectItemsResponse {}
+pub struct ThreadInjectItemsResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub whisply_history_recovery: Option<whisply_protocol::protocol::WhisplyHistoryRecoveryReceipt>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]

@@ -1,2 +1,4 @@
 whisply-rs/app-server-protocol/schema/** linguist-generated
 whisply-rs/hooks/schema/generated/** linguist-generated
+# SSE event termination includes a blank line; keep the exact shared wire bytes.
+whisply-rs/whisply-runtime/fixtures/browser-runtime-settled-response-v1.sse whitespace=-blank-at-eof

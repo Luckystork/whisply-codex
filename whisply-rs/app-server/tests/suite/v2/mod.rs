@@ -6,6 +6,8 @@ mod app_managed_authority;
 mod app_read;
 mod attestation;
 mod auto_env;
+#[cfg(target_os = "macos")]
+mod browser_sampling;
 mod client_metadata;
 mod code_mode_host;
 mod collaboration_mode_list;

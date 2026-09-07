@@ -515,6 +515,7 @@ use codex_app_server_protocol::ServerRequest;
 mod account_processor;
 mod apps_processor;
 mod bedrock_auth;
+mod browser_sampling;
 mod catalog_processor;
 mod command_exec_processor;
 mod config_processor;

@@ -1009,6 +1009,26 @@ impl TurnRequestProcessor {
         params: ThreadInjectItemsParams,
     ) -> Result<ThreadInjectItemsResponse, JSONRPCErrorError> {
         let (_, thread) = self.load_thread(&params.thread_id).await?;
+        if let Some(frame) = params.whisply_history_recovery {
+            if !params.items.is_empty() {
+                return Err(invalid_request(
+                    "Recovery frames cannot contain raw injected items",
+                ));
+            }
+            let receipt =
+                thread
+                    .recover_whisply_history(frame)
+                    .await
+                    .map_err(|err| match err.details() {
+                        CodexErrorDetails::InvalidRequest(message) => {
+                            invalid_request(message.clone())
+                        }
+                        _ => internal_error("Stored conversation history could not be persisted"),
+                    })?;
+            return Ok(ThreadInjectItemsResponse {
+                whisply_history_recovery: Some(receipt),
+            });
+        }
 
         let items = params
             .items
@@ -1029,7 +1049,9 @@ impl TurnRequestProcessor {
                 CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
                 _ => internal_error(format!("failed to inject response items: {err}")),
             })?;
-        Ok(ThreadInjectItemsResponse {})
+        Ok(ThreadInjectItemsResponse {
+            whisply_history_recovery: None,
+        })
     }
 
     async fn set_app_server_client_info(

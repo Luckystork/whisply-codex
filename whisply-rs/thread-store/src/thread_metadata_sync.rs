@@ -305,6 +305,7 @@ impl ThreadMetadataSync {
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
+                | RolloutItem::WhisplyHistoryRecovery(_)
                 | RolloutItem::WorldState(_) => {}
             }
         }

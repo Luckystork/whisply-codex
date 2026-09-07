@@ -1,0 +1,6 @@
+data: {"type":"response.created","response":{"id":"browser-receipt-v1"}}
+
+data: {"type":"response.output_item.done","item":{"id":"browser-decision","type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"verified\":true}"}]}}
+
+data: {"type":"response.completed","response":{"id":"browser-receipt-v1","usage":{"input_tokens":60,"input_tokens_details":null,"output_tokens":4,"output_tokens_details":null,"total_tokens":64},"whisply_browser_receipt":{"status":"settled","requestId":"25600000-0000-4000-8000-000000000001","componentId":"70000000-0000-4000-8000-000000000007","receiptId":"80000000-0000-4000-8000-000000000008"}}}
+

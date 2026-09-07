@@ -250,6 +250,7 @@ async fn persisted_originator(thread: &CodexThread) -> String {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::EventMsg(_)
             | RolloutItem::Compacted(_)
+            | RolloutItem::WhisplyHistoryRecovery(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::TurnContext(_) => None,
         })

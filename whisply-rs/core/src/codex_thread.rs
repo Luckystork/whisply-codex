@@ -591,6 +591,15 @@ impl CodexThread {
             .await;
     }
 
+    /// Transfer app-owned stored history while this newly mapped thread is
+    /// idle. Hydration and any paid compaction belong to the next real turn.
+    pub async fn recover_whisply_history(
+        &self,
+        frame: whisply_protocol::protocol::WhisplyHistoryRecoveryFrame,
+    ) -> CodexResult<whisply_protocol::protocol::WhisplyHistoryRecoveryReceipt> {
+        self.session.accept_history_recovery_frame(frame).await
+    }
+
     /// Record raw Responses API items without starting a new turn.
     pub async fn inject_response_items(&self, items: Vec<ResponseItem>) -> CodexResult<()> {
         if items.is_empty() {

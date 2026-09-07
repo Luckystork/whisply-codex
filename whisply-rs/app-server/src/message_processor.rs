@@ -744,6 +744,10 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
+        // Cancel detached Browser model calls before waiting for the caller's
+        // RPC permits to drain; their authority ends with this connection.
+        self.catalog_processor
+            .browser_connection_closed(connection_id);
         if timeout(
             CONNECTION_RPC_DRAIN_TIMEOUT,
             session_state.rpc_gate.shutdown(),
@@ -1320,6 +1324,16 @@ impl MessageProcessor {
             ClientRequest::WhisplyModelCatalogRead { params, .. } => {
                 self.catalog_processor
                     .whisply_model_catalog_read(params)
+                    .await
+            }
+            ClientRequest::WhisplyBrowserSample { params, .. } => {
+                self.catalog_processor
+                    .whisply_browser_sample(&request_id, params)
+                    .await
+            }
+            ClientRequest::WhisplyBrowserCancel { params, .. } => {
+                self.catalog_processor
+                    .whisply_browser_cancel(&request_id, params)
                     .await
             }
             ClientRequest::WhisplyPromptCompositionRead { params, .. } => {

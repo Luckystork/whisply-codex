@@ -653,6 +653,7 @@ async fn response_stream_records_last_model_feedback_ids() {
             response_id: "resp-123".to_string(),
             token_usage: None,
             end_turn: Some(true),
+            whisply_browser_receipt: None,
         }),
     ]);
     let (mut stream, _) = super::map_response_events(

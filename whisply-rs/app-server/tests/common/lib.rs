@@ -27,6 +27,8 @@ pub use core_test_support::test_tmp_path;
 pub use core_test_support::test_tmp_path_buf;
 pub use json_logging::app_server_json_shutdown_event;
 #[cfg(target_os = "macos")]
+pub use managed_whisply_gateway::BrowserStepFixtureControl;
+#[cfg(target_os = "macos")]
 pub use managed_whisply_gateway::InProcessManagedWhisplyGatewayFixture;
 #[cfg(target_os = "macos")]
 pub use managed_whisply_gateway::ManagedWhisplyGatewayFixture;

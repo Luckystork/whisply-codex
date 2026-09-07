@@ -1775,6 +1775,54 @@
             },
             "method": {
               "enum": [
+                "whisply/browser/sample"
+              ],
+              "title": "Whisply/browser/sampleRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/WhisplyBrowserSampleParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Whisply/browser/sampleRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "whisply/browser/cancel"
+              ],
+              "title": "Whisply/browser/cancelRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/WhisplyBrowserCancelParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Whisply/browser/cancelRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "whisply/promptComposition/read"
               ],
               "title": "Whisply/promptComposition/readRequestMethod",
@@ -20045,6 +20093,17 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "whisplyHistoryRecovery": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/WhisplyHistoryRecoveryFrame"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whisply's bounded, idle-only stored-history recovery transfer. When present, `items` must be empty; only the next normal user turn hydrates the durable archive using normal model/Usage/compaction authority."
           }
         },
         "required": [
@@ -20056,6 +20115,18 @@
       },
       "ThreadInjectItemsResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "whisplyHistoryRecovery": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/WhisplyHistoryRecoveryReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
         "title": "ThreadInjectItemsResponse",
         "type": "object"
       },
@@ -23471,6 +23542,159 @@
         },
         "type": "object"
       },
+      "WhisplyBrowserCancelParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "title": "WhisplyBrowserCancelParams",
+        "type": "object"
+      },
+      "WhisplyBrowserCancelResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "title": "WhisplyBrowserCancelResponse",
+        "type": "object"
+      },
+      "WhisplyBrowserReceiptStatus": {
+        "enum": [
+          "settled"
+        ],
+        "type": "string"
+      },
+      "WhisplyBrowserSampleParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "description": "The reference is resolved through the existing native broker for this runtime process. A matching digest is required before model sampling.",
+        "properties": {
+          "payload": {
+            "$ref": "#/definitions/v2/WhisplyBrowserSamplingPayload"
+          },
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "payload",
+          "reference"
+        ],
+        "title": "WhisplyBrowserSampleParams",
+        "type": "object"
+      },
+      "WhisplyBrowserSampleReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "receiptId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/WhisplyBrowserReceiptStatus"
+          }
+        },
+        "required": [
+          "receiptId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "WhisplyBrowserSampleResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "componentId": {
+            "type": "string"
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "outputJSON": {
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/definitions/v2/WhisplyBrowserSampleReceipt"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "componentId",
+          "modelId",
+          "outputJSON",
+          "receipt",
+          "requestId"
+        ],
+        "title": "WhisplyBrowserSampleResponse",
+        "type": "object"
+      },
+      "WhisplyBrowserSamplingPayload": {
+        "additionalProperties": false,
+        "description": "Browser-only model material. No task, account, lease or native command authority can be supplied through this payload.",
+        "properties": {
+          "inputJSON": {
+            "type": "string"
+          },
+          "maximumOutputTokens": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "outputSchemaJSON": {
+            "type": "string"
+          },
+          "purpose": {
+            "$ref": "#/definitions/v2/WhisplyBrowserSamplingPurpose"
+          },
+          "reasoningEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "systemPrompt": {
+            "type": "string"
+          },
+          "visualJPEGDataURL": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "inputJSON",
+          "maximumOutputTokens",
+          "modelID",
+          "outputSchemaJSON",
+          "purpose",
+          "systemPrompt"
+        ],
+        "type": "object"
+      },
+      "WhisplyBrowserSamplingPurpose": {
+        "enum": [
+          "planning",
+          "visual_verification"
+        ],
+        "type": "string"
+      },
       "WhisplyCompactionBudget": {
         "additionalProperties": false,
         "description": "How close a conversation is to being shortened.",
@@ -23698,6 +23922,74 @@
             "type": "string"
           }
         ]
+      },
+      "WhisplyHistoryRecoveryFrame": {
+        "additionalProperties": false,
+        "description": "One bounded transfer frame for a product conversation that a new runtime thread has never seen. This moves stored data; it never starts model work.",
+        "properties": {
+          "archiveId": {
+            "type": "string"
+          },
+          "dataBase64": {
+            "type": "string"
+          },
+          "finalByteCount": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "finalSha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offset": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "archiveId",
+          "dataBase64",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "WhisplyHistoryRecoveryReceipt": {
+        "properties": {
+          "acceptedBytes": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "archiveId": {
+            "type": "string"
+          },
+          "archiveSha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "committed": {
+            "type": "boolean"
+          },
+          "hydrated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "acceptedBytes",
+          "archiveId",
+          "committed",
+          "hydrated"
+        ],
+        "type": "object"
       },
       "WhisplyModelCatalogAvailability": {
         "enum": [

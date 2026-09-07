@@ -324,7 +324,8 @@ impl Session {
                 }
                 RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::WhisplyHistoryRecovery(_) => {}
             }
 
             if base_replacement_history.is_some()
@@ -411,6 +412,7 @@ impl Session {
                 }
                 RolloutItem::EventMsg(_)
                 | RolloutItem::TurnContext(_)
+                | RolloutItem::WhisplyHistoryRecovery(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SessionMeta(_) => {}
             }

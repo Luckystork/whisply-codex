@@ -7,6 +7,7 @@
 
 mod apply_patch;
 mod apps;
+pub mod browser_sampling;
 mod client;
 mod client_common;
 mod realtime_context;

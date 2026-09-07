@@ -84,7 +84,12 @@ impl ModelContextScan {
 
         match item {
             RolloutItem::Compacted(compacted)
-                if compacted.replacement_history.is_none() || compacted.window_number.is_none() =>
+                if compacted.replacement_history.is_none()
+                    || compacted.window_number.is_none()
+                    || compacted
+                        .whisply_history_recovery
+                        .as_ref()
+                        .is_some_and(|cursor| !cursor.completed) =>
             {
                 self.must_scan_to_start = true;
             }
@@ -152,6 +157,7 @@ impl ModelContextScan {
             RolloutItem::EventMsg(_)
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::WhisplyHistoryRecovery(_)
             | RolloutItem::WorldState(_) => {}
         }
 

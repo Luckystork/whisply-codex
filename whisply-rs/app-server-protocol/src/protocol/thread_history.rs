@@ -404,6 +404,7 @@ impl ThreadHistoryBuilder {
             RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
+            | RolloutItem::WhisplyHistoryRecovery(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SessionMeta(_) => {}
         }

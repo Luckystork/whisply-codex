@@ -3378,6 +3378,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::TurnContext(_)
+        | RolloutItem::WhisplyHistoryRecovery(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::EventMsg(_) => None,
     });
@@ -3455,6 +3456,7 @@ async fn storage_full_during_context_window_reset_preserves_history_and_allows_r
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
+            | RolloutItem::WhisplyHistoryRecovery(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => None,
         })
@@ -3492,6 +3494,7 @@ async fn storage_full_during_context_window_reset_preserves_history_and_allows_r
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
+            | RolloutItem::WhisplyHistoryRecovery(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => None,
         })
@@ -3558,6 +3561,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::WhisplyHistoryRecovery(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::EventMsg(_) => None,
     });
@@ -6198,6 +6202,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         last_prompt_composition: std::sync::Mutex::new(None),
         compaction_log: std::sync::Mutex::new(codex_whisply::ConversationCompactionLog::new()),
         unproductive_auto_compactions: std::sync::atomic::AtomicU32::new(0),
+        history_recovery: Mutex::new(Default::default()),
+        history_recovery_running: std::sync::atomic::AtomicBool::new(false),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         pending_user_message_admissions: Default::default(),
@@ -8441,6 +8447,8 @@ where
         last_prompt_composition: std::sync::Mutex::new(None),
         compaction_log: std::sync::Mutex::new(codex_whisply::ConversationCompactionLog::new()),
         unproductive_auto_compactions: std::sync::atomic::AtomicU32::new(0),
+        history_recovery: Mutex::new(Default::default()),
+        history_recovery_running: std::sync::atomic::AtomicBool::new(false),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         pending_user_message_admissions: Default::default(),

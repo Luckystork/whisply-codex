@@ -3037,6 +3037,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
+            | RolloutItem::WhisplyHistoryRecovery(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => None,
         })
@@ -3219,6 +3220,8 @@ pub enum RolloutItem {
         trigger_turn: bool,
     },
     Compacted(CompactedItem),
+    /// App-owned stored history and recovery bookkeeping, never model input.
+    WhisplyHistoryRecovery(WhisplyHistoryRecoveryRecord),
     TurnContext(TurnContextItem),
     WorldState(WorldStateItem),
     EventMsg(EventMsg),
@@ -3242,9 +3245,85 @@ impl WorldStateItem {
     }
 }
 
+/// Recovery metadata uses the normal rollout writer, archive, export and
+/// deletion lifecycle. No separate session-history database is introduced.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WhisplyHistoryRecoveryRecord {
+    Frame {
+        frame: WhisplyHistoryRecoveryFrame,
+    },
+    CompactionStarted {
+        cursor: WhisplyHistoryRecoveryCursor,
+        #[serde(default)]
+        turn_id: Option<String>,
+    },
+    CompactionRejected {
+        compaction_id: String,
+    },
+    /// A later explicit user turn permits a new ordinary paid attempt. The
+    /// original uncertain marker remains in the rollout for accounting/audit.
+    CompactionContinued {
+        compaction_id: String,
+        turn_id: String,
+    },
+}
+
+/// One bounded transfer frame for a product conversation that a new runtime
+/// thread has never seen. This moves stored data; it never starts model work.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhisplyHistoryRecoveryFrame {
+    pub archive_id: String,
+    pub offset: u64,
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_byte_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_sha256: Option<String>,
+}
+
+impl std::fmt::Debug for WhisplyHistoryRecoveryFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WhisplyHistoryRecoveryFrame")
+            .field("archive_id", &self.archive_id)
+            .field("offset", &self.offset)
+            .field("encoded_bytes", &self.data_base64.len())
+            .field("final_byte_count", &self.final_byte_count)
+            .field("final_sha256", &self.final_sha256)
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WhisplyHistoryRecoveryReceipt {
+    pub archive_id: String,
+    pub accepted_bytes: u64,
+    pub committed: bool,
+    pub hydrated: bool,
+    pub archive_sha256: Option<String>,
+}
+
+/// Position in the immutable recovery archive. It is committed atomically
+/// with a compaction summary; raw recovered item IDs retain later progress.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhisplyHistoryRecoveryCursor {
+    pub archive_id: String,
+    pub record_offset: u64,
+    pub text_offset: u64,
+    pub completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_id: Option<String>,
+}
+
 #[derive(Serialize, Clone, Debug, Default, PartialEq, JsonSchema, TS)]
 pub struct CompactedItem {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whisply_history_recovery: Option<WhisplyHistoryRecoveryCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_history: Option<Vec<ResponseItem>>,
     /// The reference context that was active when this replacement history was created.

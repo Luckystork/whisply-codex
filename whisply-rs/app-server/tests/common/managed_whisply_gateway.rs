@@ -4,6 +4,7 @@
 //! as production. The loopback endpoint is accepted only by codex-whisply's
 //! non-default `test-support` feature and its typed inherited-descriptor marker.
 
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -12,6 +13,7 @@ use std::io::SeekFrom;
 use std::io::Write;
 use std::mem;
 use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
 use std::os::fd::RawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -78,7 +80,34 @@ pub struct ManagedWhisplyGatewayFixture {
     stop: Arc<AtomicBool>,
     operations: Arc<Mutex<Vec<String>>>,
     error: Arc<Mutex<Option<String>>>,
+    browser_steps: BrowserStepFixtureControl,
     broker_thread: Option<JoinHandle<()>>,
+}
+
+/// Test-private native registrations. The runtime must still claim these over
+/// the authenticated Unix broker and receive the secret through a closed pipe.
+#[derive(Clone, Default)]
+pub struct BrowserStepFixtureControl {
+    proofs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+impl BrowserStepFixtureControl {
+    pub fn register(&self, reference: &str, proof: serde_json::Value) -> Result<()> {
+        let bytes = serde_json::to_vec(&proof)?;
+        ensure!(
+            bytes.len() <= 1_024,
+            "fixture proof exceeds the production pipe bound"
+        );
+        self.proofs
+            .lock()
+            .unwrap()
+            .insert(reference.to_string(), bytes);
+        Ok(())
+    }
+
+    pub fn invalidate_account(&self) {
+        self.proofs.lock().unwrap().clear();
+    }
 }
 
 /// Retains the broker fixture while an embedded app-server uses its typed,
@@ -121,6 +150,7 @@ impl ManagedWhisplyGatewayFixture {
         let stop = Arc::new(AtomicBool::new(false));
         let operations = Arc::new(Mutex::new(Vec::new()));
         let error = Arc::new(Mutex::new(None));
+        let browser_steps = BrowserStepFixtureControl::default();
         let broker_thread = Some(spawn_broker(
             listener,
             Arc::clone(&stop),
@@ -128,6 +158,7 @@ impl ManagedWhisplyGatewayFixture {
             Arc::clone(&error),
             endpoint_descriptor,
             descriptor_payload,
+            browser_steps.clone(),
         ));
 
         Ok(Self {
@@ -139,8 +170,13 @@ impl ManagedWhisplyGatewayFixture {
             stop,
             operations,
             error,
+            browser_steps,
             broker_thread,
         })
+    }
+
+    pub fn browser_steps(&self) -> BrowserStepFixtureControl {
+        self.browser_steps.clone()
     }
 
     /// Returns the inherited launch-descriptor environment for a direct child
@@ -403,6 +439,7 @@ fn spawn_broker(
     error: Arc<Mutex<Option<String>>>,
     endpoint_descriptor: Vec<u8>,
     descriptor_payload: Vec<u8>,
+    browser_steps: BrowserStepFixtureControl,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         while !stop.load(Ordering::Acquire) {
@@ -425,6 +462,7 @@ fn spawn_broker(
                 &operations,
                 &endpoint_descriptor,
                 &descriptor_payload,
+                &browser_steps,
             ) {
                 record_error(&error, source.to_string());
                 return;
@@ -446,6 +484,7 @@ fn handle_connection(
     operations: &Mutex<Vec<String>>,
     endpoint_descriptor: &[u8],
     descriptor_payload: &[u8],
+    browser_steps: &BrowserStepFixtureControl,
 ) -> Result<()> {
     let request = read_request(&mut stream)?;
     verify_request(&request)?;
@@ -478,8 +517,63 @@ fn handle_connection(
                 Some((&auth, &endpoint)),
             )?;
         }
+        "browser.step.proof" => {
+            let payload: serde_json::Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&request.payload_base64_url)?)?;
+            ensure!(
+                payload.as_object().is_some_and(|value| value.len() == 1),
+                "Browser proof request must contain only its reference"
+            );
+            let reference = payload["reference"].as_str().context("Browser reference")?;
+            let proof = if request.account_epoch.as_deref() == Some(TEST_ACCOUNT_EPOCH) {
+                browser_steps.proofs.lock().unwrap().remove(reference)
+            } else {
+                None
+            };
+            write_browser_proof_response(&mut stream, &request, proof.as_deref())?;
+        }
         operation => bail!("unexpected managed Whisply broker operation: {operation}"),
     }
+    Ok(())
+}
+
+fn write_browser_proof_response(
+    stream: &mut UnixStream,
+    request: &BrokerRequest,
+    proof: Option<&[u8]>,
+) -> Result<()> {
+    let response = BrokerResponse {
+        schema_version: BROKER_SCHEMA_VERSION,
+        request_id: request.request_id.clone(),
+        status: if proof.is_some() { "ok" } else { "error" },
+        account_epoch: proof.map(|_| TEST_ACCOUNT_EPOCH),
+        descriptor_generation: None,
+        expires_at_ms: None,
+        payload_base64_url: String::new(),
+    };
+    let mut response = serde_json::to_value(response)?;
+    if proof.is_none() {
+        response["code"] = "unauthenticated".into();
+    }
+    let body = serde_json::to_vec(&response)?;
+    let header = u32::try_from(body.len())?.to_be_bytes();
+    if let Some(proof) = proof {
+        let mut fds = [-1; 2];
+        ensure!(
+            unsafe { libc::pipe(fds.as_mut_ptr()) } == 0,
+            "create Browser proof pipe"
+        );
+        let reader = unsafe { File::from_raw_fd(fds[0]) };
+        let mut writer = unsafe { File::from_raw_fd(fds[1]) };
+        set_close_on_exec(reader.as_raw_fd())?;
+        set_close_on_exec(writer.as_raw_fd())?;
+        writer.write_all(proof)?;
+        drop(writer);
+        send_header_with_descriptors(stream, &header, &[reader.as_raw_fd()])?;
+    } else {
+        stream.write_all(&header)?;
+    }
+    stream.write_all(&body)?;
     Ok(())
 }
 

@@ -92,6 +92,10 @@ pub enum ResponseEvent {
     Completed {
         response_id: String,
         token_usage: Option<TokenUsage>,
+        /// Gateway-owned terminal Browser accounting metadata. This is never
+        /// assistant output or a model instruction. Only the Browser collector
+        /// uses it, after binding it to the native request/component proof.
+        whisply_browser_receipt: Option<WhisplyBrowserReceipt>,
         /// Did the model affirmatively end its turn? Some providers do not set this,
         /// so we rely on fallback logic when this is `None`.
         end_turn: Option<bool>,
@@ -120,6 +124,21 @@ pub enum ResponseEvent {
     },
     RateLimits(RateLimitSnapshot),
     ModelsEtag(String),
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhisplyBrowserReceipt {
+    pub status: String,
+    pub request_id: String,
+    pub component_id: String,
+    pub receipt_id: String,
+}
+
+impl std::fmt::Debug for WhisplyBrowserReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WhisplyBrowserReceipt([REDACTED])")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

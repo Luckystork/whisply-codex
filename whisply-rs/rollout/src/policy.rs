@@ -15,6 +15,7 @@ pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistory
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
         RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::WhisplyHistoryRecovery(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SessionMeta(_) => true,
     }

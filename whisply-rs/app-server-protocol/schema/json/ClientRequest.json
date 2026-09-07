@@ -4139,6 +4139,17 @@
         },
         "threadId": {
           "type": "string"
+        },
+        "whisplyHistoryRecovery": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WhisplyHistoryRecoveryFrame"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whisply's bounded, idle-only stored-history recovery transfer. When present, `items` must be empty; only the next normal user turn hydrates the durable archive using normal model/Usage/compaction authority."
         }
       },
       "required": [
@@ -5316,6 +5327,89 @@
         }
       ]
     },
+    "WhisplyBrowserCancelParams": {
+      "additionalProperties": false,
+      "properties": {
+        "reference": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference"
+      ],
+      "type": "object"
+    },
+    "WhisplyBrowserSampleParams": {
+      "additionalProperties": false,
+      "description": "The reference is resolved through the existing native broker for this runtime process. A matching digest is required before model sampling.",
+      "properties": {
+        "payload": {
+          "$ref": "#/definitions/WhisplyBrowserSamplingPayload"
+        },
+        "reference": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "reference"
+      ],
+      "type": "object"
+    },
+    "WhisplyBrowserSamplingPayload": {
+      "additionalProperties": false,
+      "description": "Browser-only model material. No task, account, lease or native command authority can be supplied through this payload.",
+      "properties": {
+        "inputJSON": {
+          "type": "string"
+        },
+        "maximumOutputTokens": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "modelID": {
+          "type": "string"
+        },
+        "outputSchemaJSON": {
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/definitions/WhisplyBrowserSamplingPurpose"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "visualJPEGDataURL": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "inputJSON",
+        "maximumOutputTokens",
+        "modelID",
+        "outputSchemaJSON",
+        "purpose",
+        "systemPrompt"
+      ],
+      "type": "object"
+    },
+    "WhisplyBrowserSamplingPurpose": {
+      "enum": [
+        "planning",
+        "visual_verification"
+      ],
+      "type": "string"
+    },
     "WhisplyCompactionReadParams": {
       "additionalProperties": false,
       "description": "Reads what can be said about one conversation being shortened.",
@@ -5326,6 +5420,43 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "WhisplyHistoryRecoveryFrame": {
+      "additionalProperties": false,
+      "description": "One bounded transfer frame for a product conversation that a new runtime thread has never seen. This moves stored data; it never starts model work.",
+      "properties": {
+        "archiveId": {
+          "type": "string"
+        },
+        "dataBase64": {
+          "type": "string"
+        },
+        "finalByteCount": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "finalSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "archiveId",
+        "dataBase64",
+        "offset"
       ],
       "type": "object"
     },
@@ -7038,6 +7169,54 @@
         "params"
       ],
       "title": "Whisply/modelCatalog/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "whisply/browser/sample"
+          ],
+          "title": "Whisply/browser/sampleRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/WhisplyBrowserSampleParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Whisply/browser/sampleRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "whisply/browser/cancel"
+          ],
+          "title": "Whisply/browser/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/WhisplyBrowserCancelParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Whisply/browser/cancelRequest",
       "type": "object"
     },
     {

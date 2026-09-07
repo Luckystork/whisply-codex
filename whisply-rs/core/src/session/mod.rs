@@ -209,6 +209,7 @@ mod config_lock;
 pub(crate) mod context_window;
 mod extension_metrics;
 mod handlers;
+pub(crate) mod history_recovery;
 mod inject;
 mod input_queue;
 mod mcp;
@@ -1534,6 +1535,8 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> Option<PreviousTurnSettings> {
+        *self.history_recovery.lock().await =
+            history_recovery::HistoryRecoveryState::restore(rollout_items);
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
             previous_turn_settings,
@@ -3108,8 +3111,25 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
+        // This namespace belongs only to our durable history-recovery writer.
+        // Provider output and ordinary raw injection cannot forge a recovery
+        // cursor by choosing a response-item ID.
+        let mut untrusted_items = Cow::Borrowed(items);
+        if items.iter().any(|item| {
+            item.id()
+                .is_some_and(|id| id.starts_with(history_recovery::ITEM_PREFIX))
+        }) {
+            for item in untrusted_items.to_mut() {
+                if item
+                    .id()
+                    .is_some_and(|id| id.starts_with(history_recovery::ITEM_PREFIX))
+                {
+                    item.set_id(None);
+                }
+            }
+        }
         let (items, image_preparations) =
-            self.prepare_conversation_items_for_history(turn_context, items);
+            self.prepare_conversation_items_for_history(turn_context, untrusted_items.as_ref());
         let items = items.as_ref();
         {
             let mut state = self.state.lock().await;
@@ -3402,8 +3422,16 @@ impl Session {
                 WorldStateItem::full(snapshot.into_value()),
             )
         });
+        let history_recovery_cursor = {
+            let recovery = self.history_recovery.lock().await;
+            recovery
+                .in_flight
+                .clone()
+                .or_else(|| recovery.cursor.clone())
+        };
         let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
             message: metadata.message,
+            whisply_history_recovery: history_recovery_cursor.clone(),
             replacement_history: Some(items.clone()),
             reference_context_item: reference_context_item.clone(),
             world_state_baseline: world_state_snapshot
@@ -3444,6 +3472,11 @@ impl Session {
             }
         };
 
+        if let Some(cursor) = history_recovery_cursor {
+            let mut recovery = self.history_recovery.lock().await;
+            recovery.cursor = Some(cursor);
+            recovery.in_flight = None;
+        }
         {
             let mut state = self.state.lock().await;
             state.replace_history(items, reference_context_item);

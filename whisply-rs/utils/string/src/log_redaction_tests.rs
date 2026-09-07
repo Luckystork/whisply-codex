@@ -45,6 +45,23 @@ fn a_token_count_is_not_a_credential() {
 }
 
 #[test]
+fn browser_execution_lease_is_redacted_without_losing_receipt_or_usage_counts() {
+    for key in [
+        "x-whisply-contextual-execution-lease",
+        "executionLeaseToken",
+        "execution_lease_token",
+    ] {
+        let line = format!(
+            r#"{{"{key}":"synthetic-browser-private-lease","tokens":60,"status":"settled"}}"#
+        );
+        let output = redacted(&line);
+        assert!(!output.contains("synthetic-browser-private-lease"));
+        assert!(output.contains(r#""tokens":60"#));
+        assert!(output.contains(r#""status":"settled""#));
+    }
+}
+
+#[test]
 fn a_sentence_mentioning_a_secret_is_not_treated_as_one() {
     let line = "the client secret was never configured for this provider";
     assert_eq!(redacted(line), line);

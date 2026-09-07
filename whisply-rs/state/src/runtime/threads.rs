@@ -1262,6 +1262,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::WhisplyHistoryRecovery(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::EventMsg(_) => None,
     })
