@@ -33,6 +33,12 @@ const SENSITIVE_KEYS: &[&str] = &[
     "secret",
     "session_key",
     "set-cookie",
+    "sessiontoken",
+    "session_token",
+    "x-whisply-usage-session",
+    "whisplyexamturnreference",
+    "whisply_exam_turn_reference",
+    "exam_turn_reference",
     "signing_key",
 ];
 // A bare `token` is deliberately absent. Token counts are logged constantly,
@@ -258,7 +264,7 @@ fn is_base64url_byte(byte: u8) -> bool {
 /// A provider API key, which is a recognisable prefix and a long opaque tail.
 fn looks_like_provider_key(run: &str) -> bool {
     for prefix in [
-        "sk-", "sk_", "pk_", "rk_", "whsec_", "ghp_", "gho_", "xoxb-",
+        "sk-", "sk_", "pk_", "rk_", "whsec_", "ghp_", "gho_", "xoxb-", "wus_",
     ] {
         if let Some(tail) = run.strip_prefix(prefix)
             && tail.len() >= 16

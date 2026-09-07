@@ -1,3 +1,5 @@
+use codex_whisply::EXAM_TURN_REFERENCE_METADATA_KEY;
+use codex_whisply::RuntimeExamTurnReference;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
@@ -52,6 +54,7 @@ pub(crate) const WORKSPACES_KEY: &str = "workspaces";
 // App-server clients can specify additional metadata in the `responsesapi_client_metadata` param
 // when submitting a turn, but they must not override fields owned by core.
 const RESERVED_METADATA_KEYS: &[&str] = &[
+    EXAM_TURN_REFERENCE_METADATA_KEY,
     INSTALLATION_ID_KEY,
     X_CODEX_INSTALLATION_ID_HEADER,
     SESSION_ID_KEY,
@@ -165,6 +168,8 @@ pub(crate) struct TurnMetadataWorkspace {
 /// not separate sources of truth.
 #[derive(Clone, Debug)]
 pub struct CodexResponsesMetadata {
+    /// Transport-only; omitted from provider/MCP/rollout metadata values.
+    pub(crate) exam_turn_reference: Option<RuntimeExamTurnReference>,
     pub(crate) installation_id: String,
     pub(crate) session_id: String,
     pub(crate) thread_id: String,
@@ -192,6 +197,7 @@ impl CodexResponsesMetadata {
         window_id: String,
     ) -> Self {
         Self {
+            exam_turn_reference: None,
             installation_id,
             session_id,
             thread_id,

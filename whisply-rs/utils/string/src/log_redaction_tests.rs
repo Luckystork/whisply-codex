@@ -142,3 +142,30 @@ fn a_clean_line_is_returned_without_copying_it() {
     let line = "starting the app-server for the active account home";
     assert!(matches!(redact_log_line(line), Cow::Borrowed(_)));
 }
+
+#[test]
+fn exam_usage_proof_is_redacted_bare_or_in_transport_headers() {
+    let proof = format!("wus_{}", "a".repeat(43));
+    for line in [
+        proof.clone(),
+        format!("x-whisply-usage-session: {proof}"),
+        format!("{{\"sessionToken\":\"{proof}\"}}"),
+    ] {
+        assert!(!super::redact_log_line(&line).contains(&proof));
+    }
+}
+
+#[test]
+fn exam_transport_reference_is_removed_from_diagnostics() {
+    let reference = "70000000-0000-4000-8000-000000000001";
+    for key in [
+        "whisplyExamTurnReference",
+        "whisply_exam_turn_reference",
+        "exam_turn_reference",
+    ] {
+        let line = format!("{{\"{key}\":\"{reference}\",\"tokens\":1234}}");
+        let redacted = super::redact_log_line(&line);
+        assert!(!redacted.contains(reference));
+        assert!(redacted.contains("1234"));
+    }
+}

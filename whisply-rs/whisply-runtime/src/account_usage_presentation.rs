@@ -7,6 +7,8 @@
 //! be completed, and the text.
 
 use std::fmt::Write as _;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::ContextualUsageSnapshot;
 use crate::ContextualUsageWindow;
@@ -83,6 +85,10 @@ pub fn account_usage_used_fraction(window: &ContextualUsageWindow) -> f64 {
 
 /// Renders the snapshot as the lines every terminal surface prints.
 pub fn format_account_usage(snapshot: &ContextualUsageSnapshot) -> String {
+    format_account_usage_at(snapshot, OffsetDateTime::now_utc())
+}
+
+fn format_account_usage_at(snapshot: &ContextualUsageSnapshot, now: OffsetDateTime) -> String {
     let mut output = format!("Whisply Usage ({})\n", snapshot.tier);
     for window in &snapshot.windows {
         let reset = window.resets_at.as_deref().unwrap_or("not scheduled");
@@ -96,11 +102,58 @@ pub fn format_account_usage(snapshot: &ContextualUsageSnapshot) -> String {
             window.cap,
         );
     }
+    for explanation in account_usage_advance_explanations(snapshot, now.unix_timestamp()) {
+        let _ = writeln!(output, "{explanation}");
+    }
     let _ = write!(
         output,
         "Rate card {} · {} {}",
         snapshot.metering.rate_card_version, snapshot.metering.basis, snapshot.metering.currency,
     );
+    output
+}
+
+/// Explanatory text shared with `/status`. These rows never become quota bars.
+pub fn account_usage_advance_explanations(
+    snapshot: &ContextualUsageSnapshot,
+    now_unix_seconds: i64,
+) -> Vec<String> {
+    let Ok(now) = OffsetDateTime::from_unix_timestamp(now_unix_seconds) else {
+        return Vec::new();
+    };
+    let mut output = Vec::new();
+    if snapshot.validate().is_ok() {
+        for window in snapshot.advance_windows.as_deref().unwrap_or_default() {
+            let Some(start) = window
+                .starts_at
+                .as_deref()
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+            else {
+                continue;
+            };
+            let Some(end) = window
+                .resets_at
+                .as_deref()
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+            else {
+                continue;
+            };
+            if end <= now {
+                continue;
+            }
+            let period = if start > now { "next" } else { "current" };
+            output.push(format!(
+                "Exam Mode — {period} five-hour window (starts {}): {:.1}% used in advance; {:.1}% reserved in advance",
+                window.starts_at.as_deref().unwrap_or_default(),
+                window.settled / window.cap * 100.0, window.reserved / window.cap * 100.0));
+        }
+    }
+    if !output.is_empty() {
+        output.push(
+            "These amounts are already counted toward their corresponding five-hour allowance."
+                .to_string(),
+        );
+    }
     output
 }
 
@@ -271,5 +324,46 @@ mod tests {
             text.contains("settled 61.000, reserved 2.000, cap 100.000"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn advance_explanations_never_add_to_the_three_usage_meters() {
+        let value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/fixtures/whisply-usage-advance-v1.json"
+        ))
+        .unwrap();
+        let snapshot: ContextualUsageSnapshot =
+            serde_json::from_value(value["snapshot"].clone()).unwrap();
+        let now = OffsetDateTime::parse(&snapshot.generated_at, &Rfc3339).unwrap();
+        let text = format_account_usage_at(&snapshot, now);
+        assert!(text.contains("Usage (five-hour): 50.0% used"), "{text}");
+        assert!(text.contains("Usage (weekly): 45.0% used"), "{text}");
+        assert!(
+            text.contains("10.0% used in advance; 5.0% reserved in advance"),
+            "{text}"
+        );
+        assert!(
+            text.contains("0.0% used in advance; 20.0% reserved in advance"),
+            "{text}"
+        );
+        assert_eq!(text.matches("Usage (five-hour):").count(), 1);
+        assert_eq!(text.matches("Exam Mode —").count(), 2);
+
+        let rolled = account_usage_advance_explanations(
+            &snapshot,
+            OffsetDateTime::parse("2026-09-07T15:00:00Z", &Rfc3339)
+                .unwrap()
+                .unix_timestamp(),
+        );
+        assert_eq!(rolled.len(), 2); // One current explanation plus its note.
+        assert!(rolled[0].contains("current five-hour window"));
+        assert!(rolled[0].contains("20.0% reserved in advance"));
+        let ended = account_usage_advance_explanations(
+            &snapshot,
+            OffsetDateTime::parse("2026-09-07T20:00:00Z", &Rfc3339)
+                .unwrap()
+                .unix_timestamp(),
+        );
+        assert!(ended.is_empty());
     }
 }

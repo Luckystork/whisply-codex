@@ -93,6 +93,10 @@ pub struct ContextualUsageSnapshot {
     pub contract_version: String,
     pub tier: String,
     pub windows: Vec<ContextualUsageWindow>,
+    /// Advanced portions already charged to their real five-hour intervals.
+    /// Absent on the original plain projection; never add these to totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advance_windows: Option<Vec<ContextualUsageWindow>>,
     pub metering: ContextualUsageMetering,
     pub generated_at: String,
     pub stale: bool,
@@ -130,6 +134,7 @@ impl ContextualUsageSnapshot {
         for window in &self.windows {
             validate_usage_window(window)?;
         }
+        self.validate_advance_windows()?;
         validate_metering(&self.metering)?;
         for window in self
             .windows
@@ -139,6 +144,57 @@ impl ContextualUsageSnapshot {
             if window.rate_card_version.as_deref() != Some(&self.metering.rate_card_version) {
                 return Err(AccountProjectionError::InvalidUsage);
             }
+        }
+        Ok(())
+    }
+
+    fn validate_advance_windows(&self) -> Result<(), AccountProjectionError> {
+        let Some(windows) = self
+            .advance_windows
+            .as_ref()
+            .filter(|windows| !windows.is_empty())
+        else {
+            return Ok(());
+        };
+        if windows.len() > 2 {
+            return Err(AccountProjectionError::InvalidUsage);
+        }
+        let parse = |value: Option<&str>| {
+            value
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+                .ok_or(AccountProjectionError::InvalidUsage)
+        };
+        let generated = parse(Some(&self.generated_at))?;
+        let current = self
+            .window(UsageWindowCategory::Usage, UsageWindowKind::FiveHour)
+            .ok_or(AccountProjectionError::InvalidUsage)?;
+        let current_start = parse(current.starts_at.as_deref())?;
+        let current_end = parse(current.resets_at.as_deref())?;
+        if !(current_start <= generated && generated < current_end) {
+            return Err(AccountProjectionError::InvalidUsage);
+        }
+        let mut previous_start = None;
+        for window in windows {
+            validate_usage_window(window)?;
+            let start = parse(window.starts_at.as_deref())?;
+            let end = parse(window.resets_at.as_deref())?;
+            let accounted = window.settled + window.reserved;
+            if window.category != UsageWindowCategory::Usage
+                || window.window != UsageWindowKind::FiveHour
+                || accounted <= 0.0
+                || (window.used_fraction - accounted / window.cap).abs() > 0.000_000_001
+                || window
+                    .rate_card_version
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                || end - start != time::Duration::hours(5)
+                || end <= generated
+                || (start != current_start && start != current_end)
+                || previous_start.is_some_and(|previous| start <= previous)
+            {
+                return Err(AccountProjectionError::InvalidUsage);
+            }
+            previous_start = Some(start);
         }
         Ok(())
     }
@@ -815,6 +871,7 @@ mod tests {
 
     fn snapshot() -> ContextualUsageSnapshot {
         ContextualUsageSnapshot {
+            advance_windows: None,
             contract_version: CONTEXTUAL_ACTION_CONTRACT_VERSION.to_string(),
             tier: "pro".to_string(),
             windows: vec![
@@ -1155,5 +1212,89 @@ mod tests {
             credential_like.validate(),
             Err(AccountProjectionError::InvalidConnections)
         );
+    }
+
+    fn advance_snapshot_value() -> Value {
+        serde_json::from_str::<Value>(include_str!(
+            "../../../../contracts/fixtures/whisply-usage-advance-v1.json"
+        ))
+        .unwrap()["snapshot"]
+            .clone()
+    }
+
+    #[test]
+    fn advance_detail_preserves_three_limits_and_original_plain_shape() {
+        let value = advance_snapshot_value();
+        let full: ContextualUsageSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(full.validate().is_ok());
+        assert_ne!(
+            full.advance_windows.as_ref().unwrap()[0]
+                .rate_card_version
+                .as_deref(),
+            Some(full.metering.rate_card_version.as_str())
+        );
+        for count in 0..=2 {
+            let mut selected = full.clone();
+            selected.advance_windows.as_mut().unwrap().truncate(count);
+            assert!(selected.validate().is_ok());
+            assert_eq!(selected.windows, full.windows);
+            assert_eq!(selected.metering, full.metering);
+        }
+        let mut plain = value;
+        plain.as_object_mut().unwrap().remove("advanceWindows");
+        let decoded: ContextualUsageSnapshot = serde_json::from_value(plain.clone()).unwrap();
+        assert!(decoded.advance_windows.is_none());
+        assert!(decoded.validate().is_ok());
+        let mut original_encoded = serde_json::to_value(&full).unwrap();
+        original_encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("advanceWindows");
+        assert_eq!(original_encoded.as_object().unwrap().len(), 6);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), original_encoded);
+    }
+
+    #[test]
+    fn advance_detail_rejects_wrong_intervals_categories_and_amounts() {
+        for (field, value) in [
+            ("category", serde_json::json!("transcription")),
+            ("window", serde_json::json!("weekly")),
+            ("settled", serde_json::json!(-1)),
+            ("reserved", serde_json::json!(101)),
+            ("cap", serde_json::json!(0)),
+            ("usedFraction", serde_json::json!(0.95)),
+            ("startsAt", serde_json::json!("2026-09-07T09:00:00Z")),
+            ("resetsAt", serde_json::json!("2026-09-07T14:00:00Z")),
+            ("startsAt", Value::Null),
+            ("rateCardVersion", serde_json::json!("")),
+        ] {
+            let mut invalid = advance_snapshot_value();
+            invalid["advanceWindows"][0][field] = value;
+            let decoded: ContextualUsageSnapshot = serde_json::from_value(invalid).unwrap();
+            assert_eq!(
+                decoded.validate(),
+                Err(AccountProjectionError::InvalidUsage),
+                "{field}"
+            );
+        }
+        let full: ContextualUsageSnapshot =
+            serde_json::from_value(advance_snapshot_value()).unwrap();
+        let mut duplicate = full.clone();
+        let rows = duplicate.advance_windows.as_mut().unwrap();
+        rows[1] = rows[0].clone();
+        assert!(duplicate.validate().is_err());
+        let mut excessive = full.clone();
+        let row = excessive.advance_windows.as_ref().unwrap()[0].clone();
+        excessive.advance_windows.as_mut().unwrap().push(row);
+        assert!(excessive.validate().is_err());
+        let mut empty_portions = full.clone();
+        let row = &mut empty_portions.advance_windows.as_mut().unwrap()[0];
+        row.settled = 0.0;
+        row.reserved = 0.0;
+        row.used_fraction = 0.0;
+        assert!(empty_portions.validate().is_err());
+        let mut nonfinite = full;
+        nonfinite.advance_windows.as_mut().unwrap()[0].cap = f64::INFINITY;
+        assert!(nonfinite.validate().is_err());
     }
 }

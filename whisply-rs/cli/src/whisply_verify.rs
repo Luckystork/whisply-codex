@@ -667,7 +667,10 @@ const VERIFY_MANIFEST: &[VerificationCheck] = &[
         availability: CheckAvailability::Runnable,
         action: CheckAction::Run {
             program: "python3",
-            args: &["scripts/verify_contextual_action_artifacts.py", "--require-spec"],
+            args: &[
+                "scripts/verify_contextual_action_artifacts.py",
+                "--require-spec",
+            ],
             working_directory: ".",
             required_paths: &["scripts/verify_contextual_action_artifacts.py"],
         },
@@ -2849,7 +2852,11 @@ mod tests {
                 assert!(first < second, "{suite:?} lane lost manifest order");
             }
             for check in lane {
-                assert!(partitioned.insert(check.id), "{} ran in two lanes", check.id);
+                assert!(
+                    partitioned.insert(check.id),
+                    "{} ran in two lanes",
+                    check.id
+                );
             }
         }
         assert_eq!(partitioned.len(), selected.len());
@@ -3027,10 +3034,7 @@ mod tests {
                 .iter()
                 .map(|check| check.id)
                 .collect::<Vec<_>>(),
-            vec![
-                "static-release-feature-coverage",
-                "mac-swift-package-full",
-            ]
+            vec!["static-release-feature-coverage", "mac-swift-package-full",]
         );
         assert_eq!(
             select_verify_checks(VerifySuite::Website, &[VerifyFeature::Skills])

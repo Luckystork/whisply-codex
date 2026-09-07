@@ -640,10 +640,22 @@ impl TurnRequestProcessor {
             });
 
         // Start the turn by submitting the user input. Return its submission id as turn_id.
+        let mut turn_transport_metadata = params.responsesapi_client_metadata;
+        if let Some(metadata) = turn_transport_metadata.as_mut() {
+            metadata.remove(codex_whisply::EXAM_TURN_REFERENCE_METADATA_KEY);
+        }
+        if let Some(reference) = params.whisply_exam_turn_reference {
+            turn_transport_metadata
+                .get_or_insert_with(Default::default)
+                .insert(
+                    codex_whisply::EXAM_TURN_REFERENCE_METADATA_KEY.to_string(),
+                    reference,
+                );
+        }
         let turn_op = Op::UserInput {
             items: mapped_items,
             final_output_json_schema: params.output_schema,
-            responsesapi_client_metadata: params.responsesapi_client_metadata,
+            responsesapi_client_metadata: turn_transport_metadata,
             additional_context,
             thread_settings,
         };

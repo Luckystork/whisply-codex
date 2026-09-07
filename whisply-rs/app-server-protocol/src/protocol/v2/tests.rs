@@ -4489,6 +4489,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
     );
 
     let without_override = TurnStartParams {
+        whisply_exam_turn_reference: None,
         thread_id: "thread_123".to_string(),
         client_user_message_id: None,
         input: vec![],
@@ -4819,4 +4820,32 @@ fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
             auto_resolution_ms: Some(60_000),
         }
     );
+}
+
+#[test]
+fn whisply_exam_reference_is_optional_stable_transport() {
+    let ordinary: TurnStartParams =
+        serde_json::from_value(json!({"threadId":"thread", "input":[]})).unwrap();
+    assert!(ordinary.whisply_exam_turn_reference.is_none());
+    assert!(
+        serde_json::to_value(&ordinary)
+            .unwrap()
+            .get("whisplyExamTurnReference")
+            .is_none()
+    );
+    let reference = "70000000-0000-4000-8000-000000000001";
+    let explicit: TurnStartParams = serde_json::from_value(
+        json!({"threadId":"thread", "input":[], "whisplyExamTurnReference":reference}),
+    )
+    .unwrap();
+    assert_eq!(
+        explicit.whisply_exam_turn_reference.as_deref(),
+        Some(reference)
+    );
+    assert_eq!(
+        crate::experimental_api::ExperimentalApi::experimental_reason(&explicit),
+        None
+    );
+    assert!(explicit.responsesapi_client_metadata.is_none());
+    assert!(explicit.additional_context.is_none());
 }

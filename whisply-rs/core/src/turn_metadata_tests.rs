@@ -966,3 +966,89 @@ async fn turn_metadata_state_git_enrichment_cancellation_is_retryable_and_errors
     .expect("failed git enrichment should complete");
     assert!(invalid_state.current_workspaces().is_empty());
 }
+
+#[test]
+fn exam_reference_is_transport_only_and_never_provider_or_mcp_metadata() {
+    let directory = TempDir::new().unwrap();
+    let state = TurnMetadataState::new(
+        "session".into(),
+        "thread".into(),
+        None,
+        None,
+        &SessionSource::Exec,
+        None,
+        "turn".into(),
+        directory.path().abs(),
+        &PermissionProfile::read_only(),
+        WindowsSandboxLevel::Disabled,
+        false,
+    );
+    let reference = "70000000-0000-4000-8000-000000000001";
+    let key = codex_whisply::EXAM_TURN_REFERENCE_METADATA_KEY;
+    assert!(
+        state
+            .to_responses_metadata(
+                "installation".into(),
+                "window".into(),
+                CodexResponsesRequestKind::Turn
+            )
+            .exam_turn_reference
+            .is_none()
+    );
+    state.set_responsesapi_client_metadata(HashMap::from([(
+        key.to_string(),
+        reference.to_string(),
+    )]));
+    let metadata = state.to_responses_metadata(
+        "installation".into(),
+        "window".into(),
+        CodexResponsesRequestKind::Turn,
+    );
+    assert_eq!(
+        metadata.exam_turn_reference,
+        Some(codex_whisply::RuntimeExamTurnReference::parse(reference))
+    );
+    assert_eq!(
+        state
+            .exam_turn_transport_metadata()
+            .unwrap()
+            .get(key)
+            .map(String::as_str),
+        Some(reference)
+    );
+    for value in [
+        serde_json::to_string(&metadata.client_metadata()).unwrap(),
+        serde_json::to_string(&metadata.whisply_client_metadata()).unwrap(),
+        metadata.turn_metadata_json().unwrap(),
+        state
+            .current_meta_value_for_mcp_request(test_mcp_turn_metadata_context())
+            .unwrap()
+            .to_string(),
+    ] {
+        assert!(!value.contains(reference));
+        assert!(!value.contains(key));
+    }
+    state.set_responsesapi_client_metadata(HashMap::from([(
+        key.to_string(),
+        "invalid".to_string(),
+    )]));
+    assert_eq!(
+        state
+            .to_responses_metadata(
+                "installation".into(),
+                "window".into(),
+                CodexResponsesRequestKind::Turn
+            )
+            .exam_turn_reference,
+        Some(codex_whisply::RuntimeExamTurnReference::Invalid)
+    );
+    state.set_responsesapi_client_metadata(HashMap::new());
+    assert_eq!(
+        state
+            .exam_turn_transport_metadata()
+            .unwrap()
+            .get(key)
+            .map(String::as_str),
+        Some("invalid")
+    );
+}

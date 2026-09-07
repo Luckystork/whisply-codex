@@ -882,6 +882,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     params: TurnStartParams {
                         thread_id: primary_thread_id_for_span.clone(),
                         client_user_message_id: None,
+                        whisply_exam_turn_reference: None,
                         input: items.into_iter().map(Into::into).collect(),
                         responsesapi_client_metadata: None,
                         additional_context: None,

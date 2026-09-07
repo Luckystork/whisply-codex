@@ -615,6 +615,7 @@ mod managed_usage_tests {
             rate_card_version: Some("rate-card-test-1".to_string()),
         };
         ContextualUsageSnapshot {
+            advance_windows: None,
             contract_version: codex_whisply::CONTEXTUAL_ACTION_CONTRACT_VERSION.to_string(),
             tier: "pro".to_string(),
             windows: vec![

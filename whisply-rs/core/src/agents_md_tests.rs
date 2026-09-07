@@ -615,11 +615,10 @@ async fn selected_workspace_loads_project_memory_beside_agents() {
     assert!(selected_text.contains("project rules"));
     assert!(selected_text.contains("Sam is the Whisply CEO"));
 
-    let hidden = get_user_instructions(
-        &make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await,
-    )
-    .await
-    .expect("agents without a selected workspace");
+    let hidden =
+        get_user_instructions(&make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await)
+            .await
+            .expect("agents without a selected workspace");
     assert_eq!(hidden, "project rules");
 }
 

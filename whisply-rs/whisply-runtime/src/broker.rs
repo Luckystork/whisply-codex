@@ -89,6 +89,7 @@ pub enum BrokerOperation {
     AuthLogout,
     AuthSwitch,
     RuntimeDescriptors,
+    ExamTurnProof,
     AccountUsageRead,
     AccountConnectionsRead,
     HostControlsSnapshot,
@@ -107,6 +108,7 @@ impl BrokerOperation {
             Self::AuthLogout => "auth.logout",
             Self::AuthSwitch => "auth.switch",
             Self::RuntimeDescriptors => "runtime.descriptors",
+            Self::ExamTurnProof => "exam.turn.proof",
             Self::AccountUsageRead => "account.usage.read",
             Self::AccountConnectionsRead => "account.connections.read",
             Self::HostControlsSnapshot => "host.controls.snapshot",
@@ -140,6 +142,7 @@ pub enum BrokerErrorCode {
     DescriptorInvalid,
     Unavailable,
     LoginRequired,
+    PendingTurn,
 }
 
 impl fmt::Display for BrokerErrorCode {
@@ -153,6 +156,7 @@ impl fmt::Display for BrokerErrorCode {
             Self::DescriptorInvalid => "descriptorInvalid",
             Self::Unavailable => "unavailable",
             Self::LoginRequired => "loginRequired",
+            Self::PendingTurn => "pendingTurn",
         };
         formatter.write_str(value)
     }
@@ -652,7 +656,10 @@ impl NativeBrokerClient {
             .call_without_descriptors(
                 BrokerOperation::AccountUsageRead,
                 Some(account_epoch),
-                &AccountReadPayload { opaque_account_key },
+                &UsageReadPayload {
+                    opaque_account_key,
+                    include_advance: true,
+                },
             )
             .map_err(|_| AccountProjectionError::Unavailable)?;
         validate_account_read_response_epoch(&response, account_epoch)?;
@@ -826,6 +833,8 @@ impl NativeBrokerClient {
             &self.socket_path,
             &payload,
             operation.max_response_frame_bytes(),
+            (operation == BrokerOperation::ExamTurnProof)
+                .then_some(std::time::Duration::from_secs(12)),
         )?;
         let response: BrokerResponse =
             serde_json::from_slice(&response_bytes).map_err(|_| BrokerError::InvalidMessage)?;
@@ -914,6 +923,107 @@ pub struct ManagedGatewayClient {
     test_catalog_key_set: Option<CatalogVerificationKeySet>,
 }
 
+pub const EXAM_TURN_REFERENCE_METADATA_KEY: &str = "whisply_exam_turn_reference";
+
+/// An optional transport reference, never authority on its own. Invalid
+/// explicit values remain invalid rather than becoming ordinary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeExamTurnReference {
+    Valid(Uuid),
+    Invalid,
+}
+impl fmt::Debug for RuntimeExamTurnReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeExamTurnReference([REDACTED])")
+    }
+}
+impl RuntimeExamTurnReference {
+    pub fn parse(value: &str) -> Self {
+        match Uuid::parse_str(value) {
+            Ok(id) if id.to_string() == value && id.get_version_num() == 4 => Self::Valid(id),
+            _ => Self::Invalid,
+        }
+    }
+    pub fn metadata_value(self) -> String {
+        match self {
+            Self::Valid(id) => id.to_string(),
+            Self::Invalid => "invalid".to_string(),
+        }
+    }
+}
+
+pub struct RuntimeExamProof {
+    token: Zeroizing<String>,
+    installation_id: String,
+    expires_at_ms: i64,
+}
+impl fmt::Debug for RuntimeExamProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeExamProof([REDACTED])")
+    }
+}
+impl RuntimeExamProof {
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+    pub fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+    pub fn is_current(&self) -> bool {
+        now_unix_ms().is_ok_and(|now| now < self.expires_at_ms)
+    }
+}
+
+#[derive(Serialize)]
+struct ExamTurnProofPayload<'a> {
+    reference: Uuid,
+    #[serde(rename = "threadID")]
+    thread_id: &'a str,
+    #[serde(rename = "turnID")]
+    turn_id: &'a str,
+    #[serde(rename = "parentThreadID")]
+    parent_thread_id: Option<&'a str>,
+    #[serde(rename = "parentTurnID")]
+    parent_turn_id: Option<&'a str>,
+    #[serde(rename = "automaticReview")]
+    automatic_review: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExamProofDescriptor {
+    schema_version: u8,
+    session_token: String,
+    install_id: String,
+    #[serde(rename = "expiresAtMS")]
+    expires_at_ms: i64,
+}
+fn parse_exam_proof_descriptor(bytes: &[u8]) -> Result<RuntimeExamProof, BrokerError> {
+    let mut descriptor: ExamProofDescriptor = deserialize_payload(bytes)?;
+    let token = Zeroizing::new(std::mem::take(&mut descriptor.session_token));
+    if descriptor.schema_version != 1
+        || token.len() != 47
+        || !token.starts_with("wus_")
+        || !token[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        || !Uuid::parse_str(&descriptor.install_id)
+            .is_ok_and(|id| id.to_string() == descriptor.install_id && id.get_version_num() == 4)
+        || descriptor.expires_at_ms <= now_unix_ms().map_err(|_| BrokerError::InvalidMessage)?
+        || descriptor.expires_at_ms
+            > now_unix_ms()
+                .map_err(|_| BrokerError::InvalidMessage)?
+                .saturating_add(85_000)
+    {
+        return Err(BrokerError::InvalidMessage);
+    }
+    Ok(RuntimeExamProof {
+        token,
+        installation_id: descriptor.install_id,
+        expires_at_ms: descriptor.expires_at_ms,
+    })
+}
+
 /// Typed test-only launch authority for an in-process managed gateway client.
 ///
 /// This preserves the production descriptor protocol while keeping synthetic
@@ -961,6 +1071,44 @@ impl fmt::Debug for ManagedGatewayClient {
 }
 
 impl ManagedGatewayClient {
+    /// Called only for an explicit reference. Ordinary Mac/Workspace/CLI work
+    /// acquires no new broker or funding dependency.
+    pub fn exam_turn_proof(
+        &self,
+        reference: RuntimeExamTurnReference,
+        thread_id: &str,
+        turn_id: &str,
+        review_parent: Option<(&str, &str)>,
+    ) -> Result<RuntimeExamProof, ManagedGatewayError> {
+        let RuntimeExamTurnReference::Valid(reference) = reference else {
+            return Err(BrokerError::InvalidMessage.into());
+        };
+        let snapshot = self.ensure_fresh()?;
+        let epoch = snapshot
+            .account_epoch()
+            .ok_or(BrokerError::InvalidMessage)?;
+        let payload = ExamTurnProofPayload {
+            reference,
+            thread_id,
+            turn_id,
+            parent_thread_id: review_parent.map(|parent| parent.0),
+            parent_turn_id: review_parent.map(|parent| parent.1),
+            automatic_review: review_parent.is_some(),
+        };
+        let response = self
+            .broker
+            .call(BrokerOperation::ExamTurnProof, Some(epoch), &payload)?;
+        if response.metadata.account_epoch.as_deref() != Some(epoch) || !response.payload.is_empty()
+        {
+            return Err(BrokerError::InvalidMessage.into());
+        }
+        let [descriptor]: [std::os::fd::OwnedFd; 1] = response
+            .fds
+            .try_into()
+            .map_err(|_| BrokerError::InvalidMessage)?;
+        let bytes = read_exam_proof_pipe(descriptor)?;
+        parse_exam_proof_descriptor(&bytes).map_err(Into::into)
+    }
     /// Builds an isolated client from test-owned launch descriptors.
     ///
     /// This deliberately bypasses neither descriptor validation nor the
@@ -1378,6 +1526,13 @@ struct AccountReadPayload<'a> {
     opaque_account_key: &'a str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageReadPayload<'a> {
+    opaque_account_key: &'a str,
+    include_advance: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrokerDescriptorPayload {
@@ -1539,6 +1694,15 @@ fn validate_response_envelope(
                     )
                     || response.descriptor_generation.is_none()
                     || response.expires_at_ms.is_none()
+                {
+                    return Err(BrokerError::InvalidMessage);
+                }
+            } else if operation == BrokerOperation::ExamTurnProof {
+                if fds.len() != 1
+                    || !payload.is_empty()
+                    || !matches!(response.account_epoch.as_deref(), Some(value) if validate_account_epoch(value).is_ok())
+                    || response.descriptor_generation.is_some()
+                    || response.expires_at_ms.is_some()
                 {
                     return Err(BrokerError::InvalidMessage);
                 }
@@ -1772,6 +1936,65 @@ fn read_owned_descriptor(
     read_descriptor_file(file, max_bytes)
 }
 
+/// The optional proof is a bounded, one-shot pipe. A descriptor whose writer
+/// never closes cannot hold a model dispatch indefinitely.
+#[cfg(unix)]
+fn read_exam_proof_pipe(
+    fd: std::os::fd::OwnedFd,
+) -> Result<Zeroizing<Vec<u8>>, ManagedGatewayError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileTypeExt;
+    let mut file = std::fs::File::from(fd);
+    if !file
+        .metadata()
+        .map_err(|_| ManagedGatewayError::DescriptorIo)?
+        .file_type()
+        .is_fifo()
+    {
+        return Err(ManagedGatewayError::InvalidDescriptor);
+    }
+    let raw = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(ManagedGatewayError::DescriptorIo);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut bytes = Zeroizing::new(Vec::new());
+    let mut chunk = [0_u8; 256];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => return Ok(bytes),
+            Ok(count) => {
+                bytes.extend_from_slice(&chunk[..count]);
+                chunk.fill(0);
+                if bytes.len() > 1_024 {
+                    return Err(ManagedGatewayError::InvalidDescriptor);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(ManagedGatewayError::DescriptorIo);
+                }
+                let mut poll = libc::pollfd {
+                    fd: raw,
+                    events: libc::POLLIN | libc::POLLHUP,
+                    revents: 0,
+                };
+                let wait_ms = i32::try_from(remaining.as_millis()).unwrap_or(1_000).max(1);
+                if unsafe { libc::poll(&mut poll, 1, wait_ms) } < 0 {
+                    return Err(ManagedGatewayError::DescriptorIo);
+                }
+            }
+            Err(_) => return Err(ManagedGatewayError::DescriptorIo),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ManagedGatewayError::DescriptorIo);
+        }
+    }
+}
+
 #[cfg(not(unix))]
 fn read_owned_descriptor(_: (), _: u64) -> Result<Vec<u8>, ManagedGatewayError> {
     Err(ManagedGatewayError::InvalidDescriptor)
@@ -1899,6 +2122,7 @@ fn broker_round_trip(
     path: &Path,
     payload: &[u8],
     max_response_frame_bytes: usize,
+    timeout: Option<std::time::Duration>,
 ) -> Result<(Vec<u8>, Vec<std::os::fd::OwnedFd>), BrokerError> {
     use std::io::Read;
     use std::io::Write;
@@ -1906,6 +2130,14 @@ fn broker_round_trip(
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(path).map_err(|_| BrokerError::Io)?;
+    if let Some(timeout) = timeout {
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|_| BrokerError::Io)?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|_| BrokerError::Io)?;
+    }
     validate_broker_peer(&stream)?;
     let frame_len = u32::try_from(payload.len()).map_err(|_| BrokerError::InvalidMessage)?;
     stream
@@ -1960,7 +2192,12 @@ fn broker_round_trip(
 }
 
 #[cfg(not(unix))]
-fn broker_round_trip(_: &Path, _: &[u8], _: usize) -> Result<(Vec<u8>, Vec<()>), BrokerError> {
+fn broker_round_trip(
+    _: &Path,
+    _: &[u8],
+    _: usize,
+    _: Option<std::time::Duration>,
+) -> Result<(Vec<u8>, Vec<()>), BrokerError> {
     Err(BrokerError::UnsupportedPlatform)
 }
 
@@ -2093,6 +2330,10 @@ fn validate_broker_peer(_: &std::os::unix::net::UnixStream) -> Result<(), Broker
     // LOCAL_PEERPID validation they do not implement.
     Err(BrokerError::InvalidPeer)
 }
+
+#[cfg(test)]
+#[path = "broker_exam_tests.rs"]
+mod exam_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2432,6 +2673,14 @@ mod tests {
             serde_json::json!({"opaqueAccountKey": opaque_account_key})
         );
         assert_eq!(account_epoch, "5ce47c6b-387a-4f92-9dd9-0bdb1082bc07");
+        assert_eq!(
+            serde_json::to_value(UsageReadPayload {
+                opaque_account_key,
+                include_advance: true
+            })
+            .unwrap(),
+            serde_json::json!({"opaqueAccountKey": opaque_account_key, "includeAdvance": true})
+        );
 
         let mut stale = binding.clone();
         stale.account_epoch = Some("5CE47C6B-387A-4F92-9DD9-0BDB1082BC07".to_string());

@@ -449,6 +449,15 @@ fn model_info_from_catalog_model(index: usize, model: &CatalogModel) -> CoreResu
         .map_err(|_| WhisplyCatalogModelsEndpoint::unavailable_catalog_error())?;
     let output_limit = i64::try_from(model.capabilities.output_limit)
         .map_err(|_| WhisplyCatalogModelsEndpoint::unavailable_catalog_error())?;
+    // A client planning limit, never provider/funding authority. OpenRouter's
+    // reviewed Astra endpoints have an independent 922k input-only cap inside
+    // the nominal 1.05M context window. Keep the public window unchanged and
+    // compact before the endpoint input cap, with the existing 90% headroom.
+    let planning_input_limit = if model.id.as_str() == "gpt-6-astra" {
+        context_limit.min(922_000)
+    } else {
+        context_limit
+    };
     let available = model.availability == ModelAvailability::Available
         && model.subscription_availability == SubscriptionAvailability::Available;
     let priority = if model.recommended_default {
@@ -528,7 +537,7 @@ fn model_info_from_catalog_model(index: usize, model: &CatalogModel) -> CoreResu
         supports_image_detail_original: model.capabilities.supports_images,
         context_window: Some(context_limit),
         max_context_window: Some(context_limit),
-        auto_compact_token_limit: Some((context_limit / 10) * 9),
+        auto_compact_token_limit: Some((planning_input_limit / 10) * 9),
         // `comp_hash` describes whether persisted conversation items need a
         // compaction handoff before another model can consume them. A catalog
         // route revision is deployment/routing identity, not a history format:
@@ -601,9 +610,16 @@ fn reasoning_efforts_from_catalog_model(
             description: "Available Whisply reasoning level.".to_string(),
         });
     }
+    // Match the new model's published default without changing a saved user
+    // effort or the established default for any existing product model.
+    let preferred_default = if model.id.as_str() == "fable-5.1" {
+        ReasoningEffort::High
+    } else {
+        ReasoningEffort::Medium
+    };
     let default_reasoning_level = supported_reasoning_levels
         .iter()
-        .find(|preset| preset.effort == ReasoningEffort::Medium)
+        .find(|preset| preset.effort == preferred_default)
         .or_else(|| supported_reasoning_levels.first())
         .map(|preset| preset.effort.clone());
 
@@ -708,6 +724,7 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
             | "whisply_refused"
             | "whisply_cancelled"
             | "whisply_stopped"
+            | "whisply_exam_reconnect_required"
     ) {
         return None;
     }
@@ -1047,6 +1064,46 @@ mod tests {
         );
         assert_eq!(first.auto_compact_token_limit, Some(945_000));
         assert_eq!(second.auto_compact_token_limit, Some(900_000));
+    }
+
+    #[test]
+    fn astra_input_only_cap_does_not_shrink_its_nominal_context_or_inflate_output() {
+        let mut model = signed_catalog_model();
+        model.id = ModelId::parse("gpt-6-astra").expect("stable model id");
+        model.capabilities.context_limit = 1_050_000;
+        model.capabilities.output_limit = 16_000;
+        let projected = model_info_from_catalog_model(0, &model).expect("Astra projection");
+        assert_eq!(projected.context_window, Some(1_050_000));
+        assert_eq!(projected.max_context_window, Some(1_050_000));
+        assert_eq!(projected.auto_compact_token_limit, Some(829_800));
+        assert_eq!(
+            projected.truncation_policy,
+            TruncationPolicyConfig::tokens(16_000)
+        );
+        model.id = ModelId::parse("gpt-5.6-sol").expect("existing stable model id");
+        let existing = model_info_from_catalog_model(1, &model).expect("existing projection");
+        assert_eq!(existing.auto_compact_token_limit, Some(945_000));
+    }
+
+    #[test]
+    fn new_model_reasoning_defaults_preserve_existing_model_defaults() {
+        for (id, default) in [
+            ("gpt-6-astra", ReasoningEffort::Medium),
+            ("fable-5.1", ReasoningEffort::High),
+            ("gpt-5.6-terra", ReasoningEffort::Medium),
+            ("opus-5", ReasoningEffort::Medium),
+        ] {
+            let mut model = signed_catalog_model();
+            model.id = ModelId::parse(id).expect("stable product id");
+            model.allowed_reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let (actual, supported) =
+                reasoning_efforts_from_catalog_model(&model).expect("reviewed reasoning efforts");
+            assert_eq!(actual, Some(default));
+            assert_eq!(supported.len(), 5);
+        }
     }
 
     #[test]

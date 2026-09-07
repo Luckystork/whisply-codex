@@ -89,11 +89,16 @@ fn apply_current_test_selector(catalog: &mut crate::ModelCatalog) -> Result<(), 
         || fixture.catalog_revision.trim().is_empty()
         || fixture.rate_card_revision.trim().is_empty()
         || fixture.default_model_id.trim().is_empty()
-        || fixture.models.len() != catalog.models.len()
+        || fixture.models.len() != catalog.models.len() + 2
     {
         return Err(CatalogError::InvalidCatalog);
     }
 
+    let selector_order: Vec<_> = fixture
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect();
     let mut configured = BTreeMap::new();
     for selector in fixture.models {
         if selector.id.trim().is_empty()
@@ -118,6 +123,19 @@ fn apply_current_test_selector(catalog: &mut crate::ModelCatalog) -> Result<(), 
         }
     }
 
+    // The historical signed fixture remains immutable. Only these two reviewed
+    // additions enter the current test envelope, with all actual metadata
+    // supplied by the current selector fixture before the test-only signing.
+    for (new_id, historical_template) in [("gpt-6-astra", "gpt-5.6-sol"), ("fable-5.1", "opus-5")] {
+        let mut model = catalog
+            .models
+            .iter()
+            .find(|model| model.id.as_str() == historical_template)
+            .ok_or(CatalogError::InvalidCatalog)?
+            .clone();
+        model.id = crate::ModelId::parse(new_id.to_string())?;
+        catalog.models.push(model);
+    }
     for model in &mut catalog.models {
         // The checked-in signature fixture is deliberately historical. Map
         // only the two reviewed product replacements before re-signing this
@@ -162,6 +180,12 @@ fn apply_current_test_selector(catalog: &mut crate::ModelCatalog) -> Result<(), 
     if !configured.is_empty() {
         return Err(CatalogError::InvalidCatalog);
     }
+    catalog.models.sort_by_key(|model| {
+        selector_order
+            .iter()
+            .position(|id| id == model.id.as_str())
+            .unwrap_or(usize::MAX)
+    });
 
     catalog.schema_version = MODEL_CATALOG_SCHEMA_VERSION;
     catalog.catalog_revision = format!("test-{}", fixture.catalog_revision);
@@ -182,7 +206,7 @@ pub fn test_catalog_key_set() -> CatalogVerificationKeySet {
     }
 }
 
-/// Returns a current, signed projection of the checked-in twelve-model test
+/// Returns a current, signed projection of the checked-in fourteen-model test
 /// catalog. The production-signature fixture intentionally expires; retiming,
 /// selector projection, and re-signing here keep test freshness real without
 /// granting a generic catalog cache or changing the shipping trust root.
@@ -235,7 +259,7 @@ mod tests {
         envelope
             .verify_at(&test_catalog_key_set(), now_unix_seconds)
             .expect("test catalog must verify");
-        assert_eq!(envelope.catalog.models.len(), 12);
+        assert_eq!(envelope.catalog.models.len(), 14);
         assert!(
             envelope
                 .catalog
@@ -251,6 +275,7 @@ mod tests {
                 .map(|model| (model.id.as_str(), model.usage_multiplier_millis))
                 .collect::<Vec<_>>(),
             vec![
+                ("gpt-6-astra", 1_000),
                 ("gpt-5.6-sol", 2_500),
                 ("gpt-5.6-sol-pro", 3_500),
                 ("gpt-5.6-terra", 1_300),
@@ -259,6 +284,7 @@ mod tests {
                 ("gpt-5.6-luna-pro", 800),
                 ("haiku-4.5", 500),
                 ("sonnet-5", 1_000),
+                ("fable-5.1", 1_000),
                 ("opus-5", 2_500),
                 ("gemini-3.1-pro", 1_100),
                 ("gemini-3.8-flash", 800),
@@ -310,13 +336,8 @@ mod tests {
         assert!(grok.capabilities.supports_computer_use);
         assert!(!grok.capabilities.supports_native_visible_progress);
         assert_eq!(grok.response_start_timeout_seconds, 120);
-        assert!(
-            envelope
-                .catalog
-                .models
-                .iter()
-                .all(|model| model.id.as_str() != "gemini-3.5-flash"
-                    && model.id.as_str() != "grok-4.5")
-        );
+        assert!(envelope.catalog.models.iter().all(|model| model.id.as_str()
+            != "gemini-3.5-flash"
+            && model.id.as_str() != "grok-4.5"));
     }
 }

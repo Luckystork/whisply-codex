@@ -250,8 +250,7 @@ async fn agents_md_paths(
 }
 
 fn candidate_filenames(config: &Config) -> Vec<&str> {
-    let mut names: Vec<&str> =
-        Vec::with_capacity(3 + config.project_doc_fallback_filenames.len());
+    let mut names: Vec<&str> = Vec::with_capacity(3 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_AGENTS_MD_FILENAME);
     names.push(DEFAULT_AGENTS_MD_FILENAME);
     if config.workspace_directory_selected {

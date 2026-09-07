@@ -117,6 +117,16 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
+
+fn exam_turn_proof_unavailable() -> ApiError {
+    ApiError::Transport(TransportError::Http {
+        status: StatusCode::FORBIDDEN, url: None, headers: None,
+        body: Some(serde_json::json!({ "error": {
+            "code": "whisply_exam_reconnect_required",
+            "message": "This Exam turn’s session changed or expired. Send a new request after Exam Mode reconnects."
+        }}).to_string()),
+    })
+}
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -1251,9 +1261,60 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         compression: Compression,
         use_responses_lite: bool,
-    ) -> ApiResponsesOptions {
+    ) -> std::result::Result<ApiResponsesOptions, ApiError> {
         let is_whisply_direct = self.client.is_whisply_direct_provider();
-        ApiResponsesOptions {
+        let exam_proof = if is_whisply_direct {
+            if let Some(reference) = responses_metadata.exam_turn_reference {
+                let gateway = codex_whisply::managed_gateway_client_from_environment()
+                    .map_err(|_| exam_turn_proof_unavailable())?
+                    .ok_or_else(exam_turn_proof_unavailable)?;
+                let thread = responses_metadata.thread_id.clone();
+                let turn = responses_metadata
+                    .turn_id
+                    .clone()
+                    .ok_or_else(exam_turn_proof_unavailable)?;
+                let parent = if crate::guardian::is_guardian_reviewer_source(
+                    &self.client.state.session_source,
+                ) {
+                    Some((
+                        responses_metadata
+                            .parent_thread_id
+                            .ok_or_else(exam_turn_proof_unavailable)?
+                            .to_string(),
+                        responses_metadata
+                            .parent_turn_id
+                            .clone()
+                            .ok_or_else(exam_turn_proof_unavailable)?,
+                    ))
+                } else {
+                    None
+                };
+                let proof = tokio::task::spawn_blocking(move || {
+                    gateway.exam_turn_proof(
+                        reference,
+                        &thread,
+                        &turn,
+                        parent
+                            .as_ref()
+                            .map(|(thread, turn)| (thread.as_str(), turn.as_str())),
+                    )
+                })
+                .await
+                .map_err(|_| exam_turn_proof_unavailable())?
+                .map_err(|_| exam_turn_proof_unavailable())?;
+                if !proof.is_current()
+                    || proof.installation_id() != responses_metadata.installation_id
+                {
+                    return Err(exam_turn_proof_unavailable());
+                }
+                Some(proof)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(ApiResponsesOptions {
             session_id: Some(responses_metadata.session_id.to_string()),
             thread_id: Some(responses_metadata.thread_id.to_string()),
             session_source: Some(self.client.state.session_source.clone()),
@@ -1264,6 +1325,12 @@ impl ModelClientSession {
                         HeaderValue::from_str(&responses_metadata.installation_id)
                     {
                         headers.insert(X_WHISPLY_INSTALLATION_ID_HEADER, installation_id);
+                    }
+                    if let Some(proof) = exam_proof {
+                        let mut header = HeaderValue::from_str(proof.token())
+                            .map_err(|_| exam_turn_proof_unavailable())?;
+                        header.set_sensitive(true);
+                        headers.insert("x-whisply-usage-session", header);
                     }
                     headers
                 } else {
@@ -1286,7 +1353,7 @@ impl ModelClientSession {
             },
             compression,
             turn_state: Some(Arc::clone(&self.turn_state)),
-        }
+        })
     }
 
     /// Checks whether the current request is an incremental extension of the previous request.
@@ -1551,7 +1618,8 @@ impl ModelClientSession {
                     compression,
                     model_info.use_responses_lite,
                 )
-                .await;
+                .await
+                .map_err(|error| self.client.state.provider.map_api_error(error))?;
 
             let mut request = self.client.build_responses_request(
                 &client_setup.api_provider,

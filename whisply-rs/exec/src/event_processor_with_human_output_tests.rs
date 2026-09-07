@@ -549,6 +549,7 @@ fn account_usage_snapshot() -> codex_whisply::ContextualUsageSnapshot {
         cache_write: 0,
     };
     codex_whisply::ContextualUsageSnapshot {
+        advance_windows: None,
         contract_version: codex_whisply::CONTEXTUAL_ACTION_CONTRACT_VERSION.to_string(),
         tier: "pro".to_string(),
         windows: vec![codex_whisply::ContextualUsageWindow {

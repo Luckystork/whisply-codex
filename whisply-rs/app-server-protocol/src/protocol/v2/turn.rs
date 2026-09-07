@@ -70,6 +70,12 @@ pub struct AdditionalContextEntry {
 #[ts(export_to = "v2/")]
 pub struct TurnStartParams {
     pub thread_id: String,
+    /// Optional native-broker Exam turn reference. Transport-only: it is not
+    /// model context, durable history, or authority without its exact broker
+    /// registration. Omission keeps ordinary admission unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub whisply_exam_turn_reference: Option<String>,
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,

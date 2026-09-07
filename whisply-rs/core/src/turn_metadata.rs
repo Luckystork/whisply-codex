@@ -9,6 +9,8 @@ use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use codex_whisply::EXAM_TURN_REFERENCE_METADATA_KEY;
+use codex_whisply::RuntimeExamTurnReference;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -106,6 +108,7 @@ pub(crate) struct TurnMetadataState {
     code_mode_tool_names: RwLock<Option<BTreeMap<String, ToolName>>>,
     turn_started_at_unix_ms: RwLock<Option<i64>>,
     responsesapi_client_metadata: RwLock<BTreeMap<String, String>>,
+    exam_turn_reference: RwLock<Option<RuntimeExamTurnReference>>,
     user_input_requested_during_turn: AtomicBool,
     enrichment_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -151,6 +154,7 @@ impl TurnMetadataState {
             code_mode_tool_names: RwLock::new(None),
             turn_started_at_unix_ms: RwLock::new(None),
             responsesapi_client_metadata: RwLock::new(BTreeMap::new()),
+            exam_turn_reference: RwLock::new(None),
             user_input_requested_during_turn: AtomicBool::new(false),
             enrichment_task: Mutex::new(None),
         }
@@ -203,6 +207,10 @@ impl TurnMetadataState {
         request_kind: CodexResponsesRequestKind,
     ) -> CodexResponsesMetadata {
         CodexResponsesMetadata {
+            exam_turn_reference: *self
+                .exam_turn_reference
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             installation_id,
             window_id,
             request_kind: Some(request_kind),
@@ -235,13 +243,34 @@ impl TurnMetadataState {
 
     pub(crate) fn set_responsesapi_client_metadata(
         &self,
-        responsesapi_client_metadata: HashMap<String, String>,
+        mut responsesapi_client_metadata: HashMap<String, String>,
     ) {
+        // Metadata updates within a turn cannot silently remove its explicit
+        // reference. A new turn starts with no reference in new state.
+        if let Some(value) = responsesapi_client_metadata.remove(EXAM_TURN_REFERENCE_METADATA_KEY) {
+            *self
+                .exam_turn_reference
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(RuntimeExamTurnReference::parse(&value));
+        }
         *self
             .responsesapi_client_metadata
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             filter_extra_metadata(responsesapi_client_metadata);
+    }
+
+    pub(crate) fn exam_turn_transport_metadata(&self) -> Option<HashMap<String, String>> {
+        self.exam_turn_reference
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|reference| {
+                HashMap::from([(
+                    EXAM_TURN_REFERENCE_METADATA_KEY.to_string(),
+                    reference.metadata_value(),
+                )])
+            })
     }
 
     pub(crate) fn workspace_kind(&self) -> Option<String> {

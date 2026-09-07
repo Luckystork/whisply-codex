@@ -243,6 +243,14 @@ pub(crate) fn compose_managed_usage_data(
         return StatusRateLimitData::Unavailable;
     }
 
+    for explanation in codex_whisply::account_usage_advance_explanations(snapshot, now.timestamp())
+    {
+        rows.push(StatusRateLimitRow {
+            label: "Exam advance".to_string(),
+            value: StatusRateLimitValue::Text(explanation),
+        });
+    }
+
     rows.push(StatusRateLimitRow {
         label: "Rate card".to_string(),
         value: StatusRateLimitValue::Text(format!(

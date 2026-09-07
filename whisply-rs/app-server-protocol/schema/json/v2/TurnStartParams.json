@@ -678,6 +678,13 @@
     },
     "threadId": {
       "type": "string"
+    },
+    "whisplyExamTurnReference": {
+      "description": "Optional native-broker Exam turn reference. Transport-only: it is not model context, durable history, or authority without its exact broker registration. Omission keeps ordinary admission unchanged.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

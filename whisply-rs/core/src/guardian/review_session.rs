@@ -844,7 +844,11 @@ async fn run_review_on_session(
         Op::UserInput {
             items: prompt_items.items,
             final_output_json_schema: Some(params.schema.clone()),
-            responsesapi_client_metadata: None,
+            // Exact parent reference stays transport-only, outside the review prompt/history.
+            responsesapi_client_metadata: params
+                .parent_turn
+                .turn_metadata_state
+                .exam_turn_transport_metadata(),
             additional_context: Default::default(),
             thread_settings: whisply_protocol::protocol::ThreadSettingsOverrides {
                 environments: Some(whisply_protocol::protocol::TurnEnvironmentSelections::new(

@@ -11,7 +11,12 @@ import type { AskForApproval } from "./AskForApproval";
 import type { SandboxPolicy } from "./SandboxPolicy";
 import type { UserInput } from "./UserInput";
 
-export type TurnStartParams = {threadId: string, clientUserMessageId?: string | null, input: Array<UserInput>, /**
+export type TurnStartParams = {threadId: string, /**
+ * Optional native-broker Exam turn reference. Transport-only: it is not
+ * model context, durable history, or authority without its exact broker
+ * registration. Omission keeps ordinary admission unchanged.
+ */
+whisplyExamTurnReference?: string | null, clientUserMessageId?: string | null, input: Array<UserInput>, /**
  * Optional client-provided context fragments keyed by an opaque source identifier.
  *
  * Stable in the Whisply fork (TDR-006). Whisply continues conversations
