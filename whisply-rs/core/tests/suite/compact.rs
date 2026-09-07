@@ -30,6 +30,8 @@ use whisply_protocol::items::TurnItem;
 use whisply_protocol::models::PermissionProfile;
 use whisply_protocol::openai_models::ModelInfo;
 use whisply_protocol::openai_models::ModelsResponse;
+use whisply_protocol::protocol::AdditionalContextEntry;
+use whisply_protocol::protocol::AdditionalContextKind;
 use whisply_protocol::protocol::AskForApproval;
 use whisply_protocol::protocol::EventMsg;
 use whisply_protocol::protocol::HookEventName;
@@ -4493,7 +4495,9 @@ async fn auto_compact_body_after_prefix_still_caps_at_context_window() {
 
     let first_turn = sse(vec![
         ev_assistant_message("m1", FIRST_REPLY),
-        ev_completed_with_usage("r1", /*input_tokens*/ 80, /*output_tokens*/ 5),
+        // Leave room for the next serialized input. Pending-input overflow
+        // has its own regression; this case isolates an already-full window.
+        ev_completed_with_usage("r1", /*input_tokens*/ 40, /*output_tokens*/ 5),
     ]);
     let second_turn = sse(vec![
         ev_assistant_message("m2", SECOND_LARGE_REPLY),
@@ -4765,6 +4769,204 @@ async fn auto_compact_runs_when_reasoning_header_clears_between_turns() {
         1,
         "remote compaction should run once after the reasoning header clears"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_turn_compacts_for_pending_input_before_recording_it() -> Result<()> {
+    assert_pending_input_compaction(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_turn_compacts_for_pending_application_context_before_recording_it() -> Result<()> {
+    assert_pending_input_compaction(true).await
+}
+
+async fn assert_pending_input_compaction(large_application_context: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("old-answer", "The earlier answer."),
+                ev_completed_with_tokens(
+                    "old-response",
+                    if large_application_context {
+                        49_000
+                    } else {
+                        30_000
+                    },
+                ),
+            ]),
+            sse(vec![
+                ev_assistant_message("compact-answer", "The earlier conversation summary."),
+                ev_completed_with_tokens("compact-response", 2_000),
+            ]),
+            sse(vec![
+                ev_assistant_message("fresh-answer", "The fresh request was answered."),
+                ev_completed_with_tokens("fresh-response", 38_000),
+            ]),
+        ],
+    )
+    .await;
+    let provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider = provider;
+            config.model_auto_compact_token_limit = Some(50_000);
+            config.include_environment_context = false;
+            set_test_compact_prompt(config);
+        })
+        .build(&server)
+        .await?;
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "An earlier request.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    // In one case the fresh user text exceeds the compactor's 20K retained
+    // tail; in the other, application context supplies the pending growth.
+    // Both requests fit the model themselves and must remain unsummarized.
+    let fresh_text =
+        "Fresh unsampled user text. ".repeat(if large_application_context { 1 } else { 5_000 });
+    // Each entry remains below the existing 1K-token AdditionalContext input
+    // contract. Their combined, admitted growth crosses the remaining room.
+    let fresh_context = "Fresh application context must arrive exactly once. "
+        .repeat(if large_application_context { 50 } else { 1 });
+    let context_count = if large_application_context { 2 } else { 1 };
+    let fresh_image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let mut items = vec![UserInput::Text {
+        text: fresh_text.clone(),
+        text_elements: Vec::new(),
+    }];
+    if !large_application_context {
+        items.push(UserInput::Image {
+            image_url: fresh_image.to_string(),
+            detail: None,
+        });
+    }
+    let fresh_turn_id = test
+        .codex
+        .submit(Op::UserInput {
+            items,
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: (0..context_count)
+                .map(|index| {
+                    (
+                        format!("fresh_context_{index}"),
+                        AdditionalContextEntry {
+                            value: fresh_context.clone(),
+                            kind: AdditionalContextKind::Application,
+                        },
+                    )
+                })
+                .collect(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let completion = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let EventMsg::TurnComplete(completion) = completion else {
+        unreachable!()
+    };
+    assert_eq!(completion.turn_id, fresh_turn_id);
+    assert!(completion.error.is_none());
+
+    let requests = requests.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "pending input must trigger one old-history compaction before its first sampling request"
+    );
+    assert!(
+        !requests[1]
+            .body_json()
+            .to_string()
+            .contains("Fresh unsampled user text.")
+    );
+    assert!(
+        !requests[1]
+            .body_json()
+            .to_string()
+            .contains(fresh_context.as_str())
+    );
+    assert!(requests[1].message_input_image_urls("user").is_empty());
+    assert_eq!(
+        requests[2]
+            .message_input_texts("user")
+            .iter()
+            .filter(|text| **text == fresh_text)
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests[2].message_input_image_urls("user"),
+        if large_application_context {
+            Vec::new()
+        } else {
+            vec![fresh_image.to_string()]
+        }
+    );
+    assert_eq!(
+        requests[2]
+            .message_input_texts("developer")
+            .iter()
+            .filter(|text| text.contains(fresh_context.as_str()))
+            .count(),
+        context_count
+    );
+    assert_eq!(test.codex.compaction_status().compaction_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_first_input_does_not_compact_an_empty_conversation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![sse(vec![
+            ev_assistant_message("first-answer", "The first request was answered."),
+            ev_completed_with_tokens("first-response", 60_000),
+        ])],
+    )
+    .await;
+    let provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider = provider;
+            config.model_auto_compact_token_limit = Some(50_000);
+            config.include_environment_context = false;
+            set_test_compact_prompt(config);
+        })
+        .build(&server)
+        .await?;
+    let text = "First unsampled input. ".repeat(10_000);
+    test.submit_turn(&text).await?;
+    let requests = requests.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "there is no old conversation to summarize"
+    );
+    assert_eq!(requests[0].message_input_texts("user"), vec![text]);
+    assert_eq!(test.codex.compaction_status().compaction_count, 0);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

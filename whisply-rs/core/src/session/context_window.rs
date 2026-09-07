@@ -9,11 +9,29 @@ pub(crate) struct ContextWindowTokenStatus {
     // Usage counted against `model_auto_compact_token_limit` for the current scope.
     pub(crate) auto_compact_scope_tokens: i64,
     pub(crate) auto_compact_scope_limit: Option<i64>,
+    auto_compact_limit_including_fallback: Option<i64>,
     pub(crate) full_context_window_limit: Option<i64>,
     pub(crate) base_window_tokens_remaining: Option<i64>,
     pub(crate) auto_compact_window_prefill_tokens: Option<i64>,
     pub(crate) full_context_window_limit_reached: bool,
     pub(crate) token_limit_reached: bool,
+}
+
+impl ContextWindowTokenStatus {
+    /// Preview incoming input without recording or compacting that unsampled
+    /// material. The same model limits and fallback headroom apply as above.
+    pub(crate) fn reaches_limit_with_pending_input(&self, pending_tokens: i64) -> bool {
+        let pending_tokens = pending_tokens.max(0);
+        self.auto_compact_limit_including_fallback
+            .is_some_and(|limit| {
+                self.auto_compact_scope_tokens
+                    .saturating_add(pending_tokens)
+                    >= limit
+            })
+            || self.full_context_window_limit.is_some_and(|limit| {
+                self.active_context_tokens.saturating_add(pending_tokens) >= limit
+            })
+    }
 }
 
 fn tokens_remaining(limit: Option<i64>, used: i64) -> Option<i64> {
@@ -82,6 +100,7 @@ pub(crate) async fn context_window_token_status(
         active_context_tokens,
         auto_compact_scope_tokens,
         auto_compact_scope_limit,
+        auto_compact_limit_including_fallback: buffered_auto_compact_limit,
         full_context_window_limit,
         base_window_tokens_remaining,
         auto_compact_window_prefill_tokens,
