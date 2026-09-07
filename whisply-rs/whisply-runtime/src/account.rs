@@ -141,7 +141,14 @@ impl ContextualUsageSnapshot {
             .iter()
             .filter(|window| window.category == UsageWindowCategory::Usage)
         {
-            if window.rate_card_version.as_deref() != Some(&self.metering.rate_card_version) {
+            // A window can retain its original card through a pricing refresh,
+            // including a borrowed window that has just become current. Its
+            // validated amounts remain authoritative for this read projection.
+            if window
+                .rate_card_version
+                .as_deref()
+                .is_none_or(|version| version.trim().is_empty())
+            {
                 return Err(AccountProjectionError::InvalidUsage);
             }
         }
@@ -1252,6 +1259,28 @@ mod tests {
             .remove("advanceWindows");
         assert_eq!(original_encoded.as_object().unwrap().len(), 6);
         assert_eq!(serde_json::to_value(decoded).unwrap(), original_encoded);
+    }
+
+    #[test]
+    fn borrowed_window_becomes_current_before_another_paid_request() {
+        let mut value = advance_snapshot_value();
+        let mut current = value["advanceWindows"][1].clone();
+        current["rateCardVersion"] = value["advanceWindows"][0]["rateCardVersion"].clone();
+        value["windows"][0] = current.clone();
+        value["generatedAt"] = current["startsAt"].clone();
+        value["advanceWindows"] = serde_json::json!([current]);
+        let snapshot: ContextualUsageSnapshot = serde_json::from_value(value).unwrap();
+        assert!(snapshot.validate().is_ok());
+        assert_ne!(
+            snapshot.windows[0].rate_card_version.as_deref(),
+            Some(snapshot.metering.rate_card_version.as_str())
+        );
+        assert_eq!(snapshot.windows[0].used_fraction, 0.2);
+        for invalid_card in [None, Some(String::new())] {
+            let mut invalid = snapshot.clone();
+            invalid.windows[0].rate_card_version = invalid_card;
+            assert_eq!(invalid.validate(), Err(AccountProjectionError::InvalidUsage));
+        }
     }
 
     #[test]
