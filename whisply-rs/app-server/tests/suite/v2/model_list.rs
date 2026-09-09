@@ -43,7 +43,7 @@ async fn whisply_model_catalog_read_returns_only_signed_product_metadata() -> Re
         .await?;
 
     assert_eq!(response.schema_version, 2);
-    assert_eq!(response.models.len(), 14);
+    assert_eq!(response.models.len(), 11);
     let default = response
         .models
         .iter()

@@ -85,6 +85,16 @@ fn apply_current_test_selector(catalog: &mut crate::ModelCatalog) -> Result<(), 
         "../tests/fixtures/whisply-model-selector-test-v1.json"
     ))
     .map_err(CatalogError::Serialize)?;
+    // The signed historical fixture still carries the retired OpenAI Pro
+    // rows so its rotation signature stays valid. Drop those three before
+    // the reviewed Astra/Fable additions so the live selector (11) lines
+    // up with historical_base (9) + 2.
+    catalog.models.retain(|model| {
+        !matches!(
+            model.id.as_str(),
+            "gpt-5.6-sol-pro" | "gpt-5.6-terra-pro" | "gpt-5.6-luna-pro"
+        )
+    });
     if fixture.schema_version != MODEL_CATALOG_SCHEMA_VERSION
         || fixture.catalog_revision.trim().is_empty()
         || fixture.rate_card_revision.trim().is_empty()
@@ -206,7 +216,7 @@ pub fn test_catalog_key_set() -> CatalogVerificationKeySet {
     }
 }
 
-/// Returns a current, signed projection of the checked-in fourteen-model test
+/// Returns a current, signed projection of the checked-in eleven-model test
 /// catalog. The production-signature fixture intentionally expires; retiming,
 /// selector projection, and re-signing here keep test freshness real without
 /// granting a generic catalog cache or changing the shipping trust root.
@@ -259,7 +269,7 @@ mod tests {
         envelope
             .verify_at(&test_catalog_key_set(), now_unix_seconds)
             .expect("test catalog must verify");
-        assert_eq!(envelope.catalog.models.len(), 14);
+        assert_eq!(envelope.catalog.models.len(), 11);
         assert!(
             envelope
                 .catalog
@@ -276,19 +286,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("gpt-6-astra", 1_000),
-                ("gpt-5.6-sol", 2_500),
-                ("gpt-5.6-sol-pro", 3_500),
-                ("gpt-5.6-terra", 1_300),
-                ("gpt-5.6-terra-pro", 1_800),
-                ("gpt-5.6-luna", 500),
-                ("gpt-5.6-luna-pro", 800),
-                ("haiku-4.5", 500),
-                ("sonnet-5", 1_000),
+                ("gpt-5.6-sol", 1_000),
+                ("gpt-5.6-terra", 1_000),
+                ("gpt-5.6-luna", 1_000),
                 ("fable-5.1", 1_000),
-                ("opus-5", 2_500),
-                ("gemini-3.1-pro", 1_100),
-                ("gemini-3.8-flash", 800),
-                ("grok-4.6", 700),
+                ("haiku-4.5", 1_000),
+                ("sonnet-5", 1_000),
+                ("opus-5", 1_000),
+                ("gemini-3.1-pro", 1_000),
+                ("gemini-3.8-flash", 1_000),
+                ("grok-4.6", 1_000),
             ]
         );
         assert_eq!(
