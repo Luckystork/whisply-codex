@@ -1459,8 +1459,7 @@ mod tests {
 
     #[tokio::test]
     async fn guardian_review_session_compact_scope_change_invalidates_cached_session() {
-        let mut parent_config = crate::config::test_config().await;
-        parent_config.model_auto_compact_token_limit_scope = AutoCompactTokenLimitScope::Total;
+        let parent_config = crate::config::test_config().await;
         let cached_spawn_config = build_guardian_review_session_config(
             &parent_config,
             /*live_network_config*/ None,

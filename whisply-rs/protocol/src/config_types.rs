@@ -30,11 +30,11 @@ use crate::openai_models::ReasoningEffort;
 #[strum(serialize_all = "snake_case")]
 pub enum AutoCompactTokenLimitScope {
     /// Count the full active context against the limit.
+    #[default]
     Total,
     /// Count sampled output and later growth after the carried window prefix.
-    /// Default so the always-present system/tools floor does not drive
-    /// automatic compaction or fill the context meter.
-    #[default]
+    /// Prefer this when the always-present system/tools floor must not drive
+    /// automatic compaction or fill the context meter by itself.
     BodyAfterPrefix,
 }
 
