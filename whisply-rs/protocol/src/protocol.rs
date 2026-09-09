@@ -2122,7 +2122,20 @@ impl TokenUsageInfo {
     }
 
     pub fn append_last_usage(&mut self, last: &TokenUsage) {
-        self.total_token_usage.add_assign(last);
+        // `last.total_tokens` is active context occupancy after the turn (often
+        // ~BASELINE_TOKENS for system/tools), not a billable delta. Accumulate
+        // blended usage into the running total; keep `last` as the occupancy
+        // snapshot for context-window accounting.
+        let billable = TokenUsage {
+            input_tokens: last.non_cached_input(),
+            cached_input_tokens: last.cached_input(),
+            cache_write_input_tokens: last.cache_write_input_tokens.max(0),
+            output_tokens: last.output_tokens.max(0),
+            reasoning_output_tokens: last.reasoning_output_tokens.max(0),
+            total_tokens: last.blended_total(),
+            codex_rollout_budget_units: last.codex_rollout_budget_units.clone(),
+        };
+        self.total_token_usage.add_assign(&billable);
         self.last_token_usage = last.clone();
     }
 
