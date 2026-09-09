@@ -341,7 +341,7 @@ mod tests {
             .expect("Grok fixture model");
         assert_eq!(grok.short_name, "Grok 4.6");
         assert!(grok.capabilities.supports_computer_use);
-        assert!(!grok.capabilities.supports_native_visible_progress);
+        assert!(grok.capabilities.supports_native_visible_progress);
         assert_eq!(grok.response_start_timeout_seconds, 120);
         assert!(envelope.catalog.models.iter().all(|model| model.id.as_str()
             != "gemini-3.5-flash"
