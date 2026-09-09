@@ -721,13 +721,13 @@ async fn turn_and_completed_response_spans_record_token_usage() {
         logs.lines().any(|line| {
             line.contains("turn{otel.name=\"session_task.turn\"")
                 && line.contains("codex.turn.reasoning_effort=high")
-                && line.contains("codex.turn.token_usage.input_tokens=3")
+                && line.contains("codex.turn.token_usage.input_tokens=2")
                 && line.contains("codex.turn.token_usage.cached_input_tokens=1")
                 && line.contains("codex.turn.token_usage.cache_write_input_tokens=2")
-                && line.contains("codex.turn.token_usage.non_cached_input_tokens=2")
+                && line.contains("codex.turn.token_usage.non_cached_input_tokens=1")
                 && line.contains("codex.turn.token_usage.output_tokens=5")
                 && line.contains("codex.turn.token_usage.reasoning_output_tokens=2")
-                && line.contains("codex.turn.token_usage.total_tokens=9")
+                && line.contains("codex.turn.token_usage.total_tokens=7")
         }),
         "missing regular turn span token usage\nlogs:\n{logs}"
     );

@@ -1820,7 +1820,7 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
     let codex_home = TempDir::new()?;
     ManagedWhisplyConfig::new()
         .with_additional_config(
-            "compact_prompt = \"Summarize the conversation.\"\nmodel_auto_compact_token_limit = 200",
+            "compact_prompt = \"Summarize the conversation.\"\nmodel_auto_compact_token_limit = 200\nmodel_auto_compact_token_limit_scope = \"total\"",
         )
         .write(codex_home.path())?;
 

@@ -335,7 +335,7 @@
           "type": "string"
         },
         {
-          "description": "Count sampled output and later growth after the carried window prefix.",
+          "description": "Count sampled output and later growth after the carried window prefix. Default so the always-present system/tools floor does not drive automatic compaction or fill the context meter.",
           "enum": [
             "body_after_prefix"
           ],
