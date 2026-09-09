@@ -2250,6 +2250,11 @@ async fn managed_status_shows_the_same_meters_whisply_usage_prints() {
         !rendered.contains("data not available yet"),
         "a managed session has meters to show, got: {rendered}"
     );
+    // Local DST shifts the displayed reset clock; pin it for the snapshot.
+    let rendered = regex_lite::Regex::new(r"resets \d{2}:\d{2}")
+        .expect("reset clock pattern")
+        .replace_all(&rendered, "resets HH:MM")
+        .into_owned();
     insta::assert_snapshot!("managed_status_usage_meters", rendered);
 }
 
