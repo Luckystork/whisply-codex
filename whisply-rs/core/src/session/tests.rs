@@ -2939,6 +2939,25 @@ async fn record_token_usage_info_notifies_extension_contributors() {
         total_tokens: 20,
         codex_rollout_budget_units: None,
     };
+    // Totals accumulate billable blended usage; last keeps occupancy snapshots.
+    let first_billable = TokenUsage {
+        input_tokens: first_usage.non_cached_input(),
+        cached_input_tokens: first_usage.cached_input(),
+        cache_write_input_tokens: first_usage.cache_write_input_tokens.max(0),
+        output_tokens: first_usage.output_tokens.max(0),
+        reasoning_output_tokens: first_usage.reasoning_output_tokens.max(0),
+        total_tokens: first_usage.blended_total(),
+        codex_rollout_budget_units: first_usage.codex_rollout_budget_units.clone(),
+    };
+    let second_billable = TokenUsage {
+        input_tokens: second_usage.non_cached_input(),
+        cached_input_tokens: second_usage.cached_input(),
+        cache_write_input_tokens: second_usage.cache_write_input_tokens.max(0),
+        output_tokens: second_usage.output_tokens.max(0),
+        reasoning_output_tokens: second_usage.reasoning_output_tokens.max(0),
+        total_tokens: second_usage.blended_total(),
+        codex_rollout_budget_units: second_usage.codex_rollout_budget_units.clone(),
+    };
 
     session
         .record_token_usage_info(&turn_context, Some(&first_usage))
@@ -2949,15 +2968,15 @@ async fn record_token_usage_info_notifies_extension_contributors() {
         .await
         .expect("second usage should be recorded");
 
-    let mut expected_total_usage = first_usage.clone();
-    expected_total_usage.add_assign(&second_usage);
+    let mut expected_total_usage = first_billable.clone();
+    expected_total_usage.add_assign(&second_billable);
     let expected = vec![
         RecordedTokenUsage {
             session_level_id: session.session_id().to_string(),
             thread_level_id: session.thread_id.to_string(),
             turn_level_id: turn_context.sub_id.clone(),
             token_usage: TokenUsageInfo {
-                total_token_usage: first_usage.clone(),
+                total_token_usage: first_billable,
                 last_token_usage: first_usage,
                 model_context_window: turn_context.model_context_window(),
             },
