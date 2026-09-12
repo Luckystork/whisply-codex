@@ -753,6 +753,10 @@ fn is_whisply_nonretryable_terminal_error(error: &Error) -> bool {
                 | "whisply_refused"
                 | "whisply_cancelled"
                 | "whisply_stopped"
+                | "whisply_exam_reconnect_required"
+                | "whisply_provider_unavailable"
+                | "whisply_funding_unavailable"
+                | "whisply_malformed_stream"
         )
     )
 }
@@ -1240,10 +1244,7 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Err(ApiError::Retryable {
-                message,
-                delay: None,
-            }) => assert_eq!(
+            Err(ApiError::InvalidRequest { message }) => assert_eq!(
                 message,
                 "The model response ended without a complete terminal result."
             ),
@@ -1254,6 +1255,14 @@ mod tests {
     #[tokio::test]
     async fn managed_gateway_nonretryable_terminal_frames_do_not_retry() {
         for (code, message) in [
+            (
+                "whisply_auth_expired",
+                "Whisply account session is unavailable.",
+            ),
+            (
+                "whisply_subscription_required",
+                "This model is not included in the current Whisply plan.",
+            ),
             ("whisply_refused", "This response cannot be provided."),
             (
                 "whisply_cancelled",
@@ -1270,6 +1279,26 @@ mod tests {
             (
                 "whisply_usage_settlement_pending",
                 "A previous request is still finishing Usage settlement. Try again in a moment.",
+            ),
+            (
+                "whisply_model_unavailable",
+                "This Whisply model is not currently available.",
+            ),
+            (
+                "whisply_exam_reconnect_required",
+                "Exam Mode must reconnect before this request can continue.",
+            ),
+            (
+                "whisply_provider_unavailable",
+                "The selected model provider could not start this response.",
+            ),
+            (
+                "whisply_funding_unavailable",
+                "Whisply could not verify this plan's Usage funding.",
+            ),
+            (
+                "whisply_malformed_stream",
+                "The model response ended without a complete terminal result.",
             ),
         ] {
             let failure = json!({

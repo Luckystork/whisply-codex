@@ -322,6 +322,78 @@ fn ultra_reasoning_uses_max_for_requests() {
     );
 }
 
+#[test]
+fn responses_request_drops_other_and_compaction_trigger_items() {
+    let client = test_model_client(SessionSource::Cli);
+    let provider = client
+        .state
+        .provider
+        .info()
+        .to_api_provider(/*auth_mode*/ None)
+        .expect("test provider");
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::Other,
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "keep me".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::CompactionTrigger {},
+        ],
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+        },
+        ..Default::default()
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let request = client
+        .build_responses_request(
+            &provider,
+            &prompt,
+            &test_model_info(),
+            /*effort*/ None,
+            whisply_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+        )
+        .expect("responses request");
+
+    assert!(
+        request.input.iter().all(|item| {
+            !matches!(
+                item,
+                ResponseItem::Other | ResponseItem::CompactionTrigger { .. }
+            )
+        }),
+        "internal history items must not be sent: {:?}",
+        request.input
+    );
+    assert!(
+        request.input.iter().any(|item| matches!(
+            item,
+            ResponseItem::Message { content, .. }
+                if content.iter().any(|part| matches!(
+                    part,
+                    ContentItem::InputText { text } if text == "keep me"
+                ))
+        )),
+        "ordinary messages must still be sent: {:?}",
+        request.input
+    );
+}
+
 fn write_chatgpt_auth_json(codex_home: &std::path::Path) {
     let auth_json = json!({
         "tokens": {

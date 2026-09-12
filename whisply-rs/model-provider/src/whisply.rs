@@ -726,6 +726,9 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
             | "whisply_cancelled"
             | "whisply_stopped"
             | "whisply_exam_reconnect_required"
+            | "whisply_provider_unavailable"
+            | "whisply_funding_unavailable"
+            | "whisply_malformed_stream"
     ) {
         return None;
     }
@@ -924,11 +927,18 @@ mod tests {
         let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
 
         for code in [
+            "whisply_auth_expired",
+            "whisply_subscription_required",
+            "whisply_funding_unavailable",
+            "whisply_usage_limited",
+            "whisply_model_unavailable",
             "whisply_refused",
             "whisply_cancelled",
             "whisply_stopped",
-            "whisply_usage_limited",
+            "whisply_exam_reconnect_required",
             "whisply_usage_settlement_pending",
+            "whisply_provider_unavailable",
+            "whisply_malformed_stream",
         ] {
             let expected = format!("public {code} message");
             let error = ApiError::Transport(TransportError::Http {

@@ -944,6 +944,12 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
+        input.retain(|item| {
+            !matches!(
+                item,
+                ResponseItem::Other | ResponseItem::CompactionTrigger { .. }
+            )
+        });
         let is_openai = self.state.provider.info().is_openai();
         let is_whisply_direct = self.is_whisply_direct_provider();
         if !is_openai {
