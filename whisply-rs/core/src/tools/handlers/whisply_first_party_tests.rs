@@ -1,6 +1,8 @@
 use super::*;
 
 use serde_json::json;
+use whisply_protocol::protocol::ReviewDecision;
+use whisply_protocol::request_user_input::RequestUserInputResponse;
 
 fn succeeded_screen_result(content: Value) -> WhisplyToolResult {
     WhisplyToolResult {
@@ -463,4 +465,50 @@ fn a_capability_that_changed_nothing_does_not_manufacture_a_receipt() {
             );
         }
     }
+}
+
+#[test]
+fn luna_allow_and_session_allow_dispatch_computer_use() {
+    for decision in [ReviewDecision::Approved, ReviewDecision::ApprovedForSession] {
+        first_party_review_allows(&decision).expect("allow must dispatch");
+    }
+}
+
+#[test]
+fn luna_deny_does_not_dispatch_computer_use() {
+    let error = first_party_review_allows(&ReviewDecision::Denied {
+        rejection: "That app is not what was asked for.".to_string(),
+    })
+    .expect_err("deny must not dispatch");
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel("That app is not what was asked for.".to_string())
+    );
+}
+
+#[test]
+fn ask_user_allow_is_the_only_yes() {
+    let question_id = first_party_approval_question_id("call-9");
+    let mut answers = std::collections::HashMap::new();
+    answers.insert(
+        question_id.clone(),
+        whisply_protocol::request_user_input::RequestUserInputAnswer {
+            answers: vec!["Allow".to_string()],
+        },
+    );
+    let allowed = RequestUserInputResponse { answers };
+    assert!(first_party_user_approved(Some(&allowed), &question_id));
+
+    let mut declined = std::collections::HashMap::new();
+    declined.insert(
+        question_id.clone(),
+        whisply_protocol::request_user_input::RequestUserInputAnswer {
+            answers: vec!["Don't allow".to_string()],
+        },
+    );
+    assert!(!first_party_user_approved(
+        Some(&RequestUserInputResponse { answers: declined }),
+        &question_id
+    ));
+    assert!(!first_party_user_approved(None, &question_id));
 }

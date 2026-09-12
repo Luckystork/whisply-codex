@@ -287,6 +287,9 @@ pub enum GuardianReviewedAction {
         tool_title: Option<String>,
     },
     RequestPermissions {},
+    FirstPartyTool {
+        tool_id: String,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -599,6 +602,7 @@ pub(crate) enum ReviewSubjectKind {
     McpToolCall,
     Permissions,
     NetworkAccess,
+    FirstPartyTool,
 }
 
 #[allow(dead_code)]

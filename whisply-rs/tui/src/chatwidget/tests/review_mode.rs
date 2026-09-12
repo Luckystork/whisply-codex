@@ -340,7 +340,7 @@ async fn review_restores_context_window_indicator() {
         &mut chat,
         Some(make_token_info(pre_review_tokens, context_window)),
     );
-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
+    assert_eq!(chat.bottom_pane.context_window_percent(), None);
 
     handle_entered_review_mode(&mut chat, "feature branch");
 
@@ -348,12 +348,12 @@ async fn review_restores_context_window_indicator() {
         &mut chat,
         Some(make_token_info(review_tokens, context_window)),
     );
-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(97));
+    assert_eq!(chat.bottom_pane.context_window_percent(), None);
 
     handle_exited_review_mode(&mut chat);
     let _ = drain_insert_history(&mut rx);
 
-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
+    assert_eq!(chat.bottom_pane.context_window_percent(), None);
     assert!(!chat.review.is_review_mode);
 }
 

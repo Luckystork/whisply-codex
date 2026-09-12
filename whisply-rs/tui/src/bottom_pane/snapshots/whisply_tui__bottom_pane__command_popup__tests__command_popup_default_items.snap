@@ -32,6 +32,7 @@ expression: commands
 /mention - mention a file
 /status - show current session configuration and account usage
 /controls - read or change ordinary Whisply app controls
+/usage - view Whisply account usage
 /title - configure which items appear in the terminal title
 /statusline - configure which items appear in the status line
 /theme - choose a syntax highlighting theme

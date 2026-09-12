@@ -1353,7 +1353,7 @@ async fn replayed_interrupted_turn_restores_queued_input_to_composer() {
 }
 
 #[tokio::test]
-async fn token_usage_update_refreshes_status_line_with_runtime_context_window() {
+async fn token_usage_update_does_not_refresh_status_line_with_runtime_context_window() {
     let mut app = make_test_app().await;
     app.chat_widget.setup_status_line(
         vec![crate::bottom_pane::StatusLineItem::ContextWindowSize],
@@ -1366,10 +1366,7 @@ async fn token_usage_update_refreshes_status_line_with_runtime_context_window() 
         token_usage_notification(ThreadId::new(), "turn-1", Some(950_000)),
     )));
 
-    assert_eq!(
-        app.chat_widget.status_line_text(),
-        Some("950K window".into())
-    );
+    assert_eq!(app.chat_widget.status_line_text(), None);
 }
 
 #[tokio::test]

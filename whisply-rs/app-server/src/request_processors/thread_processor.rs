@@ -159,6 +159,58 @@ fn collect_resume_override_mismatches(
     mismatch_details
 }
 
+/// True when resume compiled a different public directory or permission mode
+/// than the loaded thread. Leftover generic `config` (memories, etc.) is not
+/// a reason to replace an idle cache: only Ask/Auto/Full access and the
+/// directory contract are.
+fn compiled_whisply_controls_differ_from_snapshot(
+    request: &ThreadResumeParams,
+    config_snapshot: &ThreadConfigSnapshot,
+) -> bool {
+    if let Some(requested_cwd) = request.cwd.as_deref() {
+        let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
+        if requested_cwd_path != config_snapshot.cwd().as_path() {
+            return true;
+        }
+    }
+    if let Some(requested_approval) = request.approval_policy.as_ref() {
+        let active_approval: AskForApproval = config_snapshot.approval_policy.into();
+        if requested_approval != &active_approval {
+            return true;
+        }
+    }
+    if let Some(requested_review_policy) = request.approvals_reviewer.as_ref() {
+        let active_review_policy: codex_app_server_protocol::ApprovalsReviewer =
+            config_snapshot.approvals_reviewer.into();
+        if requested_review_policy != &active_review_policy {
+            return true;
+        }
+    }
+    if let Some(requested_sandbox) = request.sandbox.as_ref() {
+        let active_sandbox = config_snapshot.sandbox_policy();
+        let sandbox_matches = matches!(
+            (requested_sandbox, &active_sandbox),
+            (
+                SandboxMode::ReadOnly,
+                whisply_protocol::protocol::SandboxPolicy::ReadOnly { .. }
+            ) | (
+                SandboxMode::WorkspaceWrite,
+                whisply_protocol::protocol::SandboxPolicy::WorkspaceWrite { .. }
+            ) | (
+                SandboxMode::DangerFullAccess,
+                whisply_protocol::protocol::SandboxPolicy::DangerFullAccess
+            ) | (
+                SandboxMode::DangerFullAccess,
+                whisply_protocol::protocol::SandboxPolicy::ExternalSandbox { .. }
+            )
+        );
+        if !sandbox_matches {
+            return true;
+        }
+    }
+    false
+}
+
 fn merge_persisted_resume_metadata(
     request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
     typesafe_overrides: &mut ConfigOverrides,
@@ -199,6 +251,26 @@ fn merge_persisted_approvals_reviewer(
     });
 }
 
+/// Restores the public Auto mode's fresh-review flag from the last recorded
+/// turn. Client contracts still win: this only fills a resume/fork that did
+/// not send `whisply.approval.contract`. Older rollouts omit the field and
+/// stay on the reusable reviewer.
+fn merge_persisted_stateless_auto_review(
+    history: &[RolloutItem],
+    typesafe_overrides: &mut ConfigOverrides,
+) {
+    if typesafe_overrides.stateless_auto_review.is_some() {
+        return;
+    }
+
+    typesafe_overrides.stateless_auto_review = history.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => {
+            Some(turn_context.stateless_auto_review.unwrap_or(false))
+        }
+        _ => None,
+    });
+}
+
 fn normalize_thread_list_cwd_filters(
     cwd: Option<ThreadListCwdFilter>,
 ) -> Result<Option<Vec<PathBuf>>, JSONRPCErrorError> {
@@ -232,6 +304,128 @@ fn has_model_resume_override(
         || request_overrides.is_some_and(|overrides| overrides.contains_key("model"))
         || request_overrides
             .is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
+}
+
+/// Removes the paired Whisply contracts from a stable `config` map. The
+/// remaining entries are safe to pass to the generic configuration loader.
+fn take_whisply_contracts_from_config(
+    config: &mut Option<HashMap<String, serde_json::Value>>,
+) -> Result<Option<WhisplyThreadContracts>, JSONRPCErrorError> {
+    let contracts = match config.as_mut() {
+        Some(config) => WhisplyThreadContracts::take_from_config(config)
+            .map_err(|error| invalid_request(error.to_string()))?,
+        None => None,
+    };
+    if config
+        .as_ref()
+        .is_some_and(std::collections::HashMap::is_empty)
+    {
+        *config = None;
+    }
+    Ok(contracts)
+}
+
+/// Compiles the public directory and permission modes into the same typed
+/// fields start, resume, and fork already share. The namespaced contract is
+/// the only native authority; generic approval/sandbox fields are rejected
+/// so they cannot silently outrank it.
+fn apply_whisply_thread_contracts(
+    contracts: &WhisplyThreadContracts,
+    cwd: &mut Option<String>,
+    runtime_workspace_roots: &mut Option<Vec<AbsolutePathBuf>>,
+    approval_policy: &mut Option<codex_app_server_protocol::AskForApproval>,
+    approvals_reviewer: &mut Option<codex_app_server_protocol::ApprovalsReviewer>,
+    sandbox: &mut Option<SandboxMode>,
+    permissions: Option<&String>,
+    whisply_home: &Path,
+) -> Result<(), JSONRPCErrorError> {
+    if approval_policy.is_some()
+        || approvals_reviewer.is_some()
+        || sandbox.is_some()
+        || permissions.is_some()
+    {
+        return Err(invalid_request(
+            "Whisply directory and permission modes must be supplied only through their namespaced config contracts",
+        ));
+    }
+    match contracts.directory.mode {
+        DirectoryContractMode::NoDirectory => {
+            if cwd.is_some() || runtime_workspace_roots.is_some() {
+                return Err(invalid_request(
+                    "No directory cannot be combined with cwd or runtimeWorkspaceRoots",
+                ));
+            }
+            // This private, account-scoped path supplies a real cwd
+            // to upstream code without selecting a user workspace or
+            // inheriting its project discovery/configuration.
+            let neutral_workspace = no_directory_working_root(whisply_home).map_err(|error| {
+                invalid_request(format!(
+                    "failed to prepare Whisply no-directory workspace: {error}"
+                ))
+            })?;
+            let neutral_workspace = AbsolutePathBuf::from_absolute_path(neutral_workspace)
+                .map_err(|error| {
+                    invalid_request(format!(
+                        "failed to resolve Whisply no-directory workspace: {error}"
+                    ))
+                })?;
+            *cwd = Some(neutral_workspace.display().to_string());
+            *runtime_workspace_roots = Some(vec![neutral_workspace]);
+        }
+        DirectoryContractMode::SelectedDirectory => {
+            let Some(selected_directory) = cwd.as_deref() else {
+                return Err(invalid_request(
+                    "selectedDirectory requires an absolute cwd",
+                ));
+            };
+            if runtime_workspace_roots.is_some() {
+                return Err(invalid_request(
+                    "selectedDirectory requires one absolute cwd and no runtimeWorkspaceRoots override",
+                ));
+            }
+            let selected_directory =
+                DirectorySelection::select(selected_directory).map_err(|error| {
+                    invalid_request(format!(
+                        "selectedDirectory must be an existing canonical directory: {error}"
+                    ))
+                })?;
+            let DirectorySelection::Selected { canonical_path } = selected_directory else {
+                return Err(invalid_request(
+                    "selectedDirectory requires an explicit canonical directory",
+                ));
+            };
+            let canonical_path =
+                AbsolutePathBuf::from_absolute_path(canonical_path).map_err(|error| {
+                    invalid_request(format!(
+                        "failed to resolve selected Whisply directory: {error}"
+                    ))
+                })?;
+            *cwd = Some(canonical_path.display().to_string());
+            *runtime_workspace_roots = Some(vec![canonical_path]);
+        }
+    }
+    let projection = WhisplyApprovalProjection::of(contracts.approval.mode);
+    *approval_policy = Some(projection.approval_policy);
+    *approvals_reviewer = Some(projection.approvals_reviewer);
+    *sandbox = Some(projection.sandbox);
+    Ok(())
+}
+
+/// Carries the public mode into reviewer spawn. Taken from the same
+/// projection as `apply_whisply_thread_contracts` so the two cannot drift.
+fn apply_whisply_contract_overrides(
+    typesafe_overrides: &mut ConfigOverrides,
+    contracts: Option<&WhisplyThreadContracts>,
+) {
+    typesafe_overrides.workspace_directory_selected = contracts.map(|contracts| {
+        matches!(
+            contracts.directory.mode,
+            DirectoryContractMode::SelectedDirectory
+        )
+    });
+    typesafe_overrides.stateless_auto_review = contracts.map(|contracts| {
+        WhisplyApprovalProjection::of(contracts.approval.mode).stateless_auto_review
+    });
 }
 
 fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
@@ -1092,94 +1286,18 @@ impl ThreadRequestProcessor {
                 "paginated threads require thread/turns/list and thread/items/list support",
             ));
         }
-        let whisply_contracts = match config.as_mut() {
-            Some(config) => WhisplyThreadContracts::take_from_config(config)
-                .map_err(|error| invalid_request(error.to_string()))?,
-            None => None,
-        };
-        if config
-            .as_ref()
-            .is_some_and(std::collections::HashMap::is_empty)
-        {
-            config = None;
-        }
-
+        let whisply_contracts = take_whisply_contracts_from_config(&mut config)?;
         if let Some(contracts) = whisply_contracts.as_ref() {
-            // Whisply's native contract is the authoritative public control.
-            // Reject duplicate generic controls instead of allowing their
-            // precedence to produce a different sandbox/approval projection.
-            if approval_policy.is_some()
-                || approvals_reviewer.is_some()
-                || sandbox.is_some()
-                || permissions.is_some()
-            {
-                return Err(invalid_request(
-                    "Whisply directory and permission modes must be supplied only through their namespaced config contracts",
-                ));
-            }
-            match contracts.directory.mode {
-                DirectoryContractMode::NoDirectory => {
-                    if cwd.is_some() || runtime_workspace_roots.is_some() {
-                        return Err(invalid_request(
-                            "No directory cannot be combined with cwd or runtimeWorkspaceRoots",
-                        ));
-                    }
-                    // This private, account-scoped path supplies a real cwd
-                    // to upstream code without selecting a user workspace or
-                    // inheriting its project discovery/configuration.
-                    let neutral_workspace = no_directory_working_root(
-                        self.config_manager.codex_home(),
-                    )
-                    .map_err(|error| {
-                        invalid_request(format!(
-                            "failed to prepare Whisply no-directory workspace: {error}"
-                        ))
-                    })?;
-                    let neutral_workspace = AbsolutePathBuf::from_absolute_path(neutral_workspace)
-                        .map_err(|error| {
-                            invalid_request(format!(
-                                "failed to resolve Whisply no-directory workspace: {error}"
-                            ))
-                        })?;
-                    cwd = Some(neutral_workspace.display().to_string());
-                    runtime_workspace_roots = Some(vec![neutral_workspace]);
-                }
-                DirectoryContractMode::SelectedDirectory => {
-                    let Some(selected_directory) = cwd.as_deref() else {
-                        return Err(invalid_request(
-                            "selectedDirectory requires an absolute cwd",
-                        ));
-                    };
-                    if runtime_workspace_roots.is_some() {
-                        return Err(invalid_request(
-                            "selectedDirectory requires one absolute cwd and no runtimeWorkspaceRoots override",
-                        ));
-                    }
-                    let selected_directory = DirectorySelection::select(selected_directory)
-                        .map_err(|error| {
-                            invalid_request(format!(
-                                "selectedDirectory must be an existing canonical directory: {error}"
-                            ))
-                        })?;
-                    let DirectorySelection::Selected { canonical_path } = selected_directory else {
-                        return Err(invalid_request(
-                            "selectedDirectory requires an explicit canonical directory",
-                        ));
-                    };
-                    let canonical_path = AbsolutePathBuf::from_absolute_path(canonical_path)
-                        .map_err(|error| {
-                            invalid_request(format!(
-                                "failed to resolve selected Whisply directory: {error}"
-                            ))
-                        })?;
-                    cwd = Some(canonical_path.display().to_string());
-                    runtime_workspace_roots = Some(vec![canonical_path]);
-                }
-            }
-            let projection = WhisplyApprovalProjection::of(contracts.approval.mode);
-            approval_policy = Some(projection.approval_policy);
-            approvals_reviewer = Some(projection.approvals_reviewer);
-            sandbox = Some(projection.sandbox);
+            apply_whisply_thread_contracts(
+                contracts,
+                &mut cwd,
+                &mut runtime_workspace_roots,
+                &mut approval_policy,
+                &mut approvals_reviewer,
+                &mut sandbox,
+                permissions.as_ref(),
+                self.config_manager.codex_home(),
+            )?;
         }
 
         if sandbox.is_some() && permissions.is_some() {
@@ -1209,19 +1327,7 @@ impl ThreadRequestProcessor {
         // chose a workspace. `cwd` is populated either way — a no-directory
         // thread is given a private neutral workspace above — so it cannot be
         // used to recover the user's intent further down.
-        typesafe_overrides.workspace_directory_selected =
-            whisply_contracts.as_ref().map(|contracts| {
-                matches!(
-                    contracts.directory.mode,
-                    DirectoryContractMode::SelectedDirectory
-                )
-            });
-        // Carrying this is what makes the public mode reach the reviewer rather
-        // than stopping at validation. Taken from the same projection as the
-        // reviewer above so the two cannot drift apart.
-        typesafe_overrides.stateless_auto_review = whisply_contracts.as_ref().map(|contracts| {
-            WhisplyApprovalProjection::of(contracts.approval.mode).stateless_auto_review
-        });
+        apply_whisply_contract_overrides(&mut typesafe_overrides, whisply_contracts.as_ref());
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
@@ -3234,7 +3340,7 @@ impl ThreadRequestProcessor {
     async fn thread_resume_inner(
         &self,
         request_id: ConnectionRequestId,
-        params: ThreadResumeParams,
+        mut params: ThreadResumeParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
@@ -3264,6 +3370,28 @@ impl ThreadRequestProcessor {
                     invalid_request("`permissions` cannot be combined with `sandbox`"),
                 )
                 .await;
+            return Ok(());
+        }
+        let whisply_contracts = match take_whisply_contracts_from_config(&mut params.config) {
+            Ok(contracts) => contracts,
+            Err(error) => {
+                self.outgoing.send_error(request_id, error).await;
+                return Ok(());
+            }
+        };
+        if let Some(contracts) = whisply_contracts.as_ref()
+            && let Err(error) = apply_whisply_thread_contracts(
+                contracts,
+                &mut params.cwd,
+                &mut params.runtime_workspace_roots,
+                &mut params.approval_policy,
+                &mut params.approvals_reviewer,
+                &mut params.sandbox,
+                params.permissions.as_ref(),
+                self.config_manager.codex_home(),
+            )
+        {
+            self.outgoing.send_error(request_id, error).await;
             return Ok(());
         }
         let redact_resume_payloads =
@@ -3367,6 +3495,7 @@ impl ThreadRequestProcessor {
             developer_instructions,
             personality,
         );
+        apply_whisply_contract_overrides(&mut typesafe_overrides, whisply_contracts.as_ref());
         let has_explicit_model_resume_override =
             has_model_resume_override(request_overrides.as_ref(), &typesafe_overrides);
         let persisted_metadata = self
@@ -3644,6 +3773,7 @@ impl ThreadRequestProcessor {
             request_overrides.as_ref(),
             typesafe_overrides,
         );
+        merge_persisted_stateless_auto_review(&resumed_history.history, typesafe_overrides);
         let state_db_ctx = self.state_db.clone()?;
         let persisted_metadata = state_db_ctx
             .get_thread(resumed_history.conversation_id)
@@ -3736,10 +3866,18 @@ impl ThreadRequestProcessor {
                 let is_running =
                     matches!(existing_thread.agent_status().await, AgentStatus::Running);
 
-                if !has_subscribers && matches!(loaded_status, ThreadStatus::Idle) && !is_running {
+                if matches!(loaded_status, ThreadStatus::Idle)
+                    && !is_running
+                    && (!has_subscribers
+                        || compiled_whisply_controls_differ_from_snapshot(params, &config_snapshot))
+                {
                     // A loaded idle thread is only a cache entry. Shut it down
                     // before removing it so cold resume cannot duplicate a
-                    // thread that timed out during shutdown.
+                    // thread that timed out during shutdown. A still-subscribed
+                    // Mac overlay must not keep the previous Ask/Auto/Full
+                    // access compilation when the person changed the public
+                    // mode; that is the only reason subscribers do not block
+                    // replacement here.
                     match wait_for_thread_shutdown(&existing_thread).await {
                         ThreadShutdownResult::Complete => {
                             self.thread_manager.remove_thread(&existing_thread_id).await;
@@ -4201,13 +4339,13 @@ impl ThreadRequestProcessor {
             model,
             model_provider,
             service_tier,
-            cwd,
-            runtime_workspace_roots,
-            approval_policy,
-            approvals_reviewer,
-            sandbox,
+            mut cwd,
+            mut runtime_workspace_roots,
+            mut approval_policy,
+            mut approvals_reviewer,
+            mut sandbox,
             permissions,
-            config: cli_overrides,
+            config: mut cli_overrides,
             base_instructions,
             developer_instructions,
             ephemeral,
@@ -4220,6 +4358,19 @@ impl ThreadRequestProcessor {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
             ));
+        }
+        let whisply_contracts = take_whisply_contracts_from_config(&mut cli_overrides)?;
+        if let Some(contracts) = whisply_contracts.as_ref() {
+            apply_whisply_thread_contracts(
+                contracts,
+                &mut cwd,
+                &mut runtime_workspace_roots,
+                &mut approval_policy,
+                &mut approvals_reviewer,
+                &mut sandbox,
+                permissions.as_ref(),
+                self.config_manager.codex_home(),
+            )?;
         }
         let source_thread = self
             .read_stored_thread_for_resume(
@@ -4343,6 +4494,7 @@ impl ThreadRequestProcessor {
             /*personality*/ None,
         );
         typesafe_overrides.ephemeral = ephemeral.then_some(true);
+        apply_whisply_contract_overrides(&mut typesafe_overrides, whisply_contracts.as_ref());
         let latest_context = if paginated_source
             && typesafe_overrides.approvals_reviewer.is_none()
             && !request_overrides
@@ -4375,6 +4527,12 @@ impl ThreadRequestProcessor {
                 .as_deref()
                 .unwrap_or_else(|| source_history_items.as_ref()),
             request_overrides.as_ref(),
+            &mut typesafe_overrides,
+        );
+        merge_persisted_stateless_auto_review(
+            latest_context
+                .as_deref()
+                .unwrap_or_else(|| source_history_items.as_ref()),
             &mut typesafe_overrides,
         );
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.

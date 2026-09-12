@@ -2,7 +2,10 @@ use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditOutcome;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::RateLimitResetCreditsSummary;
 use codex_whisply::ContextualUsageSnapshot;
+use codex_whisply::ContextualUsageWindow;
 use codex_whisply::NativeBrokerClient;
+use codex_whisply::UsageWindowCategory;
+use codex_whisply::UsageWindowKind;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -18,8 +21,12 @@ const RATE_LIMIT_RESET_CONFIRMATION_VIEW_ID: &str = "rate-limit-reset-confirmati
 /// Reads and formats the broker-owned Whisply Usage snapshot for the managed
 /// TUI. The account read is capability authenticated and carries no direct
 /// Website credential into the terminal process.
-pub(super) fn read_managed_usage(broker: &NativeBrokerClient) -> Result<String, String> {
-    read_managed_usage_snapshot(broker).map(|snapshot| format_managed_usage(&snapshot))
+pub(super) fn read_managed_usage(
+    broker: &NativeBrokerClient,
+) -> Result<(ContextualUsageSnapshot, String), String> {
+    let snapshot = read_managed_usage_snapshot(broker)?;
+    let text = format_managed_usage(&snapshot);
+    Ok((snapshot, text))
 }
 
 /// Reads the same snapshot `/usage` prints, for callers that render it
@@ -34,84 +41,38 @@ fn format_managed_usage(snapshot: &ContextualUsageSnapshot) -> String {
     codex_whisply::format_account_usage(snapshot)
 }
 
-impl ChatWidget {
-    /// Builds the upstream usage menu.
-    ///
-    /// Nothing opens this menu any more. Its "Redeem usage limit reset" entry is
-    /// upstream account authority — eligibility came from a ChatGPT account and
-    /// redemption from an account API the app-server now declines — so `/usage`
-    /// reads the Whisply-managed projection instead of offering it. The builder
-    /// is kept only so the in-place refresh below still compiles while the rest
-    /// of the reset-credit plumbing is retired.
-    fn usage_menu_params(&self) -> SelectionViewParams {
-        let reset_eligible = self.has_chatgpt_account;
-        let (reset_action_enabled, reset_description) =
-            match (reset_eligible, self.available_rate_limit_reset_credits) {
-                (true, Some(available_count)) if available_count > 0 => (
-                    true,
-                    format!(
-                        "You have {available_count} {} available.",
-                        reset_label(available_count)
-                    ),
-                ),
-                (true, None) => (true, "Check reset availability.".to_string()),
-                (true, Some(_)) | (false, _) => {
-                    (false, "No usage limit resets available.".to_string())
-                }
-            };
-        SelectionViewParams {
-            view_id: Some(USAGE_MENU_VIEW_ID),
-            title: Some("Usage".to_string()),
-            subtitle: Some("View account usage or redeem an earned reset.".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
-            items: vec![
-                SelectionItem {
-                    name: "Show usage".to_string(),
-                    description: Some("View recent account token usage.".to_string()),
-                    actions: vec![Box::new(|tx| {
-                        tx.send(AppEvent::OpenTokenActivity);
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                },
-                SelectionItem {
-                    name: "Redeem usage limit reset".to_string(),
-                    description: Some(reset_description),
-                    is_disabled: !reset_action_enabled,
-                    actions: vec![Box::new(|tx| {
-                        tx.send(AppEvent::OpenRateLimitResetCredits);
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
-    }
+pub(super) fn managed_usage_window(
+    snapshot: &ContextualUsageSnapshot,
+    category: UsageWindowCategory,
+    window: UsageWindowKind,
+) -> Option<&ContextualUsageWindow> {
+    snapshot
+        .windows
+        .iter()
+        .find(|entry| entry.category == category && entry.window == window)
+}
 
-    pub(crate) fn finish_usage_menu_rate_limit_refresh(
-        &mut self,
-        request_id: u64,
-        snapshots: Vec<RateLimitSnapshot>,
-        result: Result<RateLimitResetCreditsSummary, String>,
-    ) {
-        if self.pending_usage_menu_rate_limit_request_id != Some(request_id) {
+pub(super) fn managed_usage_used_percent(window: &ContextualUsageWindow) -> i64 {
+    (codex_whisply::account_usage_used_fraction(window) * 100.0).round() as i64
+}
+
+impl ChatWidget {
+    /// Stores the latest Whisply Usage snapshot for the footer and status line.
+    pub(crate) fn remember_managed_usage(&mut self, snapshot: Option<ContextualUsageSnapshot>) {
+        self.managed_usage_snapshot = snapshot;
+        if !self.uses_managed_usage() {
             return;
         }
-        self.pending_usage_menu_rate_limit_request_id = None;
-        for snapshot in snapshots {
-            self.on_rate_limit_snapshot(Some(snapshot));
-        }
-        if let Ok(response) = result {
-            self.available_rate_limit_reset_credits = Some(response.available_count);
-        }
-        let params = self.usage_menu_params();
-        if self
-            .bottom_pane
-            .replace_selection_view_if_present(USAGE_MENU_VIEW_ID, params)
-        {
-            self.request_redraw();
-        }
+        let used_percent = self.managed_usage_snapshot.as_ref().and_then(|snapshot| {
+            managed_usage_window(
+                snapshot,
+                UsageWindowCategory::Usage,
+                UsageWindowKind::FiveHour,
+            )
+            .map(managed_usage_used_percent)
+        });
+        self.bottom_pane.set_account_usage_meter(used_percent);
+        self.refresh_status_line();
     }
 
     pub(crate) fn show_rate_limit_reset_loading_popup(&mut self) -> u64 {
@@ -536,7 +497,6 @@ impl ChatWidget {
         self.pending_rate_limit_reset_request_id = None;
         self.pending_rate_limit_reset_idempotency_key = None;
         self.rate_limit_reset_picker_request_id = None;
-        self.pending_usage_menu_rate_limit_request_id = None;
         self.available_rate_limit_reset_credits = None;
         self.rate_limit_snapshots_by_limit_id.clear();
         self.clear_pending_rate_limit_reset_hint();
@@ -595,6 +555,16 @@ fn reset_label(count: i64) -> &'static str {
         "usage limit reset"
     } else {
         "usage limit resets"
+    }
+}
+
+#[cfg(test)]
+impl ChatWidget {
+    pub(crate) fn set_managed_usage_snapshot_for_tests(
+        &mut self,
+        snapshot: Option<ContextualUsageSnapshot>,
+    ) {
+        self.remember_managed_usage(snapshot);
     }
 }
 

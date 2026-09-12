@@ -1,10 +1,10 @@
 //! One presentation of the account's Usage snapshot, shared by every terminal
 //! surface that shows it.
 //!
-//! `/status`, `/usage`, and `whisply exec` all report the same account at the
-//! same instant, so they must not each word it differently. This module owns
-//! both halves of that: the broker read, including what to say when it cannot
-//! be completed, and the text.
+//! `/status`, `/usage`, `whisply usage`, and `whisply exec` all report the same
+//! account at the same instant, so they must not each word it differently. This
+//! module owns both halves of that: the broker read, including what to say when
+//! it cannot be completed, and the text.
 
 use std::fmt::Write as _;
 use time::OffsetDateTime;

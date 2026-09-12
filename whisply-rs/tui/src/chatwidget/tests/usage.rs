@@ -126,12 +126,8 @@ async fn usage_command_never_opens_the_upstream_reset_menu() {
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let reached_upstream_surface = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
-        matches!(
-            event,
-            AppEvent::OpenRateLimitResetCredits | AppEvent::OpenTokenActivity
-        )
-    });
+    let reached_upstream_surface = std::iter::from_fn(|| rx.try_recv().ok())
+        .any(|event| matches!(event, AppEvent::OpenRateLimitResetCredits));
     assert!(
         !reached_upstream_surface,
         "/usage must not reach an upstream account surface"
@@ -157,9 +153,7 @@ async fn usage_command_does_not_request_upstream_rate_limits() {
     let requested_rate_limits = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
         matches!(
             event,
-            AppEvent::RefreshRateLimits {
-                origin: RateLimitRefreshOrigin::UsageMenu { .. }
-            }
+            AppEvent::RefreshRateLimits { .. }
         )
     });
     assert!(

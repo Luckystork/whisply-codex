@@ -242,8 +242,6 @@ impl ChatWidget {
         self.has_codex_backend_auth = has_codex_backend_auth;
         self.bottom_pane
             .set_connectors_enabled(self.connectors_enabled());
-        self.bottom_pane
-            .set_token_activity_command_enabled(has_codex_backend_auth);
         self.refresh_status_surfaces();
     }
 

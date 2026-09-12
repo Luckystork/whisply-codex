@@ -1824,3 +1824,244 @@ mod whisply_approval_projection {
         }
     }
 }
+
+/// Resume and fork used to drop the namespaced contracts after validation.
+/// The Mac overlay sends the same map on every resume, including after the
+/// person switches Ask/Auto/Full access, so these helpers are the whole
+/// difference between a fresh Luna review and the reusable guardian.
+mod whisply_thread_contract_application {
+    use super::super::apply_whisply_contract_overrides;
+    use super::super::apply_whisply_thread_contracts;
+    use super::super::merge_persisted_stateless_auto_review;
+    use super::super::take_whisply_contracts_from_config;
+    use codex_app_server_protocol::ApprovalsReviewer;
+    use codex_app_server_protocol::AskForApproval;
+    use codex_app_server_protocol::SandboxMode;
+    use codex_whisply::APPROVAL_CONTRACT_FEATURE;
+    use codex_whisply::APPROVAL_CONTRACT_KEY;
+    use codex_whisply::ApprovalContractMode;
+    use codex_whisply::DIRECTORY_CONTRACT_FEATURE;
+    use codex_whisply::DIRECTORY_CONTRACT_KEY;
+    use codex_whisply::DirectoryContractMode;
+    use codex_whisply::NO_DIRECTORY_WORKSPACE_DIR_NAME;
+    use pretty_assertions::assert_eq;
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+    use whisply_core::config::ConfigOverrides;
+
+    fn paired_config(
+        directory_mode: &str,
+        approval_mode: &str,
+        requires_stateless: bool,
+    ) -> HashMap<String, Value> {
+        HashMap::from([
+            (
+                DIRECTORY_CONTRACT_KEY.to_string(),
+                serde_json::json!({
+                    "feature": DIRECTORY_CONTRACT_FEATURE,
+                    "mode": directory_mode,
+                    "projectDiscoveryEnabled": directory_mode == "selectedDirectory"
+                }),
+            ),
+            (
+                APPROVAL_CONTRACT_KEY.to_string(),
+                serde_json::json!({
+                    "feature": APPROVAL_CONTRACT_FEATURE,
+                    "mode": approval_mode,
+                    "requiresStatelessAutoReview": requires_stateless
+                }),
+            ),
+            (
+                "features".to_string(),
+                serde_json::json!({"memories": true}),
+            ),
+        ])
+    }
+
+    #[test]
+    fn resume_auto_contract_compiles_a_stateless_reviewer_and_keeps_memories() {
+        let home = TempDir::new().expect("home");
+        let mut config = Some(paired_config("noDirectory", "auto", true));
+        let contracts = take_whisply_contracts_from_config(&mut config)
+            .expect("valid contracts")
+            .expect("contracts present");
+        assert_eq!(contracts.directory.mode, DirectoryContractMode::NoDirectory);
+        assert_eq!(contracts.approval.mode, ApprovalContractMode::Auto);
+        assert_eq!(
+            config.as_ref().and_then(|values| values.get("features")),
+            Some(&serde_json::json!({"memories": true}))
+        );
+
+        let mut cwd = None;
+        let mut roots = None;
+        let mut approval_policy = None;
+        let mut approvals_reviewer = None;
+        let mut sandbox = None;
+        apply_whisply_thread_contracts(
+            &contracts,
+            &mut cwd,
+            &mut roots,
+            &mut approval_policy,
+            &mut approvals_reviewer,
+            &mut sandbox,
+            None,
+            home.path(),
+        )
+        .expect("apply");
+
+        assert_eq!(approval_policy, Some(AskForApproval::OnRequest));
+        assert_eq!(approvals_reviewer, Some(ApprovalsReviewer::AutoReview));
+        assert_eq!(sandbox, Some(SandboxMode::WorkspaceWrite));
+        let cwd = cwd.expect("neutral cwd");
+        assert!(cwd.ends_with(NO_DIRECTORY_WORKSPACE_DIR_NAME), "cwd={cwd}");
+
+        let mut overrides = ConfigOverrides::default();
+        apply_whisply_contract_overrides(&mut overrides, Some(&contracts));
+        assert_eq!(overrides.workspace_directory_selected, Some(false));
+        assert_eq!(overrides.stateless_auto_review, Some(true));
+    }
+
+    #[test]
+    fn selected_directory_marks_the_workspace_as_chosen() {
+        let home = TempDir::new().expect("home");
+        let selected = TempDir::new().expect("selected");
+        let mut config = Some(paired_config("selectedDirectory", "ask", false));
+        let contracts = take_whisply_contracts_from_config(&mut config)
+            .expect("valid contracts")
+            .expect("contracts present");
+
+        let mut cwd = Some(selected.path().display().to_string());
+        let mut roots = None;
+        let mut approval_policy = None;
+        let mut approvals_reviewer = None;
+        let mut sandbox = None;
+        apply_whisply_thread_contracts(
+            &contracts,
+            &mut cwd,
+            &mut roots,
+            &mut approval_policy,
+            &mut approvals_reviewer,
+            &mut sandbox,
+            None,
+            home.path(),
+        )
+        .expect("apply");
+
+        assert_eq!(approvals_reviewer, Some(ApprovalsReviewer::User));
+        assert!(!cwd.as_deref().unwrap_or_default().is_empty());
+        let mut overrides = ConfigOverrides::default();
+        apply_whisply_contract_overrides(&mut overrides, Some(&contracts));
+        assert_eq!(overrides.workspace_directory_selected, Some(true));
+        assert_eq!(overrides.stateless_auto_review, Some(false));
+    }
+
+    #[test]
+    fn generic_approval_fields_cannot_outrank_the_namespaced_contract() {
+        let home = TempDir::new().expect("home");
+        let mut config = Some(paired_config("noDirectory", "auto", true));
+        let contracts = take_whisply_contracts_from_config(&mut config)
+            .expect("valid contracts")
+            .expect("contracts present");
+
+        let mut cwd = None;
+        let mut roots = None;
+        let mut approval_policy = Some(AskForApproval::Never);
+        let mut approvals_reviewer = None;
+        let mut sandbox = None;
+        let error = apply_whisply_thread_contracts(
+            &contracts,
+            &mut cwd,
+            &mut roots,
+            &mut approval_policy,
+            &mut approvals_reviewer,
+            &mut sandbox,
+            None,
+            home.path(),
+        )
+        .expect_err("generic fields must fail closed");
+        assert!(
+            error.message.contains("namespaced config contracts"),
+            "message={}",
+            error.message
+        );
+    }
+
+    fn recorded_turn(stateless: bool) -> whisply_protocol::protocol::TurnContextItem {
+        whisply_protocol::protocol::TurnContextItem {
+            turn_id: None,
+            cwd: whisply_utils_absolute_path::AbsolutePathBuf::from_absolute_path("/tmp")
+                .expect("cwd"),
+            workspace_roots: None,
+            current_date: None,
+            timezone: None,
+            approval_policy: whisply_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: Some(whisply_protocol::config_types::ApprovalsReviewer::AutoReview),
+            stateless_auto_review: stateless.then_some(true),
+            sandbox_policy: whisply_protocol::protocol::SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-5.6-luna".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: whisply_protocol::config_types::ReasoningSummary::Auto,
+        }
+    }
+
+    #[test]
+    fn resume_without_a_client_contract_restores_a_stateless_auto_review() {
+        let history = vec![whisply_protocol::protocol::RolloutItem::TurnContext(
+            recorded_turn(true),
+        )];
+        let mut overrides = ConfigOverrides::default();
+        merge_persisted_stateless_auto_review(&history, &mut overrides);
+        assert_eq!(overrides.stateless_auto_review, Some(true));
+    }
+
+    #[test]
+    fn a_client_contract_keeps_its_own_stateless_flag() {
+        let history = vec![whisply_protocol::protocol::RolloutItem::TurnContext(
+            recorded_turn(true),
+        )];
+        let mut overrides = ConfigOverrides {
+            stateless_auto_review: Some(false),
+            ..Default::default()
+        };
+        merge_persisted_stateless_auto_review(&history, &mut overrides);
+        assert_eq!(overrides.stateless_auto_review, Some(false));
+    }
+
+    #[test]
+    fn older_rollouts_without_the_flag_stay_on_the_reusable_reviewer() {
+        let history = vec![whisply_protocol::protocol::RolloutItem::TurnContext(
+            recorded_turn(false),
+        )];
+        let mut overrides = ConfigOverrides::default();
+        merge_persisted_stateless_auto_review(&history, &mut overrides);
+        assert_eq!(overrides.stateless_auto_review, Some(false));
+    }
+
+    #[test]
+    fn the_latest_turn_is_the_persisted_authority() {
+        let history = vec![
+            whisply_protocol::protocol::RolloutItem::TurnContext(recorded_turn(true)),
+            whisply_protocol::protocol::RolloutItem::TurnContext(recorded_turn(false)),
+        ];
+        let mut overrides = ConfigOverrides::default();
+        merge_persisted_stateless_auto_review(&history, &mut overrides);
+        assert_eq!(overrides.stateless_auto_review, Some(false));
+    }
+
+    #[test]
+    fn history_without_a_turn_leaves_the_flag_unset() {
+        let mut overrides = ConfigOverrides::default();
+        merge_persisted_stateless_auto_review(&[], &mut overrides);
+        assert_eq!(overrides.stateless_auto_review, None);
+    }
+}

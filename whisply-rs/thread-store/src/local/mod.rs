@@ -820,6 +820,7 @@ mod tests {
                 timezone: None,
                 approval_policy,
                 approvals_reviewer: None,
+                stateless_auto_review: None,
                 sandbox_policy: SandboxPolicy::DangerFullAccess,
                 permission_profile: None,
                 network: None,

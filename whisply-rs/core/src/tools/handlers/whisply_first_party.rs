@@ -4,8 +4,15 @@ use codex_app_server_protocol::WhisplyToolModelCall;
 use codex_app_server_protocol::WhisplyToolResult;
 use codex_app_server_protocol::WhisplyToolTerminalStatus;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+use whisply_analytics::GuardianApprovalRequestSource;
 use whisply_protocol::models::FunctionCallOutputContentItem;
 use whisply_protocol::models::ImageDetail;
+use whisply_protocol::protocol::ReviewDecision;
+use whisply_protocol::request_user_input::RequestUserInputArgs;
+use whisply_protocol::request_user_input::RequestUserInputQuestion;
+use whisply_protocol::request_user_input::RequestUserInputQuestionOption;
+use whisply_protocol::request_user_input::RequestUserInputResponse;
 use whisply_tools::JsonSchema;
 use whisply_tools::ResponsesApiNamespace;
 use whisply_tools::ResponsesApiNamespaceTool;
@@ -19,8 +26,18 @@ use crate::first_party_tools::FirstPartyToolAdmission;
 use crate::first_party_tools::FirstPartyToolDispatchError;
 use crate::first_party_tools::FirstPartyToolDispatcher;
 use crate::first_party_tools::FirstPartyToolExecution;
+use crate::first_party_tools::first_party_tool_requires_auto_review;
 use crate::first_party_tools::native_model_tool_name;
 use crate::function_tool::FunctionCallError;
+use crate::guardian::GuardianApprovalOutcome;
+use crate::guardian::GuardianApprovalRequest;
+use crate::guardian::GuardianReviewOptions;
+use crate::guardian::guardian_timeout_message;
+use crate::guardian::new_guardian_review_id;
+use crate::guardian::review_approval_request_with_cancel;
+use crate::guardian::routes_approval_to_guardian;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -140,6 +157,12 @@ impl FirstPartyToolHandler {
             schema_version: self.descriptor.schema_version,
             arguments,
         };
+        review_first_party_tool_if_auto(&session, &turn, &call, &cancellation_token).await?;
+        if cancellation_token.is_cancelled() {
+            return Err(FunctionCallError::RespondToModel(
+                "The approved Whisply tool call was cancelled.".to_string(),
+            ));
+        }
         let execution = FirstPartyToolExecution::new(
             self.admission.clone(),
             call.clone(),
@@ -402,6 +425,165 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
     let prefix_budget = maximum_bytes.saturating_sub(TRUNCATION_NOTICE.len());
     let prefix = take_bytes_at_char_boundary(value, prefix_budget);
     format!("{prefix}{TRUNCATION_NOTICE}")
+}
+
+const FIRST_PARTY_APPROVAL_ACCEPT: &str = "Allow";
+const FIRST_PARTY_APPROVAL_DECLINE: &str = "Don't allow";
+
+async fn review_first_party_tool_if_auto(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    call: &WhisplyToolModelCall,
+    cancellation: &CancellationToken,
+) -> Result<(), FunctionCallError> {
+    if !first_party_tool_requires_auto_review(&call.tool_id) || !routes_approval_to_guardian(turn) {
+        return Ok(());
+    }
+
+    let cwd = turn
+        .environments
+        .primary()
+        .and_then(|environment| environment.cwd().to_abs_path().ok())
+        .unwrap_or_else(|| {
+            #[allow(deprecated)]
+            turn.cwd.clone()
+        });
+    let request = GuardianApprovalRequest::FirstPartyTool {
+        id: call.execution_id.clone(),
+        tool_id: call.tool_id.clone(),
+        arguments: call.arguments.clone(),
+        cwd,
+    };
+    let outcome = review_approval_request_with_cancel(
+        session,
+        turn,
+        new_guardian_review_id(),
+        request,
+        None,
+        GuardianReviewOptions {
+            plugin_attribution_override: None,
+            approval_request_source: GuardianApprovalRequestSource::MainTurn,
+            external_cancel: Some(cancellation.clone()),
+        },
+    )
+    .await;
+    if cancellation.is_cancelled() {
+        return Err(FunctionCallError::RespondToModel(
+            "The approved Whisply tool call was cancelled.".to_string(),
+        ));
+    }
+    match outcome {
+        GuardianApprovalOutcome::Decided(decision) => first_party_review_allows(&decision),
+        GuardianApprovalOutcome::AskUser { reason } => {
+            tracing::info!(
+                reason = ?reason,
+                tool_id = %call.tool_id,
+                "automatic approval review could not decide; asking the user about Computer Use"
+            );
+            ask_first_party_user(session, turn, call).await
+        }
+    }
+}
+
+pub(crate) fn first_party_review_allows(
+    decision: &ReviewDecision,
+) -> Result<(), FunctionCallError> {
+    match decision {
+        ReviewDecision::Approved
+        | ReviewDecision::ApprovedForSession
+        | ReviewDecision::ApprovedExecpolicyAmendment { .. } => Ok(()),
+        ReviewDecision::NetworkPolicyAmendment {
+            network_policy_amendment,
+        } if network_policy_amendment.action
+            != whisply_protocol::approvals::NetworkPolicyRuleAction::Deny =>
+        {
+            Ok(())
+        }
+        ReviewDecision::Denied { rejection } => {
+            Err(FunctionCallError::RespondToModel(if rejection.is_empty() {
+                "Computer Use was not approved.".to_string()
+            } else {
+                rejection.clone()
+            }))
+        }
+        ReviewDecision::TimedOut => {
+            Err(FunctionCallError::RespondToModel(guardian_timeout_message()))
+        }
+        ReviewDecision::Abort | ReviewDecision::NetworkPolicyAmendment { .. } => Err(
+            FunctionCallError::RespondToModel("Computer Use was not approved.".to_string()),
+        ),
+    }
+}
+
+async fn ask_first_party_user(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    call: &WhisplyToolModelCall,
+) -> Result<(), FunctionCallError> {
+    let question_id = first_party_approval_question_id(&call.execution_id);
+    let preview = first_party_action_preview(&call.arguments);
+    let args = RequestUserInputArgs {
+        questions: vec![RequestUserInputQuestion {
+            id: question_id.clone(),
+            header: "Approve Computer Use?".to_string(),
+            question: format!(
+                "Automatic review could not decide. Allow Computer Use to run this action?\n\n{preview}"
+            ),
+            is_other: false,
+            is_secret: false,
+            options: Some(vec![
+                RequestUserInputQuestionOption {
+                    label: FIRST_PARTY_APPROVAL_ACCEPT.to_string(),
+                    description: "Continue with Computer Use.".to_string(),
+                },
+                RequestUserInputQuestionOption {
+                    label: FIRST_PARTY_APPROVAL_DECLINE.to_string(),
+                    description: "Do not control the Mac for this action.".to_string(),
+                },
+            ]),
+        }],
+        is_blocking: true,
+        auto_resolution_ms: None,
+    };
+    let response = session
+        .request_user_input(turn.as_ref(), call.execution_id.clone(), args)
+        .await;
+    if first_party_user_approved(response.as_ref(), &question_id) {
+        Ok(())
+    } else {
+        Err(FunctionCallError::RespondToModel(
+            "Computer Use was not approved.".to_string(),
+        ))
+    }
+}
+
+pub(crate) fn first_party_approval_question_id(execution_id: &str) -> String {
+    format!("whisply_first_party_approval_{execution_id}")
+}
+
+pub(crate) fn first_party_user_approved(
+    response: Option<&RequestUserInputResponse>,
+    question_id: &str,
+) -> bool {
+    let Some(response) = response else {
+        return false;
+    };
+    let Some(answer) = response.answers.get(question_id) else {
+        return false;
+    };
+    answer
+        .answers
+        .iter()
+        .any(|answer| answer == FIRST_PARTY_APPROVAL_ACCEPT)
+        && !answer
+            .answers
+            .iter()
+            .any(|answer| answer == FIRST_PARTY_APPROVAL_DECLINE)
+}
+
+fn first_party_action_preview(arguments: &Value) -> String {
+    let rendered = serde_json::to_string_pretty(arguments).unwrap_or_else(|_| "{}".to_string());
+    bounded_text(&rendered, 800)
 }
 
 #[cfg(test)]

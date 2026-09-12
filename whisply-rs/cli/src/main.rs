@@ -1338,29 +1338,7 @@ async fn run_whisply_usage(json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("Usage ({})", snapshot.tier);
-    for window in &snapshot.windows {
-        let category = match window.category {
-            codex_whisply::UsageWindowCategory::Usage => "usage",
-            codex_whisply::UsageWindowCategory::Transcription => "transcription",
-        };
-        let kind = match window.window {
-            codex_whisply::UsageWindowKind::FiveHour => "five-hour",
-            codex_whisply::UsageWindowKind::Weekly => "weekly",
-        };
-        let reset = window.resets_at.as_deref().unwrap_or("not scheduled");
-        println!(
-            "{category}/{kind}: settled {:.3}, reserved {:.3}, cap {:.3}, used {:.1}% (resets {reset})",
-            window.settled,
-            window.reserved,
-            window.cap,
-            codex_whisply::account_usage_used_fraction(window) * 100.0,
-        );
-    }
-    println!(
-        "Rate card {} · {} {}",
-        snapshot.metering.rate_card_version, snapshot.metering.basis, snapshot.metering.currency,
-    );
+    println!("{}", codex_whisply::format_account_usage(&snapshot));
     Ok(())
 }
 
@@ -4609,6 +4587,20 @@ mod tests {
                 .subcommand,
             Some(Subcommand::Usage(UsageCommand { json: true }))
         ));
+        let usage = MultitoolCli::command()
+            .find_subcommand("usage")
+            .expect("usage")
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            usage.contains("cost-based"),
+            "usage help must name cost-based Usage, got {usage:?}"
+        );
+        assert!(
+            !usage.to_ascii_lowercase().contains("reset"),
+            "usage help must not advertise usage-limit resets, got {usage:?}"
+        );
         assert!(matches!(
             MultitoolCli::try_parse_from(["codex", "connectors", "status", "google-main"])
                 .expect("connectors parse")

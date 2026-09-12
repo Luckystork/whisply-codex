@@ -28,6 +28,72 @@ pub(super) fn test_project_path() -> PathBuf {
     PathBuf::from(test_path_display("/tmp/project"))
 }
 
+pub(super) fn sample_managed_usage_snapshot() -> codex_whisply::ContextualUsageSnapshot {
+    let window = |category, kind, used_fraction, settled, reserved, cap| {
+        codex_whisply::ContextualUsageWindow {
+            category,
+            window: kind,
+            settled,
+            reserved,
+            cap,
+            used_fraction,
+            starts_at: Some("2024-06-07T00:00:00Z".to_string()),
+            resets_at: Some("2024-06-07T12:00:00Z".to_string()),
+            rate_card_version: Some("rate-card-9".to_string()),
+        }
+    };
+    let token_totals = codex_whisply::ContextualUsageTokenTotals {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    codex_whisply::ContextualUsageSnapshot {
+        advance_windows: None,
+        contract_version: codex_whisply::CONTEXTUAL_ACTION_CONTRACT_VERSION.to_string(),
+        tier: "pro".to_string(),
+        windows: vec![
+            window(
+                codex_whisply::UsageWindowCategory::Usage,
+                codex_whisply::UsageWindowKind::FiveHour,
+                0.42,
+                4.200,
+                0.500,
+                10.0,
+            ),
+            window(
+                codex_whisply::UsageWindowCategory::Usage,
+                codex_whisply::UsageWindowKind::Weekly,
+                0.10,
+                10.000,
+                1.000,
+                100.0,
+            ),
+            window(
+                codex_whisply::UsageWindowCategory::Transcription,
+                codex_whisply::UsageWindowKind::Weekly,
+                0.05,
+                1.000,
+                0.000,
+                20.0,
+            ),
+        ],
+        metering: codex_whisply::ContextualUsageMetering {
+            contract_version: codex_whisply::USAGE_METERING_CONTRACT_VERSION.to_string(),
+            basis: codex_whisply::USAGE_METERING_BASIS.to_string(),
+            currency: "USD".to_string(),
+            rate_card_version: "rate-card-9".to_string(),
+            normalized_units_per_cash_micro: 9,
+            tokens: codex_whisply::ContextualUsageTokenWindows {
+                five_hour: token_totals.clone(),
+                weekly: token_totals,
+            },
+        },
+        generated_at: "2024-06-07T08:00:00Z".to_string(),
+        stale: false,
+    }
+}
+
 pub(super) fn truncated_path_variants(path: &str) -> Vec<String> {
     let chars: Vec<char> = path.chars().collect();
     (1..chars.len())

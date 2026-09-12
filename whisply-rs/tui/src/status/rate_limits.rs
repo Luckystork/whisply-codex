@@ -19,8 +19,6 @@ use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RateLimitWindow;
 use codex_app_server_protocol::SpendControlLimitSnapshot as CoreSpendControlLimitSnapshot;
 use codex_whisply::ContextualUsageSnapshot;
-use codex_whisply::UsageWindowCategory;
-use codex_whisply::UsageWindowKind;
 use whisply_protocol::num_format::format_with_separators;
 
 const STATUS_LIMIT_BAR_SEGMENTS: usize = 20;
@@ -29,7 +27,7 @@ const STATUS_LIMIT_BAR_EMPTY: &str = "░";
 
 #[derive(Debug, Clone)]
 pub(crate) struct StatusRateLimitRow {
-    /// Human-readable row label, such as `"5h limit"`, `"Monthly limit"`, or `"Credits"`.
+    /// Human-readable row label, such as `"Usage (five-hour)"` or `"Credits"`.
     pub label: String,
     /// Value payload for the row.
     pub value: StatusRateLimitValue,
@@ -46,6 +44,10 @@ pub(crate) enum StatusRateLimitValue {
         resets_at: Option<String>,
         /// Optional detail line rendered beneath the progress bar.
         details: Option<String>,
+        /// When true, the bar and summary speak used cost, matching
+        /// `whisply usage` and the Mac Usage tab. Legacy Codex rate-limit
+        /// rows still speak remaining capacity.
+        present_used: bool,
     },
     /// Plain text value used for non-window rows.
     Text(String),
@@ -227,7 +229,7 @@ pub(crate) fn compose_managed_usage_data(
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| format_reset_timestamp(value.with_timezone(&Local), now));
         rows.push(StatusRateLimitRow {
-            label: managed_window_label(window.category, window.window),
+            label: codex_whisply::account_usage_window_name(window.category, window.window),
             value: StatusRateLimitValue::Window {
                 percent_used: codex_whisply::account_usage_used_fraction(window) * 100.0,
                 resets_at,
@@ -235,6 +237,7 @@ pub(crate) fn compose_managed_usage_data(
                     "settled {:.3}, reserved {:.3}, cap {:.3}",
                     window.settled, window.reserved, window.cap
                 )),
+                present_used: true,
             },
         });
     }
@@ -265,19 +268,6 @@ pub(crate) fn compose_managed_usage_data(
         StatusRateLimitData::Stale(rows)
     } else {
         StatusRateLimitData::Available(rows)
-    }
-}
-
-fn managed_window_label(category: UsageWindowCategory, window: UsageWindowKind) -> String {
-    let window_label = match window {
-        UsageWindowKind::FiveHour => "5h",
-        UsageWindowKind::Weekly => "Weekly",
-    };
-    match category {
-        UsageWindowCategory::Usage => format!("{window_label} limit"),
-        UsageWindowCategory::Transcription => {
-            format!("Transcription {}", window_label.to_lowercase())
-        }
     }
 }
 
@@ -352,6 +342,7 @@ pub(crate) fn compose_rate_limit_data_many(
                     percent_used: primary.used_percent,
                     resets_at: primary.resets_at.clone(),
                     details: None,
+                    present_used: false,
                 },
             });
         }
@@ -379,6 +370,7 @@ pub(crate) fn compose_rate_limit_data_many(
                     percent_used: secondary.used_percent,
                     resets_at: secondary.resets_at.clone(),
                     details: None,
+                    present_used: false,
                 },
             });
         }
@@ -394,6 +386,7 @@ pub(crate) fn compose_rate_limit_data_many(
                 value: StatusRateLimitValue::Window {
                     percent_used: 100.0 - individual_limit.percent_remaining,
                     resets_at: individual_limit.resets_at.clone(),
+                    present_used: false,
                     details: Some(format!(
                         "{} of {} credits used",
                         individual_limit.used, individual_limit.limit
@@ -412,12 +405,13 @@ pub(crate) fn compose_rate_limit_data_many(
     }
 }
 
-/// Renders a fixed-width progress bar from remaining percentage.
+/// Renders a fixed-width progress bar from a 0..=100 fill percentage.
 ///
-/// This function expects a remaining value in the `0..=100` range and clamps out-of-range input.
-/// Passing a used percentage by mistake will invert the bar and mislead users.
-pub(crate) fn render_status_limit_progress_bar(percent_remaining: f64) -> String {
-    let ratio = (percent_remaining / 100.0).clamp(0.0, 1.0);
+/// Callers choose what that percentage means: remaining capacity for legacy
+/// Codex rate-limit rows, used cost for Whisply-managed meters. Mixing the
+/// two inverts the bar.
+pub(crate) fn render_status_limit_progress_bar(percent_filled: f64) -> String {
+    let ratio = (percent_filled / 100.0).clamp(0.0, 1.0);
     let filled = (ratio * STATUS_LIMIT_BAR_SEGMENTS as f64).round() as usize;
     let filled = filled.min(STATUS_LIMIT_BAR_SEGMENTS);
     let empty = STATUS_LIMIT_BAR_SEGMENTS.saturating_sub(filled);

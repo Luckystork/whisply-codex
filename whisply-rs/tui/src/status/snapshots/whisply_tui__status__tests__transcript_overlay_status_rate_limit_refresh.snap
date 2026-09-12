@@ -18,9 +18,9 @@ before:
 │  Permissions:      Custom (workspace with network access, Ask for approval) │
 │  Agents.md:        <none>                                                   │
 │                                                                             │
-│  Token usage:      0 total  (0 input + 0 output)                            │
-│  Limits:           refresh requested; run /status again shortly.            │
+│  Usage:            refresh requested; run /status again shortly.            │
 ╰─────────────────────────────────────────────────────────────────────────────╯
+~
 ~
 ~
 ~
@@ -50,13 +50,13 @@ after:
 │  Permissions:      Custom (workspace with network access, Ask for approval) │
 │  Agents.md:        <none>                                                   │
 │                                                                             │
-│  Token usage:      0 total  (0 input + 0 output)                            │
 │  spark limit:                                                               │
 │  5h limit:         [███████████░░░░░░░░░] 55% left (resets soon)            │
 │  Weekly limit:     [██████████████░░░░░░] 70% left (resets later)           │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 
 next message
+~
 ~
 ~
 ~

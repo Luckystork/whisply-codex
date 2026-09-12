@@ -61,28 +61,6 @@ fn cache_project_root(chat: &mut ChatWidget, root_name: &str) {
     });
 }
 
-fn cache_rate_limit_snapshot(chat: &mut ChatWidget) {
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        limit_id: None,
-        limit_name: None,
-        primary: Some(RateLimitWindow {
-            used_percent: 35,
-            window_duration_mins: Some(30 * 24 * 60),
-            resets_at: None,
-        }),
-        secondary: Some(RateLimitWindow {
-            used_percent: 50,
-            window_duration_mins: Some(7 * 24 * 60),
-            resets_at: None,
-        }),
-        credits: None,
-        individual_limit: None,
-        spend_control_reached: None,
-        plan_type: None,
-        rate_limit_reached_type: None,
-    }));
-}
-
 #[tokio::test]
 async fn status_surface_preview_lines_live_only_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -219,7 +197,7 @@ async fn status_surface_preview_lines_mixed_snapshot() {
 #[tokio::test]
 async fn status_surface_preview_lines_rate_limits_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    cache_rate_limit_snapshot(&mut chat);
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
 
     let snapshot = combined_preview_snapshot(
         &mut chat,
@@ -237,32 +215,25 @@ async fn status_surface_preview_lines_rate_limits_snapshot() {
 async fn status_surface_preview_omits_unavailable_rate_limit_items() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
-        limit_id: None,
-        limit_name: None,
-        primary: Some(RateLimitWindow {
-            used_percent: 9,
-            window_duration_mins: Some(7 * 24 * 60),
-            resets_at: None,
-        }),
-        secondary: None,
-        credits: None,
-        individual_limit: None,
-        spend_control_reached: None,
-        plan_type: None,
-        rate_limit_reached_type: None,
-    }));
-
     assert_eq!(
         status_preview_line_option(&mut chat, &[StatusLineItem::FiveHourLimit]),
         None
     );
     assert_eq!(
+        status_preview_line_option(
+            &mut chat,
+            &[StatusLineItem::FiveHourLimit, StatusLineItem::WeeklyLimit]
+        ),
+        None
+    );
+
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
+    assert_eq!(
         status_preview_line(
             &mut chat,
             &[StatusLineItem::FiveHourLimit, StatusLineItem::WeeklyLimit]
         ),
-        "weekly 91% left"
+        "Usage (five-hour) 47% used · Usage (weekly) 11% used"
     );
     assert_eq!(
         title_preview_line(
@@ -272,14 +243,14 @@ async fn status_surface_preview_omits_unavailable_rate_limit_items() {
                 TerminalTitleItem::WeeklyLimit
             ],
         ),
-        "weekly 91% left"
+        "Usage (five-hour) 47% used | Usage (weekly) 11% used"
     );
 }
 
 #[tokio::test]
 async fn status_line_setup_popup_rate_limits_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    cache_rate_limit_snapshot(&mut chat);
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
     chat.config.tui_status_line = Some(vec![
         "five-hour-limit".to_string(),
         "weekly-limit".to_string(),
@@ -362,7 +333,7 @@ async fn terminal_title_setup_popup_mixed_snapshot() {
 #[tokio::test]
 async fn terminal_title_setup_popup_rate_limits_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    cache_rate_limit_snapshot(&mut chat);
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
     chat.config.tui_terminal_title = Some(vec![
         "five-hour-limit".to_string(),
         "weekly-limit".to_string(),

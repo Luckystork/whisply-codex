@@ -112,3 +112,21 @@ fn execution_rejects_unbounded_model_correlation() {
         FirstPartyToolAdmissionError::InvalidRuntimeCorrelation
     );
 }
+
+#[test]
+fn only_computer_use_is_an_auto_review_decision() {
+    assert!(first_party_tool_requires_auto_review(
+        "whisply.computer_use"
+    ));
+    for tool_id in [
+        "whisply.screen.context",
+        "whisply.files",
+        "whisply.browser",
+        "whisply.chrome",
+    ] {
+        assert!(
+            !first_party_tool_requires_auto_review(tool_id),
+            "{tool_id} is not the native Auto skip hole"
+        );
+    }
+}

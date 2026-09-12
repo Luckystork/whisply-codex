@@ -13,16 +13,13 @@ use whisply_utils_cli::CliConfigOverrides;
 fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<String> {
     let is_fatal = matches!(&exit_info.exit_reason, ExitReason::Fatal(_));
     let AppExitInfo {
-        token_usage,
+        token_usage: _,
         thread_id,
         resume_hint,
         ..
     } = exit_info;
 
     let mut lines = Vec::new();
-    if !token_usage.is_zero() {
-        lines.push(token_usage.to_string());
-    }
 
     if let Some(resume_cmd) = resume_hint {
         let command = if color_enabled {

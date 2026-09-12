@@ -252,7 +252,8 @@ pub fn build_item_from_guardian_event(
         GuardianAssessmentAction::ApplyPatch { .. }
         | GuardianAssessmentAction::NetworkAccess { .. }
         | GuardianAssessmentAction::McpToolCall { .. }
-        | GuardianAssessmentAction::RequestPermissions { .. } => None,
+        | GuardianAssessmentAction::RequestPermissions { .. }
+        | GuardianAssessmentAction::FirstPartyTool { .. } => None,
     }
 }
 

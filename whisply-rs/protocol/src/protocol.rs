@@ -3405,6 +3405,11 @@ pub struct TurnContextItem {
     pub approval_policy: AskForApproval,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<ApprovalsReviewer>,
+    /// When true, Auto reviews are spawned fresh with no conversation
+    /// history. Absent on older rollouts, which is the reusable reviewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stateless_auto_review: Option<bool>,
     pub sandbox_policy: SandboxPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<PermissionProfile>,
@@ -6233,6 +6238,7 @@ mod tests {
             timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
+            stateless_auto_review: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             permission_profile: None,
             network: Some(TurnContextNetworkItem {
@@ -6281,6 +6287,17 @@ mod tests {
             })
         );
         assert_eq!(value["summary"], json!("auto"));
+        assert!(
+            value.get("stateless_auto_review").is_none(),
+            "reusable-reviewer turns omit the flag so older readers still parse"
+        );
+        let parsed: TurnContextItem = serde_json::from_value(value)?;
+        assert_eq!(parsed.stateless_auto_review, None);
+
+        let mut auto = parsed;
+        auto.stateless_auto_review = Some(true);
+        let auto_value = serde_json::to_value(&auto)?;
+        assert_eq!(auto_value["stateless_auto_review"], json!(true));
         Ok(())
     }
 

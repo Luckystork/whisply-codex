@@ -177,6 +177,10 @@ pub enum GuardianAssessmentAction {
         reason: Option<String>,
         permissions: RequestPermissionProfile,
     },
+    FirstPartyTool {
+        tool_id: String,
+        cwd: AbsolutePathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

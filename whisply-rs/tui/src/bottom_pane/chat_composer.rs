@@ -217,6 +217,7 @@ use super::footer::FooterProps;
 use super::footer::GoalStatusIndicator;
 use super::footer::SummaryLeft;
 use super::footer::can_show_left_with_context;
+use super::footer::account_usage_line;
 use super::footer::context_window_line;
 use super::footer::esc_hint_mode;
 use super::footer::footer_height;
@@ -485,7 +486,6 @@ pub(crate) struct ChatComposer {
     config: ChatComposerConfig,
     connectors_enabled: bool,
     plugins_command_enabled: bool,
-    token_activity_command_enabled: bool,
     service_tier_commands_enabled: bool,
     service_tier_commands: Vec<ServiceTierCommand>,
     mentions_v2_enabled: bool,
@@ -561,7 +561,6 @@ impl ChatComposer {
             collaboration_modes_enabled: self.collaboration_modes_enabled,
             connectors_enabled: self.connectors_enabled,
             plugins_command_enabled: self.plugins_command_enabled,
-            token_activity_command_enabled: self.token_activity_command_enabled,
             service_tier_commands_enabled: self.service_tier_commands_enabled,
             goal_command_enabled: self.goal_command_enabled,
             personality_command_enabled: self.personality_command_enabled,
@@ -621,6 +620,7 @@ impl ChatComposer {
                 context_window_percent: None,
                 context_window_used_tokens: None,
                 context_window_pending: false,
+                account_usage_used_percent: None,
                 collaboration_mode_indicator: None,
                 goal_status_indicator: None,
                 ide_context_active: false,
@@ -668,7 +668,6 @@ impl ChatComposer {
             config,
             connectors_enabled: false,
             plugins_command_enabled: false,
-            token_activity_command_enabled: false,
             service_tier_commands_enabled: false,
             service_tier_commands: Vec::new(),
             mentions_v2_enabled: false,
@@ -771,10 +770,6 @@ impl ChatComposer {
 
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
         self.plugins_command_enabled = enabled;
-    }
-
-    pub fn set_token_activity_command_enabled(&mut self, enabled: bool) {
-        self.token_activity_command_enabled = enabled;
     }
 
     pub fn set_mentions_v2_enabled(&mut self, enabled: bool) {
@@ -1354,7 +1349,9 @@ impl ChatComposer {
     }
 
     fn right_footer_line_with_context(&self) -> Line<'static> {
-        let mut line = if self.footer.context_window_pending {
+        let mut line = if let Some(used) = self.footer.account_usage_used_percent {
+            account_usage_line(used)
+        } else if self.footer.context_window_pending {
             Line::default()
         } else {
             context_window_line(
@@ -4223,6 +4220,10 @@ impl ChatComposer {
         self.footer.context_window_used_tokens = used_tokens;
     }
 
+    pub(crate) fn set_account_usage_meter(&mut self, used_percent: Option<i64>) {
+        self.footer.account_usage_used_percent = used_percent;
+    }
+
     pub(crate) fn set_context_window_pending(&mut self, pending: bool) {
         self.footer.context_window_pending = pending;
     }
@@ -5284,7 +5285,7 @@ mod tests {
             |composer| {
                 composer.set_status_line_enabled(/*enabled*/ true);
                 composer.set_status_line(Some(Line::from(
-                    "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+                    "gpt-5.4 high fast · ~/code/codex-1 · Usage 47% used",
                 )));
                 composer.set_text_content("!git status".to_string(), Vec::new(), Vec::new());
             },
@@ -5296,7 +5297,7 @@ mod tests {
             |composer| {
                 composer.set_status_line_enabled(/*enabled*/ true);
                 composer.set_status_line(Some(Line::from(
-                    "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+                    "gpt-5.4 high fast · ~/code/codex-1 · Usage 47% used",
                 )));
                 composer.set_text_content("!".to_string(), Vec::new(), Vec::new());
                 let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -5339,7 +5340,7 @@ mod tests {
         );
         composer.set_status_line_enabled(/*enabled*/ true);
         composer.set_status_line(Some(Line::from(
-            "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+            "gpt-5.4 high fast · ~/code/codex-1 · Usage 47% used",
         )));
         composer.set_text_content("!git status".to_string(), Vec::new(), Vec::new());
 

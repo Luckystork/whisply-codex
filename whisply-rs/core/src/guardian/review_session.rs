@@ -738,8 +738,11 @@ async fn run_review_on_session(
     let (send_followup_reminder, prompt_mode) = {
         let state = review_session.state.lock().await;
 
-        let send_followup_reminder = state.prior_review_count == 1;
-        let prompt_mode = if state.prior_review_count == 0 {
+        let send_followup_reminder =
+            !params.spawn_config.stateless_auto_review && state.prior_review_count == 1;
+        let prompt_mode = if params.spawn_config.stateless_auto_review {
+            GuardianPromptMode::BoundedActionPacket
+        } else if state.prior_review_count == 0 {
             GuardianPromptMode::Full
         } else if let Some(cursor) = state.last_reviewed_transcript_cursor {
             GuardianPromptMode::Delta { cursor }
@@ -1117,6 +1120,35 @@ pub(crate) fn build_guardian_review_session_config(
                 feature.key()
             );
         }
+    }
+    if parent_config.stateless_auto_review {
+        for feature in [
+            Feature::ShellTool,
+            Feature::ViewImage,
+            Feature::UnifiedExec,
+            Feature::RequestPermissionsTool,
+            Feature::MemoryTool,
+            Feature::ToolSearch,
+            Feature::ComputerUse,
+            Feature::BrowserUse,
+            Feature::InAppBrowser,
+            Feature::ImageGeneration,
+        ] {
+            if let Err(err) = guardian_config.features.disable(feature) {
+                warn!(
+                    "stateless Auto review could not disable `features.{}`: {err}",
+                    feature.key()
+                );
+            }
+            if guardian_config.features.enabled(feature) {
+                warn!(
+                    "stateless Auto review could not disable `features.{}`; continuing with the feature enabled",
+                    feature.key()
+                );
+            }
+        }
+        guardian_config.use_experimental_unified_exec_tool = false;
+        guardian_config.include_environment_context = false;
     }
     Ok(guardian_config)
 }
@@ -1530,6 +1562,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guardian_review_session_config_stateless_auto_review_is_tool_free() {
+        let mut parent_config = crate::config::test_config().await;
+        parent_config.stateless_auto_review = true;
+        parent_config.include_environment_context = true;
+        parent_config.use_experimental_unified_exec_tool = true;
+        let _ = parent_config.features.enable(Feature::ShellTool);
+        let _ = parent_config.features.enable(Feature::UnifiedExec);
+        let _ = parent_config.features.enable(Feature::MemoryTool);
+
+        let guardian_config = build_guardian_review_session_config(
+            &parent_config,
+            /*live_network_config*/ None,
+            "gpt-5.6-luna",
+            /*reasoning_effort*/ None,
+            /*model_messages*/ None,
+        )
+        .expect("guardian config");
+
+        assert!(guardian_config.stateless_auto_review);
+        assert!(!guardian_config.use_experimental_unified_exec_tool);
+        assert!(!guardian_config.include_environment_context);
+        assert!(!guardian_config.features.enabled(Feature::ShellTool));
+        assert!(!guardian_config.features.enabled(Feature::UnifiedExec));
+        assert!(!guardian_config.features.enabled(Feature::MemoryTool));
+        assert!(
+            guardian_config
+                .base_instructions
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("You must not use tools"))
+        );
+    }
+
+    #[tokio::test]
     async fn guardian_review_session_config_prefers_managed_policy_and_uses_catalog_template() {
         let mut parent_config = crate::config::test_config().await;
         let managed_policy = "Use the managed Guardian policy.";
@@ -1758,6 +1823,9 @@ mod tests {
     #[test]
     fn had_prior_review_context_tracks_prompt_mode() {
         assert!(!had_prior_review_context(&GuardianPromptMode::Full));
+        assert!(!had_prior_review_context(
+            &GuardianPromptMode::BoundedActionPacket
+        ));
         assert!(had_prior_review_context(&GuardianPromptMode::Delta {
             cursor: GuardianTranscriptCursor {
                 parent_history_version: 7,

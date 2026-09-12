@@ -661,6 +661,12 @@ pub enum GuardianApprovalReviewAction {
         reason: Option<String>,
         permissions: RequestPermissionProfile,
     },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    FirstPartyTool {
+        tool_id: String,
+        cwd: AbsolutePathBuf,
+    },
 }
 
 impl From<CoreGuardianAssessmentAction> for GuardianApprovalReviewAction {
@@ -719,6 +725,9 @@ impl From<CoreGuardianAssessmentAction> for GuardianApprovalReviewAction {
             } => Self::RequestPermissions {
                 reason,
                 permissions: permissions.into(),
+            },
+            CoreGuardianAssessmentAction::FirstPartyTool { tool_id, cwd } => {
+                Self::FirstPartyTool { tool_id, cwd }
             },
         }
     }
@@ -782,6 +791,9 @@ impl TryFrom<GuardianApprovalReviewAction> for CoreGuardianAssessmentAction {
             } => Self::RequestPermissions {
                 reason,
                 permissions: permissions.try_into()?,
+            },
+            GuardianApprovalReviewAction::FirstPartyTool { tool_id, cwd } => {
+                Self::FirstPartyTool { tool_id, cwd }
             },
         })
     }

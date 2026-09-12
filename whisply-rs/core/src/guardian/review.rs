@@ -65,6 +65,10 @@ const GUARDIAN_TIMEOUT_INSTRUCTIONS: &str = concat!(
 
 const GUARDIAN_REVIEW_MAX_ATTEMPTS: i64 = 3;
 
+/// Whisply `Auto` always reviews with GPT-5.6 Luna. Catalog overrides and the
+/// parent turn's model are the reusable-guardian path, not this one.
+const WHISPLY_STATELESS_AUTO_REVIEW_MODEL: &str = "gpt-5.6-luna";
+
 fn plugin_attribution_for_guardian_request(
     turn: &TurnContext,
     request: &GuardianApprovalRequest,
@@ -942,7 +946,12 @@ pub(super) async fn guardian_review_session_config(
             turn.config.http_client_factory(),
         )
         .await;
-    let default_review_model_id = turn.provider.approval_review_preferred_model();
+    let stateless_auto_review = turn.config.stateless_auto_review;
+    let default_review_model_id = if stateless_auto_review {
+        WHISPLY_STATELESS_AUTO_REVIEW_MODEL
+    } else {
+        turn.provider.approval_review_preferred_model()
+    };
     let preferred_reasoning_effort = |supports_low: bool, fallback| {
         if supports_low {
             Some(whisply_protocol::openai_models::ReasoningEffort::Low)
@@ -950,7 +959,13 @@ pub(super) async fn guardian_review_session_config(
             fallback
         }
     };
-    let model_override = turn.model_info.auto_review_model_override.as_deref();
+    // Catalog `auto_review_model_override` is the upstream reviewer slug. Whisply
+    // Auto is pinned to GPT-5.6 Luna even when that preset is absent offline.
+    let model_override = if stateless_auto_review {
+        None
+    } else {
+        turn.model_info.auto_review_model_override.as_deref()
+    };
     let review_model_id = model_override.unwrap_or(default_review_model_id);
     let review_model = available_models
         .iter()
@@ -968,6 +983,14 @@ pub(super) async fn guardian_review_session_config(
             Some(preset.default_reasoning_effort.clone()),
         );
         (review_model_id.to_string(), reasoning_effort)
+    } else if stateless_auto_review {
+        (
+            default_review_model_id.to_string(),
+            preferred_reasoning_effort(
+                true,
+                Some(whisply_protocol::openai_models::ReasoningEffort::Low),
+            ),
+        )
     } else {
         let reasoning_effort = preferred_reasoning_effort(
             turn.model_info

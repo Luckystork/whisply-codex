@@ -154,10 +154,9 @@ pub(crate) struct PluginRemoteSectionError {
 /// updates the cached snapshots and any available reset-credit notice (no
 /// status card to finalize). A `StatusCommand` is tied to a specific `/status`
 /// invocation and must call `finish_status_rate_limit_refresh` when done so the
-/// card stops showing a "refreshing" state. A `UsageMenu` refreshes a cached
-/// zero reset count so the disabled menu entry can become available without a
-/// restart. A `ResetPicker` refreshes the rate limits and detailed reset-credit
-/// rows before showing redemption choices.
+/// card stops showing a "refreshing" state. A `ResetPicker` refreshes the rate
+/// limits and detailed reset-credit rows before showing redemption choices.
+/// `/usage` is not an origin: it reads the Whisply-managed projection instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RateLimitRefreshOrigin {
     /// Eagerly fetched after bootstrap for `/status` data and reset availability.
@@ -165,8 +164,6 @@ pub(crate) enum RateLimitRefreshOrigin {
     /// User-initiated via `/status`; the `request_id` correlates with the
     /// status card that should be updated when the fetch completes.
     StatusCommand { request_id: u64 },
-    /// User reopened `/usage` while the cached reset-credit count was zero.
-    UsageMenu { request_id: u64 },
     /// User opened the reset-credit picker.
     ResetPicker { request_id: u64 },
     /// Refresh requested after a reset credit was successfully consumed.
@@ -408,10 +405,8 @@ pub(crate) enum AppEvent {
         result: Result<GetAccountRateLimitsResponse, String>,
     },
 
-    /// Open the default token-activity view selected from the `/usage` menu.
-    OpenTokenActivity,
-
-    /// Open the reset-credit flow selected from the `/usage` menu.
+    /// Open the reset-credit flow. Nothing in the managed `/usage` path sends
+    /// this; the retired picker still uses it for its Try-again row.
     OpenRateLimitResetCredits,
 
     /// Confirm the reset credit selected from the reset-credit picker.
@@ -488,7 +483,7 @@ pub(crate) enum AppEvent {
     /// managed Usage independent of the legacy ChatGPT/token-activity RPC.
     ManagedUsageResult {
         request_id: u64,
-        result: Result<String, String>,
+        result: Result<(Box<ContextualUsageSnapshot>, String), String>,
     },
 
     /// Whisply-managed Usage read that fills a pending `/status` card.

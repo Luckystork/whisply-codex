@@ -92,8 +92,7 @@ impl App {
                         .and_then(|result| result.map_err(|err| err.to_string()))
                 }
                 RateLimitRefreshOrigin::StartupPrefetch { .. }
-                | RateLimitRefreshOrigin::StatusCommand { .. }
-                | RateLimitRefreshOrigin::UsageMenu { .. } => {
+                | RateLimitRefreshOrigin::StatusCommand { .. } => {
                     request.await.map_err(|err| err.to_string())
                 }
             };

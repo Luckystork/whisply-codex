@@ -24,9 +24,9 @@ const MAX_CLIENT_USER_MESSAGE_ID_BYTES: usize = 256;
 /// The generic one-turn bridge carries only tools whose Mac owner admits the
 /// call against its own permission, file grant, approved target, or
 /// account-bound task before anything runs. Carrying a call is not granting
-/// it: the owner still decides, and Computer Use's owner suspends the call at
-/// the real confirmation window and resumes the same turn with what the person
-/// answered.
+/// it: the owner still decides. Under `Auto`, Computer Use is reviewed first by
+/// a fresh Luna packet in the handler; the native owner then honors that
+/// verdict for routine app binding and still holds final-action confirmation.
 const GENERIC_ADMITTED_NATIVE_TOOL_IDS: [&str; 5] = [
     "whisply.screen.context",
     "whisply.files",
@@ -345,6 +345,13 @@ pub(crate) fn native_model_tool_name(tool_id: &str) -> Option<&'static str> {
 /// cannot be widened by this generic path.
 pub(crate) fn is_generic_admitted_native_tool_id(tool_id: &str) -> bool {
     GENERIC_ADMITTED_NATIVE_TOOL_IDS.contains(&tool_id)
+}
+
+/// Computer Use is the native owner that currently skips its person-owned
+/// prompt under `Auto`, claiming the runtime already reviewed the action.
+/// That review has to happen here, as a fresh Luna packet, before dispatch.
+pub(crate) fn first_party_tool_requires_auto_review(tool_id: &str) -> bool {
+    tool_id == "whisply.computer_use"
 }
 
 fn is_bounded_identifier(value: &str, maximum_bytes: usize) -> bool {

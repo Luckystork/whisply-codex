@@ -55,18 +55,18 @@ pub(crate) enum TerminalTitleItem {
     Thread,
     /// Current git branch (if available).
     GitBranch,
-    /// Percentage of context window remaining.
+    /// Percentage of five-hour Usage remaining.
     ContextRemaining,
-    /// Percentage of context window used.
+    /// Percentage of five-hour Usage used.
     #[strum(to_string = "context-used", serialize = "context-usage")]
     ContextUsed,
-    /// Remaining usage on the primary rate limit.
+    /// Five-hour account Usage.
     FiveHourLimit,
-    /// Remaining usage on the secondary rate limit.
+    /// Weekly Usage.
     WeeklyLimit,
     /// Codex application version.
     CodexVersion,
-    /// Total tokens used in the current session.
+    /// Total tokens used in the current session. Omitted on Whisply.
     UsedTokens,
     /// Total input tokens consumed.
     TotalInputTokens,
@@ -103,21 +103,21 @@ impl TerminalTitleItem {
             TerminalTitleItem::Thread => "Current thread title, or thread identifier when unnamed",
             TerminalTitleItem::GitBranch => "Current Git branch (omitted when unavailable)",
             TerminalTitleItem::ContextRemaining => {
-                "Percentage of context window remaining (omitted when unknown)"
+                "Percentage of five-hour Usage remaining (omitted until Usage is available)"
             }
             TerminalTitleItem::ContextUsed => {
-                "Percentage of context window used (omitted when unknown)"
+                "Percentage of five-hour Usage used (omitted until Usage is available)"
             }
             TerminalTitleItem::FiveHourLimit => {
-                "Remaining usage on the primary usage limit (omitted when unavailable)"
+                "Five-hour Usage (omitted until Usage is available)"
             }
             TerminalTitleItem::WeeklyLimit => {
-                "Remaining usage on the secondary usage limit (omitted when unavailable)"
+                "Weekly Usage (omitted until Usage is available)"
             }
             TerminalTitleItem::CodexVersion => "Whisply application version",
-            TerminalTitleItem::UsedTokens => "Total tokens used in session (omitted when zero)",
-            TerminalTitleItem::TotalInputTokens => "Total input tokens used in session",
-            TerminalTitleItem::TotalOutputTokens => "Total output tokens used in session",
+            TerminalTitleItem::UsedTokens => "Session token total (omitted on Whisply)",
+            TerminalTitleItem::TotalInputTokens => "Session input tokens (omitted on Whisply)",
+            TerminalTitleItem::TotalOutputTokens => "Session output tokens (omitted on Whisply)",
             TerminalTitleItem::SessionId => {
                 "Current thread identifier (omitted until thread starts)"
             }

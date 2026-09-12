@@ -720,6 +720,7 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
         "whisply_auth_expired"
             | "whisply_subscription_required"
             | "whisply_usage_limited"
+            | "whisply_usage_settlement_pending"
             | "whisply_model_unavailable"
             | "whisply_refused"
             | "whisply_cancelled"
@@ -733,7 +734,17 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
         .and_then(serde_json::Value::as_str)
         .filter(|message| !message.trim().is_empty())
         .unwrap_or("Whisply could not complete this request.");
-    Some(CodexErr::InvalidRequest(message.to_string()))
+    let mut public_error = serde_json::json!({
+        "type": "whisply_error",
+        "code": code,
+        "message": message
+    });
+    if let Some(request_id) = error.get("request_id") {
+        public_error["request_id"] = request_id.clone();
+    }
+    Some(CodexErr::InvalidRequest(
+        serde_json::json!({ "error": public_error }).to_string(),
+    ))
 }
 
 impl ModelProvider for WhisplyModelProvider {
@@ -917,6 +928,7 @@ mod tests {
             "whisply_cancelled",
             "whisply_stopped",
             "whisply_usage_limited",
+            "whisply_usage_settlement_pending",
         ] {
             let expected = format!("public {code} message");
             let error = ApiError::Transport(TransportError::Http {
@@ -936,8 +948,14 @@ mod tests {
             });
 
             let mapped = provider.map_api_error(error);
+            let rendered = mapped.to_string();
             assert!(!mapped.is_retryable(), "{code} should not be retried");
-            assert_eq!(mapped.to_string(), expected, "{code}");
+            assert!(rendered.contains(code), "{code}: {rendered}");
+            assert!(rendered.contains(&expected), "{code}: {rendered}");
+            assert!(
+                !rendered.contains("must-not-control-client-policy"),
+                "{code}: {rendered}"
+            );
         }
     }
 

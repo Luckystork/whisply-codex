@@ -116,6 +116,7 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_whisply::ContextualUsageSnapshot;
 use codex_whisply::NativeBrokerClient;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -578,7 +579,6 @@ pub(crate) struct ChatWidget {
     pending_rate_limit_reset_idempotency_key: Option<String>,
     rate_limit_reset_picker_request_id: Option<u64>,
     pending_rate_limit_reset_hint_request_id: Option<u64>,
-    pending_usage_menu_rate_limit_request_id: Option<u64>,
     pending_rate_limit_reset_hint: Option<PlainHistoryCell>,
     available_rate_limit_reset_credits: Option<i64>,
     next_rate_limit_reset_request_id: u64,
@@ -662,6 +662,11 @@ pub(crate) struct ChatWidget {
     /// Lazily initialized from the one-shot inherited capability descriptor
     /// and retained for every broker-backed TUI command in this process.
     managed_broker: Option<Arc<NativeBrokerClient>>,
+    /// Last Whisply Usage snapshot shown by `/status` or `/usage`.
+    ///
+    /// The footer and status-line items read this instead of Codex token
+    /// totals or context-window leftover.
+    managed_usage_snapshot: Option<ContextualUsageSnapshot>,
     thread_id: Option<ThreadId>,
     /// Nudge dismissals that should survive draft edits within the current thread scope.
     ///
@@ -1146,17 +1151,27 @@ impl ChatWidget {
             Some(info) => self.apply_token_info(info),
             None => {
                 self.token_usage_pending = true;
-                self.bottom_pane
-                    .set_context_window_pending(/*pending*/ true);
-                self.bottom_pane
-                    .set_context_window(/*percent*/ None, /*used_tokens*/ None);
                 self.token_info = None;
+                if !self.uses_managed_usage() {
+                    self.bottom_pane
+                        .set_context_window_pending(/*pending*/ true);
+                    self.bottom_pane
+                        .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                }
             }
         }
     }
 
     fn apply_token_info(&mut self, info: TokenUsageInfo) {
         self.token_usage_pending = false;
+        if self.uses_managed_usage() {
+            // The composer footer is an account Usage meter on Whisply. Token
+            // updates must not resurrect Codex context leftover.
+            self.bottom_pane
+                .set_context_window_pending(/*pending*/ false);
+            self.token_info = Some(info);
+            return;
+        }
         self.bottom_pane
             .set_context_window_pending(/*pending*/ false);
         let percent = self.context_remaining_percent(&info);
@@ -1185,8 +1200,10 @@ impl ChatWidget {
             match saved {
                 Some(info) => self.apply_token_info(info),
                 None => {
-                    self.bottom_pane
-                        .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                    if !self.uses_managed_usage() {
+                        self.bottom_pane
+                            .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                    }
                     self.token_info = None;
                 }
             }

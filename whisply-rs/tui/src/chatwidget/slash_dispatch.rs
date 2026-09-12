@@ -1076,7 +1076,6 @@ impl ChatWidget {
             collaboration_modes_enabled: self.collaboration_modes_enabled(),
             connectors_enabled: self.connectors_enabled(),
             plugins_command_enabled: self.config.features.enabled(Feature::Plugins),
-            token_activity_command_enabled: self.has_codex_backend_auth,
             goal_command_enabled: self.config.features.enabled(Feature::Goals),
             service_tier_commands_enabled: self.fast_mode_enabled(),
             personality_command_enabled: self.config.features.enabled(Feature::Personality),
@@ -1133,7 +1132,8 @@ impl ChatWidget {
         tokio::task::spawn_blocking(move || {
             app_event_tx.send(AppEvent::ManagedUsageResult {
                 request_id,
-                result: usage::read_managed_usage(&broker),
+                result: usage::read_managed_usage(&broker)
+                    .map(|(snapshot, text)| (Box::new(snapshot), text)),
             });
         });
     }
@@ -1146,6 +1146,7 @@ impl ChatWidget {
             Err(_) => {
                 // The card states the limits are unavailable rather than adding
                 // a second error next to it.
+                self.remember_managed_usage(/*snapshot*/ None);
                 self.finish_status_managed_usage_refresh(request_id, /*snapshot*/ None);
                 return;
             }
@@ -1172,7 +1173,7 @@ impl ChatWidget {
         }
     }
 
-    fn uses_managed_usage(&self) -> bool {
+    pub(super) fn uses_managed_usage(&self) -> bool {
         whisply_model_provider::is_whisply_provider(&self.config.model_provider)
     }
 

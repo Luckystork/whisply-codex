@@ -23,19 +23,18 @@ fn take_workspace_headline_request_id(
     }
 }
 
-/// Receiving a token usage update without usage clears the context indicator.
+/// Token updates do not invent a context-window meter on Whisply.
 #[tokio::test]
-async fn token_count_none_resets_context_indicator() {
+async fn token_count_does_not_create_context_indicator_on_whisply() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    let context_window = 13_000;
-    let pre_compact_tokens = 12_700;
 
     handle_token_count(
         &mut chat,
-        Some(make_token_info(pre_compact_tokens, context_window)),
+        Some(make_token_info(
+            /*total_tokens*/ 12_700, /*context_window*/ 13_000,
+        )),
     );
-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(30));
+    assert_eq!(chat.bottom_pane.context_window_percent(), None);
 
     handle_token_count(&mut chat, /*info*/ None);
     assert_eq!(chat.bottom_pane.context_window_percent(), None);
@@ -81,9 +80,12 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
         )),
     );
     chat.refresh_status_line();
+    assert_eq!(status_line_text(&chat), None);
+
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
     assert_eq!(
         status_line_text(&chat),
-        Some("Context 30% left · Context 70% used · 0 in · 0 out".to_string())
+        Some("Usage 53% left · Usage 47% used".to_string())
     );
 }
 
@@ -146,14 +148,11 @@ async fn context_indicator_shows_used_tokens_when_window_unknown() {
     handle_token_count(&mut chat, Some(token_info));
 
     assert_eq!(chat.bottom_pane.context_window_percent(), None);
-    assert_eq!(
-        chat.bottom_pane.context_window_used_tokens(),
-        Some(total_tokens)
-    );
+    assert_eq!(chat.bottom_pane.context_window_used_tokens(), None);
 }
 
 #[tokio::test]
-async fn token_usage_update_uses_runtime_context_window() {
+async fn token_usage_update_does_not_show_context_window_on_whisply() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.config.model_context_window = Some(1_000_000);
@@ -167,16 +166,16 @@ async fn token_usage_update_uses_runtime_context_window() {
 
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::ContextWindowSize),
-        Some("950K window".to_string())
+        None
     );
-    assert_eq!(chat.bottom_pane.context_window_percent(), Some(100));
+    assert_eq!(chat.bottom_pane.context_window_percent(), None);
 
     chat.add_status_output(
         /*refreshing_rate_limits*/ false, /*request_id*/ None,
     );
 
     let cells = drain_insert_history(&mut rx);
-    let context_line = cells
+    let rendered = cells
         .last()
         .expect("status output inserted")
         .iter()
@@ -186,16 +185,11 @@ async fn token_usage_update_uses_runtime_context_window() {
                 .map(|span| span.content.as_ref())
                 .collect::<String>()
         })
-        .find(|line| line.contains("Context window"))
-        .expect("context window line");
-
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        context_line.contains("950K"),
-        "expected /status to use runtime context window, got: {context_line}"
-    );
-    assert!(
-        !context_line.contains("1M"),
-        "expected /status to avoid raw config context window, got: {context_line}"
+        !rendered.contains("Context window") && !rendered.contains("Token usage"),
+        "managed /status must not show Codex token meters, got: {rendered}"
     );
 }
 
@@ -621,8 +615,28 @@ async fn test_rate_limit_warnings_use_secondary_fallback_for_unsupported_window(
 }
 
 #[tokio::test]
+async fn status_line_managed_limit_items_use_whisply_usage() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
+
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::FiveHourLimit),
+        Some("Usage (five-hour) 47% used".to_string())
+    );
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WeeklyLimit),
+        Some("Usage (weekly) 11% used".to_string())
+    );
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::UsedTokens),
+        None
+    );
+}
+
+#[tokio::test]
 async fn status_line_uses_secondary_fallback_for_unsupported_window() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.model_provider.http_headers = None;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
@@ -649,6 +663,7 @@ async fn status_line_uses_secondary_fallback_for_unsupported_window() {
 #[tokio::test]
 async fn status_line_legacy_limit_items_prefer_matching_windows() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.model_provider.http_headers = None;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
@@ -683,6 +698,7 @@ async fn status_line_legacy_limit_items_prefer_matching_windows() {
 #[tokio::test]
 async fn status_line_shows_secondary_non_weekly_when_primary_is_weekly() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.model_provider.http_headers = None;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
@@ -717,6 +733,7 @@ async fn status_line_shows_secondary_non_weekly_when_primary_is_weekly() {
 #[tokio::test]
 async fn status_line_five_hour_item_omits_weekly_only_limit() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.model_provider.http_headers = None;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
@@ -747,6 +764,7 @@ async fn status_line_five_hour_item_omits_weekly_only_limit() {
 #[tokio::test]
 async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.model_provider.http_headers = None;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
@@ -777,6 +795,7 @@ async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
 #[tokio::test]
 async fn status_line_secondary_only_non_weekly_limit_omits_primary_limit_item() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.model_provider.http_headers = None;
 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
@@ -2753,7 +2772,10 @@ async fn status_line_context_used_renders_labeled_percent() {
 
     chat.refresh_status_line();
 
-    assert_eq!(status_line_text(&chat), Some("Context 0% used".to_string()));
+    assert_eq!(status_line_text(&chat), None);
+
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
+    assert_eq!(status_line_text(&chat), Some("Usage 47% used".to_string()));
     assert!(
         drain_insert_history(&mut rx).is_empty(),
         "context-used should remain a valid status line item"
@@ -2768,9 +2790,12 @@ async fn status_line_context_remaining_renders_labeled_percent() {
 
     chat.refresh_status_line();
 
+    assert_eq!(status_line_text(&chat), None);
+
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
     assert_eq!(
         status_line_text(&chat),
-        Some("Context 100% left".to_string())
+        Some("Usage 53% left".to_string())
     );
     assert!(
         drain_insert_history(&mut rx).is_empty(),
@@ -2786,7 +2811,10 @@ async fn status_line_legacy_context_usage_renders_context_used_percent() {
 
     chat.refresh_status_line();
 
-    assert_eq!(status_line_text(&chat), Some("Context 0% used".to_string()));
+    assert_eq!(status_line_text(&chat), None);
+
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
+    assert_eq!(status_line_text(&chat), Some("Usage 47% used".to_string()));
     assert!(
         drain_insert_history(&mut rx).is_empty(),
         "legacy context-usage should remain a valid status line item"
@@ -3160,7 +3188,7 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 
     assert_eq!(
         status_line_text(&chat),
-        Some(format!("gpt-5.4 xhigh fast · Context 0% used · {test_cwd}"))
+        Some(format!("gpt-5.4 xhigh fast · {test_cwd}"))
     );
 
     chat.set_model("gpt-5.2");
@@ -3168,7 +3196,13 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 
     assert_eq!(
         status_line_text(&chat),
-        Some(format!("gpt-5.2 xhigh · Context 0% used · {test_cwd}"))
+        Some(format!("gpt-5.2 xhigh · {test_cwd}"))
+    );
+
+    chat.set_managed_usage_snapshot_for_tests(Some(sample_managed_usage_snapshot()));
+    assert_eq!(
+        status_line_text(&chat),
+        Some(format!("gpt-5.2 xhigh · Usage 47% used · {test_cwd}"))
     );
 }
 

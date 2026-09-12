@@ -74,6 +74,7 @@ impl ChatWidget {
             GuardianAssessmentAction::RequestPermissions { reason, .. } => {
                 Some(permission_request_summary("permission request", reason))
             }
+            GuardianAssessmentAction::FirstPartyTool { tool_id, .. } => Some(tool_id.clone()),
         };
         let guardian_command = |action: &GuardianAssessmentAction| match action {
             GuardianAssessmentAction::Command { command, .. } => shlex::split(command)
@@ -88,7 +89,8 @@ impl ChatWidget {
             GuardianAssessmentAction::ApplyPatch { .. }
             | GuardianAssessmentAction::NetworkAccess { .. }
             | GuardianAssessmentAction::McpToolCall { .. }
-            | GuardianAssessmentAction::RequestPermissions { .. } => None,
+            | GuardianAssessmentAction::RequestPermissions { .. }
+            | GuardianAssessmentAction::FirstPartyTool { .. } => None,
         };
 
         if ev.status == GuardianAssessmentStatus::InProgress
@@ -197,6 +199,11 @@ impl ChatWidget {
                             permission_request_summary("codex could request permissions", reason),
                         )
                     }
+                    GuardianAssessmentAction::FirstPartyTool { tool_id, .. } => {
+                        history_cell::new_guardian_timed_out_action_request(format!(
+                            "Computer Use {tool_id}"
+                        ))
+                    }
                     GuardianAssessmentAction::Command { .. } => unreachable!(),
                     GuardianAssessmentAction::Execve { .. } => unreachable!(),
                 }
@@ -240,6 +247,11 @@ impl ChatWidget {
                     history_cell::new_guardian_denied_action_request(permission_request_summary(
                         "codex to request permissions",
                         reason,
+                    ))
+                }
+                GuardianAssessmentAction::FirstPartyTool { tool_id, .. } => {
+                    history_cell::new_guardian_denied_action_request(format!(
+                        "Computer Use {tool_id}"
                     ))
                 }
                 GuardianAssessmentAction::Command { .. } => unreachable!(),

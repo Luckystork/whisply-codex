@@ -662,6 +662,7 @@ mod tests {
                     timezone: None,
                     approval_policy: whisply_protocol::protocol::AskForApproval::Never,
                     approvals_reviewer: None,
+                    stateless_auto_review: None,
                     sandbox_policy: whisply_protocol::protocol::SandboxPolicy::new_read_only_policy(
                     ),
                     permission_profile: None,

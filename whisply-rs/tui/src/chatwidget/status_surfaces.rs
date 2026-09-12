@@ -12,10 +12,11 @@ use crate::legacy_core::config::Config;
 use crate::status::format_tokens_compact;
 use codex_app_server_protocol::AskForApproval;
 use whisply_config::ConfigLayerSource;
-use whisply_protocol::config_types::ApprovalsReviewer;
 use whisply_protocol::config_types::ServiceTier;
 use whisply_protocol::models::PermissionProfile;
 use whisply_utils_sandbox_summary::summarize_permission_profile;
+use codex_whisply::UsageWindowCategory;
+use codex_whisply::UsageWindowKind;
 
 use super::status_state::TerminalTitleStatusKind;
 
@@ -681,52 +682,95 @@ impl ChatWidget {
             StatusLineItem::Permissions => Some(permissions_display(&self.config)),
             StatusLineItem::ApprovalMode => Some(approval_mode_display(&self.config)),
             StatusLineItem::UsedTokens => {
-                let usage = self.status_line_total_usage();
-                let total = usage.blended_total();
-                if total <= 0 {
+                if self.uses_managed_usage() {
                     None
                 } else {
-                    Some(format!("{} used", format_tokens_compact(total)))
+                    let usage = self.status_line_total_usage();
+                    let total = usage.blended_total();
+                    if total <= 0 {
+                        None
+                    } else {
+                        Some(format!("{} used", format_tokens_compact(total)))
+                    }
                 }
             }
-            StatusLineItem::ContextRemaining => self
-                .status_line_context_remaining_percent()
-                .map(|remaining| format!("Context {remaining}% left")),
-            StatusLineItem::ContextUsed => self
-                .status_line_context_used_percent()
-                .map(|used| format!("Context {used}% used")),
+            StatusLineItem::ContextRemaining => {
+                if self.uses_managed_usage() {
+                    self.managed_five_hour_remaining_percent()
+                        .map(|remaining| format!("Usage {remaining}% left"))
+                } else {
+                    self.status_line_context_remaining_percent()
+                        .map(|remaining| format!("Context {remaining}% left"))
+                }
+            }
+            StatusLineItem::ContextUsed => {
+                if self.uses_managed_usage() {
+                    self.managed_five_hour_used_percent()
+                        .map(|used| format!("Usage {used}% used"))
+                } else {
+                    self.status_line_context_used_percent()
+                        .map(|used| format!("Context {used}% used"))
+                }
+            }
             StatusLineItem::FiveHourLimit => {
-                let (window, is_secondary) = self
-                    .rate_limit_snapshots_by_limit_id
-                    .get("codex")
-                    .and_then(five_hour_status_window)?;
-                let label = limit_label_for_window(window.window_minutes, is_secondary);
-                self.status_line_limit_display(Some(window), &label)
+                if self.uses_managed_usage() {
+                    self.managed_window_status_line(
+                        UsageWindowCategory::Usage,
+                        UsageWindowKind::FiveHour,
+                    )
+                } else {
+                    let (window, is_secondary) = self
+                        .rate_limit_snapshots_by_limit_id
+                        .get("codex")
+                        .and_then(five_hour_status_window)?;
+                    let label = limit_label_for_window(window.window_minutes, is_secondary);
+                    self.status_line_limit_display(Some(window), &label)
+                }
             }
             StatusLineItem::WeeklyLimit => {
-                let (window, is_secondary) = self
-                    .rate_limit_snapshots_by_limit_id
-                    .get("codex")
-                    .and_then(weekly_status_window)?;
-                let label = limit_label_for_window(window.window_minutes, is_secondary);
-                self.status_line_limit_display(Some(window), &label)
+                if self.uses_managed_usage() {
+                    self.managed_window_status_line(
+                        UsageWindowCategory::Usage,
+                        UsageWindowKind::Weekly,
+                    )
+                } else {
+                    let (window, is_secondary) = self
+                        .rate_limit_snapshots_by_limit_id
+                        .get("codex")
+                        .and_then(weekly_status_window)?;
+                    let label = limit_label_for_window(window.window_minutes, is_secondary);
+                    self.status_line_limit_display(Some(window), &label)
+                }
             }
             StatusLineItem::CodexVersion => Some(CODEX_CLI_VERSION.to_string()),
-            StatusLineItem::ContextWindowSize => self
-                .status_line_context_window_size()
-                .map(|cws| format!("{} window", format_tokens_compact(cws))),
-            StatusLineItem::TotalInputTokens => (!self.token_usage_pending).then(|| {
-                format!(
-                    "{} in",
-                    format_tokens_compact(self.status_line_total_usage().input_tokens)
-                )
-            }),
-            StatusLineItem::TotalOutputTokens => (!self.token_usage_pending).then(|| {
-                format!(
-                    "{} out",
-                    format_tokens_compact(self.status_line_total_usage().output_tokens)
-                )
-            }),
+            StatusLineItem::ContextWindowSize => {
+                if self.uses_managed_usage() {
+                    None
+                } else {
+                    self.status_line_context_window_size()
+                        .map(|cws| format!("{} window", format_tokens_compact(cws)))
+                }
+            }
+            StatusLineItem::TotalInputTokens => {
+                if self.uses_managed_usage() || self.token_usage_pending {
+                    None
+                } else {
+                    Some(format!(
+                        "{} in",
+                        format_tokens_compact(self.status_line_total_usage().input_tokens)
+                    ))
+                }
+            }
+            StatusLineItem::TotalOutputTokens => {
+                if self.uses_managed_usage() || self.token_usage_pending {
+                    None
+                } else {
+                    Some(format!(
+                        "{} out",
+                        format_tokens_compact(self.status_line_total_usage().output_tokens)
+                    ))
+                }
+            }
             StatusLineItem::SessionId => self.thread_id.map(|id| id.to_string()),
             StatusLineItem::FastMode => Some(
                 if self.current_service_tier() == Some(ServiceTier::Fast.request_value()) {
@@ -750,6 +794,36 @@ impl ChatWidget {
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
         }
+    }
+
+    fn managed_five_hour_used_percent(&self) -> Option<i64> {
+        self.managed_usage_snapshot.as_ref().and_then(|snapshot| {
+            super::usage::managed_usage_window(
+                snapshot,
+                UsageWindowCategory::Usage,
+                UsageWindowKind::FiveHour,
+            )
+            .map(super::usage::managed_usage_used_percent)
+        })
+    }
+
+    fn managed_five_hour_remaining_percent(&self) -> Option<i64> {
+        self.managed_five_hour_used_percent()
+            .map(|used| (100 - used).clamp(0, 100))
+    }
+
+    fn managed_window_status_line(
+        &self,
+        category: UsageWindowCategory,
+        window: UsageWindowKind,
+    ) -> Option<String> {
+        let snapshot = self.managed_usage_snapshot.as_ref()?;
+        let window_row = super::usage::managed_usage_window(snapshot, category, window)?;
+        let used = super::usage::managed_usage_used_percent(window_row);
+        Some(format!(
+            "{} {used}% used",
+            codex_whisply::account_usage_window_name(category, window)
+        ))
     }
 
     fn status_line_pull_request_url(&self) -> Option<String> {

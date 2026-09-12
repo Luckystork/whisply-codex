@@ -1009,7 +1009,14 @@ pub(crate) fn context_window_line(percent: Option<i64>, used_tokens: Option<i64>
         return Line::from(vec![Span::from(format!("{used_fmt} in context")).dim()]);
     }
 
-    Line::from(vec![Span::from("100% context left").dim()])
+    // Unknown leftover is not 100% leftover. Inventing a full window made
+    // Whisply look like a Codex token meter before any Usage had been read.
+    Line::default()
+}
+
+pub(crate) fn account_usage_line(used_percent: i64) -> Line<'static> {
+    let percent = used_percent.clamp(0, 100);
+    Line::from(vec![Span::from(format!("Usage {percent}% used")).dim()])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

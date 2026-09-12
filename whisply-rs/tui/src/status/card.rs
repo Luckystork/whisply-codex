@@ -395,6 +395,21 @@ impl StatusHistoryCell {
         )
     }
 
+    fn usage_section_label(&self) -> &'static str {
+        if self.show_whisply_usage_hint {
+            "Usage"
+        } else {
+            "Limits"
+        }
+    }
+
+    /// Token totals and context-window leftover are Codex session meters.
+    /// A Whisply account is billed in cost windows, so `/status` must not
+    /// present those rows next to the five-hour / weekly / transcription rows.
+    fn shows_token_accounting(&self) -> bool {
+        !self.show_whisply_usage_hint
+    }
+
     fn token_usage_spans(&self) -> Vec<Span<'static>> {
         let total_fmt = format_tokens_compact(self.token_usage.total);
         let input_fmt = format_tokens_compact(self.token_usage.input);
@@ -439,7 +454,7 @@ impl StatusHistoryCell {
             StatusRateLimitData::Available(rows_data) => {
                 if rows_data.is_empty() {
                     return vec![formatter.line(
-                        "Limits",
+                        self.usage_section_label(),
                         vec![Span::from("not available for this account").dim()],
                     )];
                 }
@@ -462,13 +477,13 @@ impl StatusHistoryCell {
             }
             StatusRateLimitData::Unavailable => {
                 vec![formatter.line(
-                    "Limits",
+                    self.usage_section_label(),
                     vec![Span::from("not available for this account").dim()],
                 )]
             }
             StatusRateLimitData::Missing => {
                 vec![formatter.line(
-                    "Limits",
+                    self.usage_section_label(),
                     vec![Span::from(if state.refreshing_rate_limits {
                         "refresh requested; run /status again shortly."
                     } else {
@@ -494,11 +509,22 @@ impl StatusHistoryCell {
                     percent_used,
                     resets_at,
                     details,
+                    present_used,
                 } => {
                     let percent_remaining = (100.0 - percent_used).clamp(0.0, 100.0);
-                    let summary = format_status_limit_summary(percent_remaining);
+                    let (bar_percent, summary) = if *present_used {
+                        (
+                            percent_used.clamp(0.0, 100.0),
+                            format!("{percent_used:.0}% used"),
+                        )
+                    } else {
+                        (
+                            percent_remaining,
+                            format_status_limit_summary(percent_remaining),
+                        )
+                    };
                     let full_value_spans = vec![
-                        Span::from(render_status_limit_progress_bar(percent_remaining)),
+                        Span::from(render_status_limit_progress_bar(bar_percent)),
                         Span::from(" "),
                         Span::from(summary.clone()),
                     ];
@@ -577,7 +603,7 @@ impl StatusHistoryCell {
         match &state.rate_limits {
             StatusRateLimitData::Available(rows) => {
                 if rows.is_empty() {
-                    push_label(labels, seen, "Limits");
+                    push_label(labels, seen, self.usage_section_label());
                 } else {
                     for row in rows {
                         push_label(labels, seen, row.label.as_str());
@@ -590,8 +616,8 @@ impl StatusHistoryCell {
                 }
                 push_label(labels, seen, "Warning");
             }
-            StatusRateLimitData::Unavailable => push_label(labels, seen, "Limits"),
-            StatusRateLimitData::Missing => push_label(labels, seen, "Limits"),
+            StatusRateLimitData::Unavailable => push_label(labels, seen, self.usage_section_label()),
+            StatusRateLimitData::Missing => push_label(labels, seen, self.usage_section_label()),
         }
     }
 }
@@ -792,9 +818,11 @@ impl HistoryCell for StatusHistoryCell {
         if self.collaboration_mode.is_some() {
             push_label(&mut labels, &mut seen, "Collaboration mode");
         }
-        push_label(&mut labels, &mut seen, "Token usage");
-        if self.token_usage.context_window.is_some() {
-            push_label(&mut labels, &mut seen, "Context window");
+        if self.shows_token_accounting() {
+            push_label(&mut labels, &mut seen, "Token usage");
+            if self.token_usage.context_window.is_some() {
+                push_label(&mut labels, &mut seen, "Context window");
+            }
         }
 
         self.collect_rate_limit_labels(&rate_limit_state, &mut seen, &mut labels);
@@ -881,12 +909,13 @@ impl HistoryCell for StatusHistoryCell {
         lines.push(Line::from(Vec::<Span<'static>>::new()));
         // An account session is metered by cost, not by tokens, so a raw token
         // total would name a unit the account is not billed in.
-        if !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })) {
+        if self.shows_token_accounting()
+            && !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. }))
+        {
             lines.push(formatter.line("Token usage", self.token_usage_spans()));
-        }
-
-        if let Some(spans) = self.context_window_spans() {
-            lines.push(formatter.line("Context window", spans));
+            if let Some(spans) = self.context_window_spans() {
+                lines.push(formatter.line("Context window", spans));
+            }
         }
 
         lines.extend(self.rate_limit_lines(&rate_limit_state, available_inner_width, &formatter));

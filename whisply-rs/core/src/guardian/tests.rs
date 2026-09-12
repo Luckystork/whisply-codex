@@ -569,6 +569,58 @@ async fn build_guardian_prompt_full_mode_preserves_initial_review_format() -> an
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn build_guardian_prompt_bounded_action_packet_omits_conversation_history()
+-> anyhow::Result<()> {
+    let (session, turn) = guardian_test_session_and_turn_with_base_url("http://localhost").await;
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let prompt = build_guardian_prompt_items(
+        session.as_ref(),
+        Some("Sandbox denied outbound git push to github.com.".to_string()),
+        GuardianApprovalRequest::Shell {
+            id: "shell-1".to_string(),
+            command: vec!["git".to_string(), "push".to_string()],
+            cwd: test_path_buf("/repo/whisply-rs/core").abs(),
+            sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            justification: Some("Need to push the reviewed docs fix.".to_string()),
+        },
+        GuardianPromptMode::BoundedActionPacket,
+    )
+    .await?;
+
+    let text = guardian_prompt_text(&prompt.items);
+    assert!(
+        text.contains("Review this planned action in isolation"),
+        "Auto must tell the reviewer this is one bounded packet"
+    );
+    assert!(text.contains(">>> CURRENT USER REQUEST START\n"));
+    assert!(text.contains("Please check the repo visibility and push the docs fix if needed.\n"));
+    assert!(text.contains(">>> CURRENT USER REQUEST END\n"));
+    assert!(text.contains("Planned action JSON:\n"));
+    assert!(text.contains("\"git\""));
+    assert!(
+        !text.contains(">>> TRANSCRIPT START"),
+        "Auto must not replay the parent conversation"
+    );
+    assert!(
+        !text.contains("repo visibility: public"),
+        "Auto must not reuse tool results"
+    );
+    assert!(
+        !text.contains("The repo is public"),
+        "Auto must not reuse assistant history"
+    );
+    assert!(
+        !text.contains("Use read-only tool checks"),
+        "Auto must not invite tool use in the action packet"
+    );
+    assert_eq!(prompt.transcript_cursor.transcript_entry_count, 4);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn build_guardian_prompt_prefers_retry_reason_over_approval_reason() -> anyhow::Result<()> {
     let (session, turn) = guardian_test_session_and_turn_with_base_url("http://localhost").await;
     seed_guardian_parent_history(&session, &turn).await;
@@ -1175,6 +1227,26 @@ fn guardian_approval_request_to_json_renders_mcp_tool_call_shape() -> serde_json
 }
 
 #[test]
+fn guardian_approval_request_to_json_renders_first_party_computer_use() -> serde_json::Result<()> {
+    let action = GuardianApprovalRequest::FirstPartyTool {
+        id: "call-1".to_string(),
+        tool_id: "whisply.computer_use".to_string(),
+        arguments: serde_json::json!({
+            "declaredAction": "click",
+            "target": "Mail.app",
+        }),
+        cwd: test_path_buf("/Users/someone/No directory").abs(),
+    };
+
+    let rendered = guardian_approval_request_to_json(&action)?;
+    assert_eq!(rendered["tool"], "whisply_first_party");
+    assert_eq!(rendered["tool_id"], "whisply.computer_use");
+    assert_eq!(rendered["arguments"]["target"], "Mail.app");
+    assert!(rendered.get("transcript").is_none());
+    Ok(())
+}
+
+#[test]
 fn guardian_approval_request_to_json_renders_network_access_trigger() -> serde_json::Result<()> {
     let cwd = test_path_buf("/repo").abs();
     let action = GuardianApprovalRequest::NetworkAccess {
@@ -1674,6 +1746,12 @@ fn only_whisply_auto_offers_the_reviewer_an_uncertain_answer() {
             && whisply_auto_prompt.contains("hands the decision to the person"),
         "the reviewer must be told what an uncertain answer does"
     );
+    assert!(
+        whisply_auto_prompt.contains("You must not use tools")
+            && whisply_auto_prompt.contains("tool-free")
+            && !whisply_auto_prompt.contains("You may use read-only tool checks"),
+        "Auto must not invite the reviewer to call tools"
+    );
     // The shared policy template tells the reviewer to lean conservative when
     // context is missing, which under `Auto` would deny exactly the cases the
     // person should be asked about. The contract comes last and says so.
@@ -1783,6 +1861,7 @@ enum GuardianTestCatalog {
 async fn guardian_request_model_for_auto_review(
     auto_review_model_override: Option<String>,
     catalog: GuardianTestCatalog,
+    stateless_auto_review: bool,
 ) -> anyhow::Result<(
     String,
     String,
@@ -1822,10 +1901,9 @@ async fn guardian_request_model_for_auto_review(
                 .models_manager = Arc::new(models_manager);
         }
     }
-    Arc::get_mut(&mut turn)
-        .expect("turn should be unique")
-        .model_info
-        .auto_review_model_override = auto_review_model_override;
+    let turn_mut = Arc::get_mut(&mut turn).expect("turn should be unique");
+    turn_mut.model_info.auto_review_model_override = auto_review_model_override;
+    Arc::make_mut(&mut turn_mut.config).stateless_auto_review = stateless_auto_review;
     let parent_model = turn.model_info.slug.clone();
     let preferred_model = turn.provider.approval_review_preferred_model().to_string();
     let parent_turn_id = turn.sub_id.clone();
@@ -1891,6 +1969,7 @@ async fn guardian_review_uses_model_catalog_override_when_preferred_review_model
         guardian_request_model_for_auto_review(
             Some(override_model.clone()),
             GuardianTestCatalog::Bundled,
+            /*stateless_auto_review*/ false,
         )
         .await?;
 
@@ -1937,6 +2016,7 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
         guardian_request_model_for_auto_review(
             /*auto_review_model_override*/ None,
             GuardianTestCatalog::Bundled,
+            /*stateless_auto_review*/ false,
         )
         .await?;
 
@@ -1981,6 +2061,7 @@ async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata
         guardian_request_model_for_auto_review(
             /*auto_review_model_override*/ None,
             GuardianTestCatalog::ParentOnly,
+            /*stateless_auto_review*/ false,
         )
         .await?;
 
@@ -2005,6 +2086,49 @@ async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata
     assert_eq!(
         analytics_result.guardian_model_provider_id.as_deref(),
         Some(OPENAI_PROVIDER_ID)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn stateless_auto_review_pins_gpt_56_luna_even_when_catalog_override_is_absent()
+-> anyhow::Result<()> {
+    block_on_guardian_review_test(/*paused_clock*/ false, || {
+        Box::pin(stateless_auto_review_pins_gpt_56_luna_even_when_catalog_override_is_absent_body())
+    })
+}
+
+async fn stateless_auto_review_pins_gpt_56_luna_even_when_catalog_override_is_absent_body()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (request_model, parent_model, _preferred_model, analytics_result) =
+        guardian_request_model_for_auto_review(
+            Some("codex-auto-review".to_string()),
+            GuardianTestCatalog::ParentOnly,
+            /*stateless_auto_review*/ true,
+        )
+        .await?;
+
+    assert_eq!(request_model, "gpt-5.6-luna");
+    assert_ne!(request_model, parent_model);
+    assert_ne!(request_model, "codex-auto-review");
+    assert_eq!(
+        analytics_result.guardian_catalog_contains_auto_review,
+        Some(false)
+    );
+    assert_eq!(
+        analytics_result.guardian_default_review_model_id.as_deref(),
+        Some("gpt-5.6-luna")
+    );
+    assert_eq!(
+        analytics_result.guardian_review_model_overridden,
+        Some(false)
+    );
+    assert_eq!(
+        analytics_result.guardian_review_model_override.as_deref(),
+        None
     );
 
     Ok(())
@@ -2424,6 +2548,26 @@ async fn stateless_auto_review_shares_nothing_between_consecutive_reviews_body()
     assert!(
         !second_user_message.contains(">>> TRANSCRIPT DELTA START"),
         "a stateless review must receive a whole prompt, not a delta against a forked transcript"
+    );
+    assert!(
+        !second_user_message.contains(">>> TRANSCRIPT START"),
+        "a stateless review must not replay parent conversation history"
+    );
+    assert!(
+        !second_user_message.contains("repo visibility: public"),
+        "a stateless review must not reuse a prior tool result"
+    );
+    assert!(
+        !second_user_message.contains("The repo is public"),
+        "a stateless review must not reuse assistant history"
+    );
+    assert!(
+        second_user_message.contains("Please push the second docs fix too."),
+        "the bounded packet still includes the current user request"
+    );
+    assert!(
+        !second_user_message.contains("Use read-only tool checks"),
+        "a stateless review must not invite tool use"
     );
 
     Ok(())

@@ -36,6 +36,7 @@ fn resume_history(
         timezone: None,
         approval_policy: config.permissions.approval_policy.value(),
         approvals_reviewer: None,
+        stateless_auto_review: None,
         sandbox_policy: config.legacy_sandbox_policy(),
         permission_profile: None,
         network: None,

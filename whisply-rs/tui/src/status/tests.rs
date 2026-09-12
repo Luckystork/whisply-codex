@@ -1325,6 +1325,7 @@ async fn status_card_token_usage_excludes_cached_tokens() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
+    config.model_provider.http_headers = None;
     set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
 
     let account_display = test_status_account_display();
@@ -1360,6 +1361,10 @@ async fn status_card_token_usage_excludes_cached_tokens() {
     );
     let rendered = render_lines(&composite.display_lines(/*width*/ 120));
 
+    assert!(
+        rendered.iter().any(|line| line.contains("Token usage")),
+        "non-Whisply /status should still show token totals, got: {rendered:?}"
+    );
     assert!(
         rendered.iter().all(|line| !line.contains("cached")),
         "cached tokens should not be displayed, got: {rendered:?}"
@@ -2058,9 +2063,64 @@ async fn status_snapshot_cached_limits_hide_credits_without_flag() {
 }
 
 #[tokio::test]
-async fn status_context_window_uses_last_usage() {
+async fn managed_status_omits_token_accounting() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
+    config.model_context_window = Some(272_000);
+
+    let total_usage = TokenUsage {
+        input_tokens: 12_800,
+        cached_input_tokens: 0,
+        output_tokens: 879,
+        reasoning_output_tokens: 0,
+        total_tokens: 102_000,
+    };
+    let last_usage = TokenUsage {
+        input_tokens: 12_800,
+        cached_input_tokens: 0,
+        output_tokens: 879,
+        reasoning_output_tokens: 0,
+        total_tokens: 13_679,
+    };
+
+    let now = chrono::Local
+        .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+        .single()
+        .expect("timestamp");
+
+    let model_slug = get_model_offline_for_tests(config.model.as_deref());
+    let token_info = TokenUsageInfo {
+        total_token_usage: total_usage.clone(),
+        last_token_usage: last_usage,
+        model_context_window: config.model_context_window,
+    };
+    let composite = new_status_output(
+        &config,
+        test_status_account_display().as_ref(),
+        Some(&token_info),
+        &total_usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        /*rate_limits*/ None,
+        None,
+        now,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+    );
+    let rendered = render_lines(&composite.display_lines(/*width*/ 80)).join("\n");
+    assert!(
+        !rendered.contains("Token usage") && !rendered.contains("Context window"),
+        "managed /status must not show Codex token meters, got: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn local_status_context_window_uses_last_usage() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model_provider.http_headers = None;
     config.model_context_window = Some(272_000);
 
     let account_display = test_status_account_display();
@@ -2234,9 +2294,9 @@ async fn managed_status_shows_the_same_meters_whisply_usage_prints() {
     let rendered = managed_status_card(&temp_home, Some(&snapshot)).await;
 
     for expected in [
-        "5h limit",
-        "Weekly limit",
-        "Transcription weekly",
+        "Usage (five-hour)",
+        "Usage (weekly)",
+        "Transcription (weekly)",
         "settled 4.200, reserved 0.500, cap 10.000",
         "Rate card",
         "rate-card-9",
@@ -2249,6 +2309,14 @@ async fn managed_status_shows_the_same_meters_whisply_usage_prints() {
     assert!(
         !rendered.contains("data not available yet"),
         "a managed session has meters to show, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("% used") && !rendered.contains("5h limit"),
+        "managed meters must speak used cost with shared window names, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Token usage") && !rendered.contains("Context window"),
+        "managed /status must not show Codex token meters, got: {rendered}"
     );
     // Local DST shifts the displayed reset clock; pin it for the snapshot.
     let rendered = regex_lite::Regex::new(r"resets \d{2}:\d{2}")
@@ -2265,7 +2333,7 @@ async fn managed_status_reports_a_stale_snapshot_as_stale() {
     let rendered = managed_status_card(&temp_home, Some(&snapshot)).await;
 
     assert!(
-        rendered.contains("5h limit") && rendered.contains("may be stale"),
+        rendered.contains("Usage (five-hour)") && rendered.contains("may be stale"),
         "a stale snapshot must still show its meters and say so, got: {rendered}"
     );
 }
@@ -2276,7 +2344,7 @@ async fn managed_status_that_cannot_read_usage_does_not_promise_a_later_refresh(
     let rendered = managed_status_card(&temp_home, /*snapshot*/ None).await;
 
     assert!(
-        rendered.contains("Limits:") && rendered.contains("not available for this account"),
+        rendered.contains("Usage:") && rendered.contains("not available for this account"),
         "a failed read must settle the section, got: {rendered}"
     );
     assert!(

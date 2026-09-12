@@ -134,7 +134,6 @@ impl ChatWidget {
             pending_rate_limit_reset_idempotency_key: None,
             rate_limit_reset_picker_request_id: None,
             pending_rate_limit_reset_hint_request_id: None,
-            pending_usage_menu_rate_limit_request_id: None,
             pending_rate_limit_reset_hint: None,
             available_rate_limit_reset_credits: None,
             next_rate_limit_reset_request_id: 0,
@@ -194,6 +193,7 @@ impl ChatWidget {
             #[cfg(test)]
             pet_image_support_override: None,
             managed_broker: None,
+            managed_usage_snapshot: None,
             thread_id: None,
             dismissed_plan_mode_nudge_scopes: HashSet::new(),
             thread_name: None,
@@ -283,9 +283,6 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_connectors_enabled(widget.connectors_enabled());
-        widget
-            .bottom_pane
-            .set_token_activity_command_enabled(widget.has_codex_backend_auth);
         widget.refresh_status_surfaces();
 
         widget

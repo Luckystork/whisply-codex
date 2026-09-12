@@ -597,9 +597,16 @@ impl App {
                 Err(message) => self.chat_widget.add_error_message(message),
             },
             AppEvent::ManagedUsageResult { request_id, result } => {
-                if let Err(err) = &result {
-                    tracing::warn!("managed usage read failed during TUI refresh: {err}");
-                }
+                let result = match result {
+                    Ok((snapshot, text)) => {
+                        self.chat_widget.remember_managed_usage(Some(*snapshot));
+                        Ok(text)
+                    }
+                    Err(err) => {
+                        tracing::warn!("managed usage read failed during TUI refresh: {err}");
+                        Err(err)
+                    }
+                };
                 if self
                     .chat_widget
                     .finish_managed_usage_refresh(request_id, result)
@@ -611,8 +618,10 @@ impl App {
                 if let Err(err) = &result {
                     tracing::warn!("managed usage read failed during /status refresh: {err}");
                 }
+                let snapshot = result.ok().map(|it| *it);
+                self.chat_widget.remember_managed_usage(snapshot.clone());
                 self.chat_widget
-                    .finish_status_managed_usage_refresh(request_id, result.ok().map(|it| *it));
+                    .finish_status_managed_usage_refresh(request_id, snapshot);
             }
             AppEvent::OpenAppLink {
                 app_id,
@@ -1026,16 +1035,6 @@ impl App {
                             self.chat_widget
                                 .finish_status_rate_limit_refresh(request_id, snapshots);
                         }
-                        RateLimitRefreshOrigin::UsageMenu { request_id } => {
-                            self.chat_widget.finish_usage_menu_rate_limit_refresh(
-                                request_id,
-                                snapshots,
-                                rate_limit_reset_credits.ok_or_else(|| {
-                                    "account/rateLimits/read response did not include rateLimitResetCredits"
-                                    .to_string()
-                                }),
-                            );
-                        }
                         RateLimitRefreshOrigin::ResetPicker { request_id } => {
                             self.chat_widget.finish_rate_limit_reset_credits_refresh(
                                 request_id,
@@ -1071,13 +1070,6 @@ impl App {
                             self.chat_widget
                                 .finish_status_rate_limit_refresh(request_id, Vec::new());
                         }
-                        RateLimitRefreshOrigin::UsageMenu { request_id } => {
-                            self.chat_widget.finish_usage_menu_rate_limit_refresh(
-                                request_id,
-                                Vec::new(),
-                                Err(err),
-                            );
-                        }
                         RateLimitRefreshOrigin::ResetPicker { request_id } => {
                             self.chat_widget.finish_rate_limit_reset_credits_refresh(
                                 request_id,
@@ -1088,10 +1080,6 @@ impl App {
                     }
                 }
             },
-            AppEvent::OpenTokenActivity => {
-                self.chat_widget
-                    .add_token_activity_output(crate::chatwidget::TokenActivityView::Daily);
-            }
             AppEvent::OpenRateLimitResetCredits => {
                 let request_id = self.chat_widget.show_rate_limit_reset_loading_popup();
                 self.refresh_rate_limits(

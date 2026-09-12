@@ -16,7 +16,5 @@ expression: sanitized
 │  Permissions:      Profile locked (read-only, Ask for approval)       │
 │  Agents.md:        <none>                                             │
 │                                                                       │
-│  Token usage:      0 total  (0 input + 0 output)                      │
-│  Context window:   100% left (0 used / 272K)                          │
-│  Limits:           data not available yet                             │
+│  Usage:            data not available yet                             │
 ╰───────────────────────────────────────────────────────────────────────╯

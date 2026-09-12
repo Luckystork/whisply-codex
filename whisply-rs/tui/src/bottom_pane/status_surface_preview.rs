@@ -51,15 +51,15 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::BranchChanges => "+12 -3",
             StatusSurfacePreviewItem::Permissions => "Workspace",
             StatusSurfacePreviewItem::ApprovalMode => "on-request",
-            StatusSurfacePreviewItem::ContextRemaining => "Context 0% left",
-            StatusSurfacePreviewItem::ContextUsed => "Context 0% used",
-            StatusSurfacePreviewItem::FiveHourLimit => "primary 0%",
-            StatusSurfacePreviewItem::WeeklyLimit => "secondary 0%",
+            StatusSurfacePreviewItem::ContextRemaining => "Usage 0% left",
+            StatusSurfacePreviewItem::ContextUsed => "Usage 0% used",
+            StatusSurfacePreviewItem::FiveHourLimit => "Usage (five-hour) 0% used",
+            StatusSurfacePreviewItem::WeeklyLimit => "Usage (weekly) 0% used",
             StatusSurfacePreviewItem::CodexVersion => "0.0.0",
-            StatusSurfacePreviewItem::ContextWindowSize => "0 window",
-            StatusSurfacePreviewItem::UsedTokens => "0 used",
-            StatusSurfacePreviewItem::TotalInputTokens => "0 in",
-            StatusSurfacePreviewItem::TotalOutputTokens => "0 out",
+            StatusSurfacePreviewItem::ContextWindowSize => "omitted on Whisply",
+            StatusSurfacePreviewItem::UsedTokens => "omitted on Whisply",
+            StatusSurfacePreviewItem::TotalInputTokens => "omitted on Whisply",
+            StatusSurfacePreviewItem::TotalOutputTokens => "omitted on Whisply",
             StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
             StatusSurfacePreviewItem::FastMode => "Fast on",
             StatusSurfacePreviewItem::RawOutput => "raw output",
@@ -241,7 +241,17 @@ struct RateLimitPreviewCopy {
 
 fn rate_limit_preview_copy(value: &str) -> Option<RateLimitPreviewCopy> {
     let value = value.trim_start();
-    if value.starts_with("secondary usage ") {
+    if value.starts_with("Usage (five-hour)") {
+        Some(RateLimitPreviewCopy {
+            name: "five-hour-usage",
+            description: "Five-hour Usage (omitted until Usage is available)",
+        })
+    } else if value.starts_with("Usage (weekly)") {
+        Some(RateLimitPreviewCopy {
+            name: "weekly-usage",
+            description: "Weekly Usage (omitted until Usage is available)",
+        })
+    } else if value.starts_with("secondary usage ") {
         Some(RateLimitPreviewCopy {
             name: "secondary-usage-limit",
             description: "Remaining usage on the secondary usage limit (omitted when unavailable)",

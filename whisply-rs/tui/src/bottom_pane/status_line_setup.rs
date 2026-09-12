@@ -14,9 +14,9 @@
 //! - Git information (branch name)
 //! - Permissions profile
 //! - Approval mode
-//! - Context usage (remaining %, used %, window size)
-//! - Usage limits (primary, secondary)
-//! - Session info (thread title, thread ID, tokens used)
+//! - Context usage (five-hour remaining %, used %)
+//! - Account Usage windows (five-hour, weekly)
+//! - Session info (thread title, thread ID)
 //! - Application version
 
 use ratatui::buffer::Buffer;
@@ -94,34 +94,34 @@ pub(crate) enum StatusLineItem {
     #[strum(to_string = "approval-mode", serialize = "approval")]
     ApprovalMode,
 
-    /// Percentage of context window remaining.
+    /// Percentage of five-hour Usage remaining.
     ContextRemaining,
 
-    /// Percentage of context window used.
+    /// Percentage of five-hour Usage used.
     ///
     /// Also accepts the legacy `context-usage` config value.
     #[strum(to_string = "context-used", serialize = "context-usage")]
     ContextUsed,
 
-    /// Remaining usage on the primary rate limit.
+    /// Five-hour account Usage.
     FiveHourLimit,
 
-    /// Remaining usage on the secondary rate limit.
+    /// Weekly Usage.
     WeeklyLimit,
 
     /// Codex application version.
     CodexVersion,
 
-    /// Total context window size in tokens.
+    /// Total context window size in tokens. Omitted on Whisply.
     ContextWindowSize,
 
-    /// Total tokens used in the current session.
+    /// Total tokens used in the current session. Omitted on Whisply.
     UsedTokens,
 
-    /// Total input tokens consumed.
+    /// Total input tokens consumed. Omitted on Whisply.
     TotalInputTokens,
 
-    /// Total output tokens generated.
+    /// Total output tokens generated. Omitted on Whisply.
     TotalOutputTokens,
 
     /// Full thread UUID.
@@ -164,24 +164,24 @@ impl StatusLineItem {
             StatusLineItem::Permissions => "Active permission profile or sandbox mode",
             StatusLineItem::ApprovalMode => "Active command approval mode",
             StatusLineItem::ContextRemaining => {
-                "Percentage of context window remaining (omitted when unknown)"
+                "Percentage of five-hour Usage remaining (omitted until Usage is available)"
             }
             StatusLineItem::ContextUsed => {
-                "Percentage of context window used (omitted when unknown)"
+                "Percentage of five-hour Usage used (omitted until Usage is available)"
             }
             StatusLineItem::FiveHourLimit => {
-                "Remaining usage on the primary usage limit (omitted when unavailable)"
+                "Five-hour Usage (omitted until Usage is available)"
             }
             StatusLineItem::WeeklyLimit => {
-                "Remaining usage on the secondary usage limit (omitted when unavailable)"
+                "Weekly Usage (omitted until Usage is available)"
             }
             StatusLineItem::CodexVersion => "Whisply application version",
             StatusLineItem::ContextWindowSize => {
-                "Total context window size in tokens (omitted when unknown)"
+                "Context window size in tokens (omitted on Whisply)"
             }
-            StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
-            StatusLineItem::TotalInputTokens => "Total input tokens used in session",
-            StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
+            StatusLineItem::UsedTokens => "Session token total (omitted on Whisply)",
+            StatusLineItem::TotalInputTokens => "Session input tokens (omitted on Whisply)",
+            StatusLineItem::TotalOutputTokens => "Session output tokens (omitted on Whisply)",
             StatusLineItem::SessionId => "Current thread identifier (omitted until thread starts)",
             StatusLineItem::FastMode => "Whether Fast mode is currently active",
             StatusLineItem::RawOutput => "Whether raw scrollback mode is active",

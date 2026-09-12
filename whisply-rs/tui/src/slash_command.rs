@@ -109,7 +109,7 @@ impl SlashCommand {
             SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Status => "show current session configuration and account usage",
             SlashCommand::Controls => "read or change ordinary Whisply app controls",
-            SlashCommand::Usage => "view Whisply account usage, limits, and resets",
+            SlashCommand::Usage => "view Whisply account usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
             SlashCommand::Statusline => "configure which items appear in the status line",
@@ -312,6 +312,10 @@ mod tests {
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::App.available_during_task());
+        assert_eq!(
+            SlashCommand::Usage.description(),
+            "view Whisply account usage"
+        );
     }
 
     #[test]

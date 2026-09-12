@@ -75,6 +75,12 @@ pub(crate) enum GuardianApprovalRequest {
         reason: Option<String>,
         permissions: RequestPermissionProfile,
     },
+    FirstPartyTool {
+        id: String,
+        tool_id: String,
+        arguments: Value,
+        cwd: AbsolutePathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -170,6 +176,14 @@ struct RequestPermissionsApprovalAction<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a String>,
     permissions: &'a RequestPermissionProfile,
+}
+
+#[derive(Serialize)]
+struct FirstPartyToolApprovalAction<'a> {
+    tool: &'static str,
+    tool_id: &'a str,
+    arguments: &'a Value,
+    cwd: &'a Path,
 }
 
 fn serialize_guardian_action(value: impl Serialize) -> serde_json::Result<Value> {
@@ -374,6 +388,17 @@ pub(crate) fn guardian_approval_request_to_json(
             reason: reason.as_ref(),
             permissions,
         }),
+        GuardianApprovalRequest::FirstPartyTool {
+            id: _,
+            tool_id,
+            arguments,
+            cwd,
+        } => serialize_guardian_action(FirstPartyToolApprovalAction {
+            tool: "whisply_first_party",
+            tool_id,
+            arguments,
+            cwd,
+        }),
     }
 }
 
@@ -442,6 +467,12 @@ pub(crate) fn guardian_assessment_action(
             reason: reason.clone(),
             permissions: permissions.clone(),
         },
+        GuardianApprovalRequest::FirstPartyTool { tool_id, cwd, .. } => {
+            GuardianAssessmentAction::FirstPartyTool {
+                tool_id: tool_id.clone(),
+                cwd: cwd.clone(),
+            }
+        }
     }
 }
 
@@ -502,6 +533,11 @@ pub(crate) fn guardian_reviewed_action(
         GuardianApprovalRequest::RequestPermissions { .. } => {
             GuardianReviewedAction::RequestPermissions {}
         }
+        GuardianApprovalRequest::FirstPartyTool { tool_id, .. } => {
+            GuardianReviewedAction::FirstPartyTool {
+                tool_id: tool_id.clone(),
+            }
+        }
     }
 }
 
@@ -511,7 +547,8 @@ pub(crate) fn guardian_request_target_item_id(request: &GuardianApprovalRequest)
         | GuardianApprovalRequest::ExecCommand { id, .. }
         | GuardianApprovalRequest::ApplyPatch { id, .. }
         | GuardianApprovalRequest::McpToolCall { id, .. }
-        | GuardianApprovalRequest::RequestPermissions { id, .. } => Some(id),
+        | GuardianApprovalRequest::RequestPermissions { id, .. }
+        | GuardianApprovalRequest::FirstPartyTool { id, .. } => Some(id),
         GuardianApprovalRequest::NetworkAccess { .. } => None,
         #[cfg(unix)]
         GuardianApprovalRequest::Execve { id, .. } => Some(id),
@@ -528,7 +565,8 @@ pub(crate) fn guardian_request_turn_id<'a>(
         GuardianApprovalRequest::Shell { .. }
         | GuardianApprovalRequest::ExecCommand { .. }
         | GuardianApprovalRequest::ApplyPatch { .. }
-        | GuardianApprovalRequest::McpToolCall { .. } => default_turn_id,
+        | GuardianApprovalRequest::McpToolCall { .. }
+        | GuardianApprovalRequest::FirstPartyTool { .. } => default_turn_id,
         #[cfg(unix)]
         GuardianApprovalRequest::Execve { .. } => default_turn_id,
     }

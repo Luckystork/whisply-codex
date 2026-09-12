@@ -748,6 +748,7 @@ fn is_whisply_nonretryable_terminal_error(error: &Error) -> bool {
             "whisply_auth_expired"
                 | "whisply_subscription_required"
                 | "whisply_usage_limited"
+                | "whisply_usage_settlement_pending"
                 | "whisply_model_unavailable"
                 | "whisply_refused"
                 | "whisply_cancelled"
@@ -1265,6 +1266,10 @@ mod tests {
             (
                 "whisply_usage_limited",
                 "Your current Whisply Usage allowance is exhausted.",
+            ),
+            (
+                "whisply_usage_settlement_pending",
+                "A previous request is still finishing Usage settlement. Try again in a moment.",
             ),
         ] {
             let failure = json!({

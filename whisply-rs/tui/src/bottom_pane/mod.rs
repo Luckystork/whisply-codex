@@ -363,11 +363,6 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub fn set_token_activity_command_enabled(&mut self, enabled: bool) {
-        self.composer.set_token_activity_command_enabled(enabled);
-        self.request_redraw();
-    }
-
     pub fn set_mentions_v2_enabled(&mut self, enabled: bool) {
         self.composer.set_mentions_v2_enabled(enabled);
         self.request_redraw();
@@ -1120,6 +1115,11 @@ impl BottomPane {
         self.context_window_used_tokens = used_tokens;
         self.composer
             .set_context_window(percent, self.context_window_used_tokens);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_account_usage_meter(&mut self, used_percent: Option<i64>) {
+        self.composer.set_account_usage_meter(used_percent);
         self.request_redraw();
     }
 
