@@ -155,6 +155,9 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::TurnModerationMetadata(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::WhisplyExamExtraUsage(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ThreadRealtimeStarted(notification) => {
             Some(notification.thread_id.as_str())
         }
