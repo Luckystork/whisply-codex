@@ -323,7 +323,7 @@ fn ultra_reasoning_uses_max_for_requests() {
 }
 
 #[test]
-fn responses_request_drops_other_and_compaction_trigger_items() {
+fn responses_request_drops_other_but_keeps_compaction_trigger() {
     let client = test_model_client(SessionSource::Cli);
     let provider = client
         .state
@@ -371,13 +371,19 @@ fn responses_request_drops_other_and_compaction_trigger_items() {
         .expect("responses request");
 
     assert!(
-        request.input.iter().all(|item| {
-            !matches!(
-                item,
-                ResponseItem::Other | ResponseItem::CompactionTrigger { .. }
-            )
-        }),
-        "internal history items must not be sent: {:?}",
+        request
+            .input
+            .iter()
+            .all(|item| !matches!(item, ResponseItem::Other)),
+        "unknown leftover items must not be sent: {:?}",
+        request.input
+    );
+    assert!(
+        matches!(
+            request.input.last(),
+            Some(ResponseItem::CompactionTrigger { .. })
+        ),
+        "compact requests must still end with compaction_trigger: {:?}",
         request.input
     );
     assert!(

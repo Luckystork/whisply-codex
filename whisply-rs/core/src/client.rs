@@ -935,12 +935,9 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
-        input.retain(|item| {
-            !matches!(
-                item,
-                ResponseItem::Other | ResponseItem::CompactionTrigger { .. }
-            )
-        });
+        // Drop unknown leftover items. Keep CompactionTrigger: remote compact
+        // appends it as the last input item so the gateway can start a compact turn.
+        input.retain(|item| !matches!(item, ResponseItem::Other));
         let is_openai = self.state.provider.info().is_openai();
         let is_whisply_direct = self.is_whisply_direct_provider();
         if !is_openai {
