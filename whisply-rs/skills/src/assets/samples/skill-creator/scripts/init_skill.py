@@ -14,6 +14,7 @@ Examples:
 """
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -324,7 +325,7 @@ def init_skill(skill_name, path, resources, include_examples, interface_override
             print("2. Add resources to scripts/, references/, and assets/ as needed")
     else:
         print("2. Create resource directories only if needed (scripts/, references/, assets/)")
-    print("3. Update agents/openai.yaml if the UI metadata should differ")
+    print("3. Update agents/openai.yaml Whisply UI metadata if it should differ")
     print("4. Run the validator when ready to check the skill structure")
     print(
         "5. Forward-test complex skills with realistic user requests to ensure they work as intended"
@@ -338,7 +339,10 @@ def main():
         description="Create a new skill directory with a SKILL.md template.",
     )
     parser.add_argument("skill_name", help="Skill name (normalized to hyphen-case)")
-    parser.add_argument("--path", required=True, help="Output directory for the skill")
+    parser.add_argument(
+        "--path",
+        help="Output directory for the skill. Defaults to $WHISPLY_HOME/skills.",
+    )
     parser.add_argument(
         "--resources",
         default="",
@@ -377,6 +381,12 @@ def main():
         sys.exit(1)
 
     path = args.path
+    if not path:
+        home = os.environ.get("WHISPLY_HOME", "").strip()
+        if not home:
+            print("[ERROR] WHISPLY_HOME is not set. Pass --path or run this from Whisply.")
+            sys.exit(1)
+        path = str(Path(home) / "skills")
 
     print(f"Initializing skill: {skill_name}")
     print(f"   Location: {path}")

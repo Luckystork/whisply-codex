@@ -1,323 +1,141 @@
 #!/usr/bin/env python3
-"""Scaffold a plugin directory and optionally update marketplace.json."""
+"""Scaffold a Whisply plugin draft under $WHISPLY_HOME/plugins."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 
 MAX_PLUGIN_NAME_LENGTH = 64
-DEFAULT_INSTALL_POLICY = "AVAILABLE"
-DEFAULT_AUTH_POLICY = "ON_INSTALL"
-DEFAULT_CATEGORY = "Productivity"
-DEFAULT_MARKETPLACE_NAME = "personal"
-VALID_INSTALL_POLICIES = {"NOT_AVAILABLE", "AVAILABLE", "INSTALLED_BY_DEFAULT"}
-VALID_AUTH_POLICIES = {"ON_INSTALL", "ON_USE"}
-DEFAULT_PLUGIN_PARENT = Path.home() / "plugins"
-DEFAULT_MARKETPLACE_PATH = Path.home() / ".agents" / "plugins" / "marketplace.json"
+SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}[a-z0-9]$")
+PUBLISHER_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+
+
+def whisply_home() -> Path:
+    value = os.environ.get("WHISPLY_HOME", "").strip()
+    if not value:
+        raise SystemExit("WHISPLY_HOME is not set. Whisply sets this for the signed-in account.")
+    return Path(value)
 
 
 def normalize_plugin_name(plugin_name: str) -> str:
-    """Normalize a plugin name to lowercase hyphen-case."""
     normalized = plugin_name.strip().lower()
     normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
     normalized = normalized.strip("-")
-    normalized = re.sub(r"-{2,}", "-", normalized)
-    return normalized
-
-
-def validate_plugin_name(plugin_name: str) -> None:
-    if not plugin_name:
-        raise ValueError("Plugin name must include at least one letter or digit.")
-    if len(plugin_name) > MAX_PLUGIN_NAME_LENGTH:
-        raise ValueError(
-            f"Plugin name '{plugin_name}' is too long ({len(plugin_name)} characters). "
-            f"Maximum is {MAX_PLUGIN_NAME_LENGTH} characters."
-        )
-
-
-def validate_marketplace_name(marketplace_name: str) -> None:
-    if not marketplace_name:
-        raise ValueError("Marketplace name must include at least one letter or digit.")
-    if re.fullmatch(r"[A-Za-z0-9_-]+", marketplace_name) is None:
-        raise ValueError(
-            "Marketplace name may only contain ASCII letters, digits, `_`, and `-`."
-        )
+    return re.sub(r"-{2,}", "-", normalized)
 
 
 def display_name_from_plugin_name(plugin_name: str) -> str:
     return " ".join(part.capitalize() for part in re.split(r"[-_]+", plugin_name))
 
 
-def build_plugin_json(plugin_name: str, *, with_mcp: bool, with_apps: bool) -> dict[str, Any]:
+def build_plugin_json(plugin_name: str, publisher_id: str) -> dict[str, Any]:
     display_name = display_name_from_plugin_name(plugin_name)
-    payload: dict[str, Any] = {
-        "name": plugin_name,
+    return {
+        "manifestVersion": 1,
+        "slug": plugin_name,
+        "name": display_name,
+        "publisherId": publisher_id,
         "version": "0.1.0",
-        "description": f"{display_name} plugin",
-        "author": {
-            "name": "Local developer",
+        "updateChannel": "stable",
+        "description": f"{display_name} adds a reviewed Whisply plugin capability.",
+        "releaseNotes": "Initial draft. Review capabilities in Whisply before install.",
+        "capabilities": [
+            {
+                "id": "primary_action",
+                "label": f"{display_name} action",
+                "description": f"The primary reviewed action provided by {display_name}.",
+                "actionTypes": ["plugin.assist"],
+                "destinations": [],
+                "dataClasses": [],
+                "localApplications": [],
+                "websites": [],
+                "connectorTypes": [],
+            }
+        ],
+        "includedBuiltInSkillSlugs": [],
+        "dependencies": [],
+        "storage": {
+            "accountBytesMaximum": 0,
+            "categories": [],
         },
-        "skills": "./skills/",
-        "interface": {
-            "displayName": display_name,
-            "shortDescription": f"Use {display_name} in Codex.",
-            "longDescription": f"{display_name} adds a local Codex plugin scaffold.",
-            "developerName": "Local developer",
-            "category": DEFAULT_CATEGORY,
-            "capabilities": [],
-            "defaultPrompt": f"Help me use {display_name}.",
+        "retention": [],
+        "usage": {
+            "componentKinds": [],
+            "maximumPerTaskUnits": 1,
         },
-    }
-    if with_mcp:
-        payload["mcpServers"] = "./.mcp.json"
-    if with_apps:
-        payload["apps"] = "./.app.json"
-    return payload
-
-
-def build_marketplace_entry(
-    plugin_name: str,
-    install_policy: str,
-    auth_policy: str,
-    category: str,
-) -> dict[str, Any]:
-    return {
-        "name": plugin_name,
-        "source": {
-            "source": "local",
-            "path": f"./plugins/{plugin_name}",
+        "support": {
+            "owner": "Local draft",
+            "url": "https://whisply.app/support",
         },
-        "policy": {
-            "installation": install_policy,
-            "authentication": auth_policy,
+        "sandbox": {
+            "generalFilesystemAccess": False,
+            "processExecution": False,
+            "generalNetworkAccess": False,
+            "typedBrokerOnly": True,
         },
-        "category": category,
-    }
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    with path.open() as handle:
-        return json.load(handle)
-
-
-def build_default_marketplace(marketplace_name: str) -> dict[str, Any]:
-    return {
-        "name": marketplace_name,
-        "interface": {
-            "displayName": display_name_from_plugin_name(marketplace_name),
+        "compatibility": {
+            "minimumWhisplyVersion": "10.1.0",
+            "minimumMacOSVersion": "14.0",
         },
-        "plugins": [],
     }
 
 
-def validate_marketplace_interface(payload: dict[str, Any]) -> None:
-    interface = payload.get("interface")
-    if interface is not None and not isinstance(interface, dict):
-        raise ValueError("marketplace.json field 'interface' must be an object.")
-
-
-def update_marketplace_json(
-    marketplace_path: Path,
-    marketplace_name: str | None,
-    plugin_name: str,
-    install_policy: str,
-    auth_policy: str,
-    category: str,
-    force: bool,
-) -> None:
-    if marketplace_path.exists():
-        payload = load_json(marketplace_path)
-    else:
-        payload = build_default_marketplace(marketplace_name or DEFAULT_MARKETPLACE_NAME)
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"{marketplace_path} must contain a JSON object.")
-
-    validate_marketplace_interface(payload)
-
-    existing_marketplace_name = payload.get("name")
-    if marketplace_name is not None:
-        if not isinstance(existing_marketplace_name, str) or not existing_marketplace_name.strip():
-            raise ValueError(f"{marketplace_path} must contain a non-empty string 'name'.")
-        if existing_marketplace_name != marketplace_name:
-            raise ValueError(
-                f"{marketplace_path} already uses marketplace name "
-                f"'{existing_marketplace_name}'. Create a new marketplace file to use "
-                f"'{marketplace_name}' instead."
-            )
-
-    plugins = payload.setdefault("plugins", [])
-    if not isinstance(plugins, list):
-        raise ValueError(f"{marketplace_path} field 'plugins' must be an array.")
-
-    new_entry = build_marketplace_entry(plugin_name, install_policy, auth_policy, category)
-
-    for index, entry in enumerate(plugins):
-        if isinstance(entry, dict) and entry.get("name") == plugin_name:
-            if not force:
-                raise FileExistsError(
-                    f"Marketplace entry '{plugin_name}' already exists in {marketplace_path}. "
-                    "Use --force to overwrite that entry."
-                )
-            plugins[index] = new_entry
-            break
-    else:
-        plugins.append(new_entry)
-
-    write_json(marketplace_path, payload, force=True)
-
-
-def write_json(path: Path, data: dict, force: bool) -> None:
+def write_json(path: Path, data: dict[str, Any], force: bool) -> None:
     if path.exists() and not force:
         raise FileExistsError(f"{path} already exists. Use --force to overwrite.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as handle:
-        json.dump(data, handle, indent=2)
-        handle.write("\n")
-
-
-def create_stub_file(path: Path, payload: dict, force: bool) -> None:
-    if path.exists() and not force:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
+    path.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Create a plugin skeleton with a validation-ready plugin.json."
-    )
+    parser = argparse.ArgumentParser(description="Create a Whisply plugin draft.")
     parser.add_argument("plugin_name")
     parser.add_argument(
         "--path",
-        default=str(DEFAULT_PLUGIN_PARENT),
-        help=(
-            "Parent directory for plugin creation (defaults to <home>/plugins). "
-            "Pass an explicit repo path only when a repo/team plugin is intended."
-        ),
-    )
-    parser.add_argument("--with-skills", action="store_true", help="Create skills/ directory")
-    parser.add_argument("--with-hooks", action="store_true", help="Create hooks/ directory")
-    parser.add_argument("--with-scripts", action="store_true", help="Create scripts/ directory")
-    parser.add_argument("--with-assets", action="store_true", help="Create assets/ directory")
-    parser.add_argument("--with-mcp", action="store_true", help="Create .mcp.json placeholder")
-    parser.add_argument("--with-apps", action="store_true", help="Create .app.json placeholder")
-    parser.add_argument(
-        "--with-marketplace",
-        action="store_true",
-        help=(
-            "Create or update <home>/.agents/plugins/marketplace.json by default. "
-            "Marketplace entries always point to ./plugins/<plugin-name> relative to the "
-            "marketplace root."
-        ),
+        help="Parent directory. Defaults to $WHISPLY_HOME/plugins.",
     )
     parser.add_argument(
-        "--marketplace-path",
-        default=str(DEFAULT_MARKETPLACE_PATH),
-        help=(
-            "Path to marketplace.json (defaults to <home>/.agents/plugins/marketplace.json). "
-            "Pass a repo-rooted marketplace path only when a repo/team plugin is intended."
-        ),
+        "--publisher-id",
+        default="local_draft",
+        help="Publisher identifier (lowercase_underscore).",
     )
-    parser.add_argument(
-        "--marketplace-name",
-        help=(
-            "Marketplace name to seed into a new marketplace.json. Use this only when the default "
-            "'personal' marketplace name is already taken and you need a different new marketplace."
-        ),
-    )
-    parser.add_argument(
-        "--install-policy",
-        default=DEFAULT_INSTALL_POLICY,
-        choices=sorted(VALID_INSTALL_POLICIES),
-        help="Marketplace policy.installation value",
-    )
-    parser.add_argument(
-        "--auth-policy",
-        default=DEFAULT_AUTH_POLICY,
-        choices=sorted(VALID_AUTH_POLICIES),
-        help="Marketplace policy.authentication value",
-    )
-    parser.add_argument(
-        "--category",
-        default=DEFAULT_CATEGORY,
-        help="Marketplace category value",
-    )
-    parser.add_argument("--force", action="store_true", help="Overwrite existing files")
+    parser.add_argument("--with-skills", action="store_true", help="Create skills/")
+    parser.add_argument("--force", action="store_true", help="Overwrite plugin.json")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    raw_plugin_name = args.plugin_name
-    plugin_name = normalize_plugin_name(raw_plugin_name)
-    if plugin_name != raw_plugin_name:
-        print(f"Note: Normalized plugin name from '{raw_plugin_name}' to '{plugin_name}'.")
-    validate_plugin_name(plugin_name)
-    marketplace_name = None
-    if args.marketplace_name is not None:
-        marketplace_name = args.marketplace_name.strip()
-        validate_marketplace_name(marketplace_name)
+    plugin_name = normalize_plugin_name(args.plugin_name)
+    if plugin_name != args.plugin_name.strip():
+        print(f"Note: Normalized plugin name from '{args.plugin_name}' to '{plugin_name}'.")
+    if not SLUG_RE.fullmatch(plugin_name):
+        raise SystemExit(
+            f"Plugin name '{plugin_name}' must be a lowercase hyphenated slug of 3-64 characters."
+        )
+    if not PUBLISHER_RE.fullmatch(args.publisher_id):
+        raise SystemExit("publisher-id must match [a-z][a-z0-9_]{1,63}.")
 
-    plugin_root = (Path(args.path).expanduser().resolve() / plugin_name)
+    parent = Path(args.path).expanduser() if args.path else whisply_home() / "plugins"
+    plugin_root = parent.resolve() / plugin_name
     plugin_root.mkdir(parents=True, exist_ok=True)
-
-    plugin_json_path = plugin_root / ".codex-plugin" / "plugin.json"
     write_json(
-        plugin_json_path,
-        build_plugin_json(plugin_name, with_mcp=args.with_mcp, with_apps=args.with_apps),
+        plugin_root / "plugin.json",
+        build_plugin_json(plugin_name, args.publisher_id),
         args.force,
     )
+    if args.with_skills:
+        (plugin_root / "skills").mkdir(parents=True, exist_ok=True)
 
-    optional_directories = {
-        "skills": args.with_skills,
-        "hooks": args.with_hooks,
-        "scripts": args.with_scripts,
-        "assets": args.with_assets,
-    }
-    for folder, enabled in optional_directories.items():
-        if enabled:
-            (plugin_root / folder).mkdir(parents=True, exist_ok=True)
-
-    if args.with_mcp:
-        create_stub_file(
-            plugin_root / ".mcp.json",
-            {"mcpServers": {}},
-            args.force,
-        )
-
-    if args.with_apps:
-        create_stub_file(
-            plugin_root / ".app.json",
-            {
-                "apps": {},
-            },
-            args.force,
-        )
-
-    if args.with_marketplace:
-        marketplace_path = Path(args.marketplace_path).expanduser().resolve()
-        update_marketplace_json(
-            marketplace_path,
-            marketplace_name,
-            plugin_name,
-            args.install_policy,
-            args.auth_policy,
-            args.category,
-            args.force,
-        )
-
-    print(f"Created plugin scaffold: {plugin_root}")
-    print(f"plugin manifest: {plugin_json_path}")
-    if args.with_marketplace:
-        print(f"marketplace manifest: {marketplace_path}")
+    print(f"Created Whisply plugin draft: {plugin_root}")
+    print(f"plugin manifest: {plugin_root / 'plugin.json'}")
+    print("This draft is unsigned. Review it in Settings → Plugins before install.")
 
 
 if __name__ == "__main__":

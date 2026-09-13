@@ -5286,6 +5286,27 @@
           "type": "object"
         },
         {
+          "description": "Worker header proved this turn is using extra Exam Usage reserved for the session. Armed Exam and a prepared lease are not this proof.",
+          "properties": {
+            "method": {
+              "enum": [
+                "whisply/exam-extra-usage"
+              ],
+              "title": "Whisply/examExtraUsageNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/WhisplyExamExtraUsageNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Whisply/examExtraUsageNotification",
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "enum": [
@@ -8284,7 +8305,7 @@
             "type": "string"
           },
           {
-            "description": "Count sampled output and later growth after the carried window prefix.",
+            "description": "Count sampled output and later growth after the carried window prefix. Prefer this when the always-present system/tools floor must not drive automatic compaction or fill the context meter by itself.",
             "enum": [
               "body_after_prefix"
             ],
@@ -12473,6 +12494,30 @@
               "type"
             ],
             "title": "RequestPermissionsGuardianApprovalReviewAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cwd": {
+                "$ref": "#/definitions/v2/AbsolutePathBuf"
+              },
+              "toolId": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "firstPartyTool"
+                ],
+                "title": "FirstPartyToolGuardianApprovalReviewActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cwd",
+              "toolId",
+              "type"
+            ],
+            "title": "FirstPartyToolGuardianApprovalReviewAction",
             "type": "object"
           }
         ]
@@ -23922,6 +23967,25 @@
             "type": "string"
           }
         ]
+      },
+      "WhisplyExamExtraUsageNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "description": "Worker header proved this turn is using extra Exam Usage reserved for the session. The thread and turn are required so the notice cannot be drawn into another conversation.",
+        "properties": {
+          "threadID": {
+            "type": "string"
+          },
+          "turnID": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadID",
+          "turnID"
+        ],
+        "title": "WhisplyExamExtraUsageNotification",
+        "type": "object"
       },
       "WhisplyHistoryRecoveryFrame": {
         "additionalProperties": false,

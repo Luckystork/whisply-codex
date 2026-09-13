@@ -556,6 +556,7 @@ export type { WhisplyCompactionReadParams } from "./WhisplyCompactionReadParams"
 export type { WhisplyCompactionReadResponse } from "./WhisplyCompactionReadResponse";
 export type { WhisplyCompactionRecord } from "./WhisplyCompactionRecord";
 export type { WhisplyCompactionTrigger } from "./WhisplyCompactionTrigger";
+export type { WhisplyExamExtraUsageNotification } from "./WhisplyExamExtraUsageNotification";
 export type { WhisplyExecutionEnvelope } from "./WhisplyExecutionEnvelope";
 export type { WhisplyModelCatalogAvailability } from "./WhisplyModelCatalogAvailability";
 export type { WhisplyModelCatalogCapabilities } from "./WhisplyModelCatalogCapabilities";

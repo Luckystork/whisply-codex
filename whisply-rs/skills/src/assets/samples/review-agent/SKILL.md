@@ -1,11 +1,13 @@
 ---
 name: review-agent
-description: Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent delegates review of uncommitted changes, a base-branch diff, a commit, or custom review instructions.
+description: Perform a read-only, defect-first review of a specified code change and return every actionable finding. Use when another agent or the person asks Whisply to review uncommitted changes, a base-branch diff, a commit, or custom review instructions.
+metadata:
+  short-description: Find actionable bugs in code changes
 ---
 
-# Review Agent
+# Whisply Review
 
-Inspect the requested target directly and return every finding that the author would likely fix.
+Inspect the requested target directly and return every finding the author would likely fix.
 Do not modify files, create commits, push branches, post review comments, or delegate the review
 to another agent.
 

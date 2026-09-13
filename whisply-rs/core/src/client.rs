@@ -120,15 +120,6 @@ use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
 
-fn exam_turn_proof_unavailable() -> ApiError {
-    ApiError::Transport(TransportError::Http {
-        status: StatusCode::FORBIDDEN, url: None, headers: None,
-        body: Some(serde_json::json!({ "error": {
-            "code": "whisply_exam_reconnect_required",
-            "message": "This Exam turn’s session changed or expired. Send a new request after Exam Mode reconnects."
-        }}).to_string()),
-    })
-}
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -1287,49 +1278,58 @@ impl ModelClientSession {
         let is_whisply_direct = self.client.is_whisply_direct_provider();
         let exam_proof = if is_whisply_direct {
             if let Some(reference) = responses_metadata.exam_turn_reference {
-                let gateway = codex_whisply::managed_gateway_client_from_environment()
-                    .map_err(|_| exam_turn_proof_unavailable())?
-                    .ok_or_else(exam_turn_proof_unavailable)?;
+                let gateway = match codex_whisply::managed_gateway_client_from_environment() {
+                    Ok(Some(gateway)) => Some(gateway),
+                    _ => None,
+                };
                 let thread = responses_metadata.thread_id.clone();
-                let turn = responses_metadata
-                    .turn_id
-                    .clone()
-                    .ok_or_else(exam_turn_proof_unavailable)?;
+                let turn = responses_metadata.turn_id.clone();
                 let parent = if crate::guardian::is_guardian_reviewer_source(
                     &self.client.state.session_source,
                 ) {
-                    Some((
-                        responses_metadata
-                            .parent_thread_id
-                            .ok_or_else(exam_turn_proof_unavailable)?
-                            .to_string(),
-                        responses_metadata
-                            .parent_turn_id
-                            .clone()
-                            .ok_or_else(exam_turn_proof_unavailable)?,
-                    ))
+                    match (
+                        responses_metadata.parent_thread_id,
+                        responses_metadata.parent_turn_id.clone(),
+                    ) {
+                        (Some(parent_thread), Some(parent_turn)) => {
+                            Some((parent_thread.to_string(), parent_turn))
+                        }
+                        _ => None,
+                    }
                 } else {
                     None
                 };
-                let proof = tokio::task::spawn_blocking(move || {
-                    gateway.exam_turn_proof(
-                        reference,
-                        &thread,
-                        &turn,
-                        parent
-                            .as_ref()
-                            .map(|(thread, turn)| (thread.as_str(), turn.as_str())),
-                    )
-                })
-                .await
-                .map_err(|_| exam_turn_proof_unavailable())?
-                .map_err(|_| exam_turn_proof_unavailable())?;
-                if !proof.is_current()
-                    || proof.installation_id() != responses_metadata.installation_id
-                {
-                    return Err(exam_turn_proof_unavailable());
+                let proof = if let (Some(gateway), Some(turn)) = (gateway, turn) {
+                    tokio::task::spawn_blocking(move || {
+                        gateway.exam_turn_proof(
+                            reference,
+                            &thread,
+                            &turn,
+                            parent
+                                .as_ref()
+                                .map(|(thread, turn)| (thread.as_str(), turn.as_str())),
+                        )
+                    })
+                    .await
+                    .ok()
+                    .and_then(|result| result.ok())
+                } else {
+                    None
+                };
+                match proof {
+                    Some(proof)
+                        if proof.is_current()
+                            && proof.installation_id() == responses_metadata.installation_id =>
+                    {
+                        Some(proof)
+                    }
+                    _ => {
+                        warn!(
+                            "exam reservation lapsed; continuing this turn on ordinary Usage"
+                        );
+                        None
+                    }
                 }
-                Some(proof)
             } else {
                 None
             }
@@ -1349,10 +1349,14 @@ impl ModelClientSession {
                         headers.insert(X_WHISPLY_INSTALLATION_ID_HEADER, installation_id);
                     }
                     if let Some(proof) = exam_proof {
-                        let mut header = HeaderValue::from_str(proof.token())
-                            .map_err(|_| exam_turn_proof_unavailable())?;
-                        header.set_sensitive(true);
-                        headers.insert("x-whisply-usage-session", header);
+                        if let Ok(mut header) = HeaderValue::from_str(proof.token()) {
+                            header.set_sensitive(true);
+                            headers.insert("x-whisply-usage-session", header);
+                        } else {
+                            warn!(
+                                "exam reservation token was not a valid header; continuing on ordinary Usage"
+                            );
+                        }
                     }
                     headers
                 } else {

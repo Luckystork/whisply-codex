@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Worker header proved this turn is using extra Exam Usage reserved for the session. The thread and turn are required so the notice cannot be drawn into another conversation.",
+  "properties": {
+    "threadID": {
+      "type": "string"
+    },
+    "turnID": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "threadID",
+    "turnID"
+  ],
+  "title": "WhisplyExamExtraUsageNotification",
+  "type": "object"
+}

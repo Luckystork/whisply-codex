@@ -2177,6 +2177,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::ModelReroute(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
+        | EventMsg::WhisplyExamExtraUsage(_)
         | EventMsg::SafetyBuffering(_)
         | EventMsg::ContextCompacted(_)
         | EventMsg::ThreadRolledBack(_)
@@ -2902,6 +2903,9 @@ async fn try_run_sampling_request(
             ResponseEvent::TurnModerationMetadata(metadata) => {
                 sess.emit_turn_moderation_metadata(&turn_context, metadata)
                     .await;
+            }
+            ResponseEvent::WhisplyExamExtraUsage => {
+                sess.emit_whisply_exam_extra_usage(&turn_context).await;
             }
             ResponseEvent::SafetyBuffering(buffering) => {
                 sess.send_event(

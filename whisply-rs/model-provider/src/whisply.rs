@@ -88,7 +88,10 @@ pub const WHISPLY_GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum period without any gateway transport activity. SSE comments count
 /// as activity on the direct route, while remaining invisible to model event
 /// consumers.
-pub const WHISPLY_GATEWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// A long Computer Use / Browser / Assist run must not die because a
+/// watchdog guessed it was stuck. Stop only if the person taps Stop.
+/// Zero is not "never": the SSE loop treats a zero idle timeout as 1ms.
+pub const WHISPLY_GATEWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub use codex_whisply::ManagedGatewaySessionAvailability as WhisplyManagedSessionAvailability;
 
@@ -705,9 +708,93 @@ impl WhisplyModelProvider {
     }
 }
 
+const WHISPLY_REQUEST_NOT_STARTED: &str = "whisply_request_not_started";
+const WHISPLY_REQUEST_NOT_STARTED_MESSAGE: &str =
+    "The last model never started. Wait, then Assist again. This is not a mute.";
+
+fn is_managed_gateway_terminal_code(code: &str) -> bool {
+    matches!(
+        code,
+        "whisply_auth_expired"
+            | "whisply_subscription_required"
+            | "whisply_usage_limited"
+            | "whisply_usage_settlement_pending"
+            | "whisply_model_unavailable"
+            | "whisply_refused"
+            | "whisply_cancelled"
+            | "whisply_stopped"
+            | "whisply_exam_reconnect_required"
+            | "whisply_provider_unavailable"
+            | "whisply_funding_unavailable"
+            | "whisply_malformed_stream"
+            | "whisply_request_not_started"
+    )
+}
+
+fn public_whisply_error_json(
+    code: &str,
+    message: &str,
+    request_id: Option<&serde_json::Value>,
+    provider_status: Option<u16>,
+    provider_code: Option<&str>,
+) -> String {
+    let mut public_error = serde_json::json!({
+        "type": "whisply_error",
+        "code": code,
+        "message": message
+    });
+    if let Some(request_id) = request_id {
+        public_error["request_id"] = request_id.clone();
+    }
+    if let Some(status) = provider_status {
+        public_error["provider_status"] = status.into();
+    }
+    if let Some(provider_code) = provider_code.filter(|code| !code.is_empty()) {
+        public_error["provider_code"] = provider_code.into();
+    }
+    serde_json::json!({ "error": public_error }).to_string()
+}
+
+fn leftover_never_started_http(status: u16, body: Option<&str>) -> bool {
+    status == 502
+        && matches!(
+            leftover_http_error_code(body).as_deref(),
+            Some("upstream_never_started")
+                | Some("whisply_request_not_started")
+                | Some("provider_request_not_started")
+        )
+}
+
+fn leftover_http_error_code(body: Option<&str>) -> Option<String> {
+    let payload = serde_json::from_str::<serde_json::Value>(body?).ok()?;
+    let error = payload.get("error")?;
+    if let Some(code) = error.as_str().filter(|code| !code.is_empty()) {
+        return Some(code.to_ascii_lowercase());
+    }
+    error
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .filter(|code| !code.is_empty())
+        .map(|code| code.to_ascii_lowercase())
+}
+
+fn leftover_400_must_not_become_provider_unavailable(code: &str, status: u16) -> bool {
+    status == 400
+        && matches!(
+            code,
+            "whisply_provider_unavailable"
+                | "invalid_request"
+                | "invalid_request_error"
+                | "invalid_managed_request"
+                | "invalid_output_limit"
+        )
+}
+
 fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
     let ApiError::Transport(TransportError::Http {
-        body: Some(body), ..
+        status,
+        body: Some(body),
+        ..
     }) = error
     else {
         return None;
@@ -729,25 +816,82 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
             | "whisply_provider_unavailable"
             | "whisply_funding_unavailable"
             | "whisply_malformed_stream"
+            | "whisply_request_not_started"
     ) {
         return None;
     }
-    let message = error
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or("Whisply could not complete this request.");
-    let mut public_error = serde_json::json!({
-        "type": "whisply_error",
-        "code": code,
-        "message": message
-    });
-    if let Some(request_id) = error.get("request_id") {
-        public_error["request_id"] = request_id.clone();
+    let status = status.as_u16();
+    let (code, message) = if leftover_400_must_not_become_provider_unavailable(code, status) {
+        (WHISPLY_REQUEST_NOT_STARTED, WHISPLY_REQUEST_NOT_STARTED_MESSAGE)
+    } else {
+        (
+            code,
+            error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or(WHISPLY_REQUEST_NOT_STARTED_MESSAGE),
+        )
+    };
+    Some(CodexErr::InvalidRequest(public_whisply_error_json(
+        code,
+        message,
+        error.get("request_id"),
+        Some(status),
+        error
+            .get("provider_code")
+            .and_then(serde_json::Value::as_str),
+    )))
+}
+
+/// Pre-reserve transport and leftover 400s never reached Usage. Keep a typed
+/// code so Assist can recover instead of dying as an untyped turn stall.
+fn map_pre_reserve_gateway_failure(error: &ApiError) -> Option<CodexErr> {
+    match error {
+        ApiError::Transport(TransportError::Timeout) => Some(CodexErr::InvalidRequest(
+            public_whisply_error_json(
+                WHISPLY_REQUEST_NOT_STARTED,
+                WHISPLY_REQUEST_NOT_STARTED_MESSAGE,
+                None,
+                None,
+                None,
+            ),
+        )),
+        ApiError::Transport(TransportError::Network(_))
+        | ApiError::Transport(TransportError::Build(_)) => Some(CodexErr::InvalidRequest(
+            public_whisply_error_json(
+                WHISPLY_REQUEST_NOT_STARTED,
+                WHISPLY_REQUEST_NOT_STARTED_MESSAGE,
+                None,
+                None,
+                None,
+            ),
+        )),
+        ApiError::Transport(TransportError::Http { status, body, .. })
+            if status.as_u16() == 400
+                || leftover_never_started_http(status.as_u16(), body.as_deref()) =>
+        {
+            let leftover_code = leftover_http_error_code(body.as_deref());
+            if leftover_code.as_deref() == Some("cyber_policy") {
+                return None;
+            }
+            if leftover_code
+                .as_deref()
+                .is_some_and(is_managed_gateway_terminal_code)
+                && status.as_u16() == 400
+            {
+                return None;
+            }
+            Some(CodexErr::InvalidRequest(public_whisply_error_json(
+                WHISPLY_REQUEST_NOT_STARTED,
+                WHISPLY_REQUEST_NOT_STARTED_MESSAGE,
+                None,
+                Some(status.as_u16()),
+                leftover_code.as_deref(),
+            )))
+        }
+        _ => None,
     }
-    Some(CodexErr::InvalidRequest(
-        serde_json::json!({ "error": public_error }).to_string(),
-    ))
 }
 
 impl ModelProvider for WhisplyModelProvider {
@@ -786,6 +930,7 @@ impl ModelProvider for WhisplyModelProvider {
 
     fn map_api_error(&self, error: ApiError) -> CodexErr {
         map_managed_gateway_terminal_error(&error)
+            .or_else(|| map_pre_reserve_gateway_failure(&error))
             .unwrap_or_else(|| whisply_api::map_api_error(error))
     }
 
@@ -926,23 +1071,24 @@ mod tests {
     fn managed_terminal_http_errors_are_not_retried() {
         let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
 
-        for code in [
-            "whisply_auth_expired",
-            "whisply_subscription_required",
-            "whisply_funding_unavailable",
-            "whisply_usage_limited",
-            "whisply_model_unavailable",
-            "whisply_refused",
-            "whisply_cancelled",
-            "whisply_stopped",
-            "whisply_exam_reconnect_required",
-            "whisply_usage_settlement_pending",
-            "whisply_provider_unavailable",
-            "whisply_malformed_stream",
+        for (code, status) in [
+            ("whisply_auth_expired", http::StatusCode::UNAUTHORIZED),
+            ("whisply_subscription_required", http::StatusCode::FORBIDDEN),
+            ("whisply_funding_unavailable", http::StatusCode::SERVICE_UNAVAILABLE),
+            ("whisply_usage_limited", http::StatusCode::PAYMENT_REQUIRED),
+            ("whisply_model_unavailable", http::StatusCode::NOT_FOUND),
+            ("whisply_refused", http::StatusCode::BAD_REQUEST),
+            ("whisply_cancelled", http::StatusCode::BAD_REQUEST),
+            ("whisply_stopped", http::StatusCode::BAD_REQUEST),
+            ("whisply_exam_reconnect_required", http::StatusCode::BAD_REQUEST),
+            ("whisply_usage_settlement_pending", http::StatusCode::CONFLICT),
+            ("whisply_provider_unavailable", http::StatusCode::SERVICE_UNAVAILABLE),
+            ("whisply_malformed_stream", http::StatusCode::BAD_GATEWAY),
+            ("whisply_request_not_started", http::StatusCode::BAD_GATEWAY),
         ] {
             let expected = format!("public {code} message");
             let error = ApiError::Transport(TransportError::Http {
-                status: http::StatusCode::BAD_REQUEST,
+                status,
                 url: Some("https://gateway.invalid/v1/responses".to_string()),
                 headers: None,
                 body: Some(
@@ -967,6 +1113,99 @@ mod tests {
                 "{code}: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn leftover_400_is_not_mapped_to_provider_unavailable() {
+        let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
+
+        for (code, message) in [
+            (
+                "whisply_provider_unavailable",
+                "The model provider is temporarily unavailable. Try again.",
+            ),
+            ("invalid_request", "Unable to read request body."),
+            ("invalid_managed_request", "The Usage reservation exceeds the reviewed request window."),
+        ] {
+            let mapped = provider.map_api_error(ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::BAD_REQUEST,
+                url: Some("https://gateway.invalid/v1/responses".to_string()),
+                headers: None,
+                body: Some(
+                    serde_json::json!({
+                        "error": {
+                            "code": code,
+                            "message": message,
+                        },
+                    })
+                    .to_string(),
+                ),
+            }));
+            let rendered = mapped.to_string();
+            assert!(!mapped.is_retryable(), "{code} should stay terminal");
+            assert!(
+                rendered.contains(WHISPLY_REQUEST_NOT_STARTED),
+                "{code}: {rendered}"
+            );
+            assert!(
+                rendered.contains(WHISPLY_REQUEST_NOT_STARTED_MESSAGE),
+                "{code}: {rendered}"
+            );
+            assert!(
+                !rendered.contains("whisply_provider_unavailable"),
+                "leftover 400 must not keep provider_unavailable: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    #[test]
+    fn leftover_502_never_started_is_not_provider_unavailable() {
+        let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
+        for code in [
+            "upstream_never_started",
+            "whisply_request_not_started",
+            "provider_request_not_started",
+        ] {
+            let mapped = provider.map_api_error(ApiError::Transport(TransportError::Http {
+                status: http::StatusCode::BAD_GATEWAY,
+                url: Some("https://gateway.invalid/v1/responses".to_string()),
+                headers: None,
+                body: Some(
+                    serde_json::json!({
+                        "error": code,
+                        "detail": "The last model never started. Wait, then Assist again. This is not a mute.",
+                    })
+                    .to_string(),
+                ),
+            }));
+            let rendered = mapped.to_string();
+            assert!(
+                rendered.contains(WHISPLY_REQUEST_NOT_STARTED),
+                "{code}: {rendered}"
+            );
+            assert!(
+                rendered.contains(WHISPLY_REQUEST_NOT_STARTED_MESSAGE),
+                "{code}: {rendered}"
+            );
+            assert!(
+                !rendered.contains("whisply_provider_unavailable"),
+                "never-started 502 must not stay provider_unavailable: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_reserve_timeout_is_typed_request_not_started() {
+        let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
+        let mapped = provider.map_api_error(ApiError::Transport(TransportError::Timeout));
+        let rendered = mapped.to_string();
+        assert!(!mapped.is_retryable());
+        assert!(rendered.contains(WHISPLY_REQUEST_NOT_STARTED), "{rendered}");
+        assert!(
+            rendered.contains(WHISPLY_REQUEST_NOT_STARTED_MESSAGE),
+            "{rendered}"
+        );
     }
 
     #[test]

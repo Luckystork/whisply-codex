@@ -240,6 +240,21 @@ pub struct WhisplyToolProgress {
     pub icon_id: Option<String>,
 }
 
+/// Worker header proved this turn is using extra Exam Usage reserved for the
+/// session. The thread and turn are required so the notice cannot be drawn
+/// into another conversation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct WhisplyExamExtraUsageNotification {
+    #[serde(rename = "threadID")]
+    #[ts(rename = "threadID")]
+    pub thread_id: String,
+    #[serde(rename = "turnID")]
+    #[ts(rename = "turnID")]
+    pub turn_id: String,
+}
+
 /// A native owner reporting that an admitted call it is still running has
 /// reached a describable step.
 ///

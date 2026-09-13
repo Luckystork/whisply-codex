@@ -26,6 +26,7 @@ ACRONYMS = {
 }
 
 BRANDS = {
+    "whisply": "Whisply",
     "openai": "OpenAI",
     "openapi": "OpenAPI",
     "github": "GitHub",

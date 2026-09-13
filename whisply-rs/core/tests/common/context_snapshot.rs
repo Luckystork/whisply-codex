@@ -760,7 +760,7 @@ mod tests {
             "role": "developer",
             "content": [{
                 "type": "input_text",
-                "text": "## Skills\n- openai-docs: helper (file: /private/var/folders/yk/p4jp9nzs79s5q84csslkgqtm0000gn/T/.tmpAnGVww/skills/.system/openai-docs/SKILL.md)"
+                "text": "## Skills\n- skill-creator: helper (file: /private/var/folders/yk/p4jp9nzs79s5q84csslkgqtm0000gn/T/.tmpAnGVww/skills/.system/skill-creator/SKILL.md)"
             }]
         })];
 
@@ -768,7 +768,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "00:message/developer:## Skills\\n- openai-docs: helper (file: <SYSTEM_SKILLS_ROOT>/openai-docs/SKILL.md)"
+            "00:message/developer:## Skills\\n- skill-creator: helper (file: <SYSTEM_SKILLS_ROOT>/skill-creator/SKILL.md)"
         );
     }
 

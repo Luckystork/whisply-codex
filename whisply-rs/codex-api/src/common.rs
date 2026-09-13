@@ -85,6 +85,9 @@ pub enum ResponseEvent {
     ModelVerifications(Vec<ModelVerification>),
     /// Emitted when the server includes moderation metadata for first-party turn presentation.
     TurnModerationMetadata(TurnModerationMetadataEvent),
+    /// Emitted when the worker proves this turn is using extra Exam Usage.
+    /// Armed Exam and a prepared lease are not this proof.
+    WhisplyExamExtraUsage,
     /// Emitted when `X-Reasoning-Included: true` is present on the response,
     /// meaning the server already accounted for past reasoning tokens and the
     /// client should not re-estimate them.

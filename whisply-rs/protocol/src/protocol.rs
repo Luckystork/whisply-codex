@@ -1317,6 +1317,10 @@ pub enum EventMsg {
     /// Backend moderation metadata intended for first-party turn presentation.
     TurnModerationMetadata(TurnModerationMetadataEvent),
 
+    /// Worker header proved this turn is using extra Exam Usage reserved for
+    /// the session. Armed Exam and a prepared lease are not this proof.
+    WhisplyExamExtraUsage(WhisplyExamExtraUsageEvent),
+
     /// Backend indicates that response output is waiting on a safety review.
     SafetyBuffering(SafetyBufferingEvent),
 
@@ -1980,6 +1984,9 @@ pub struct ModelVerificationEvent {
 pub struct TurnModerationMetadataEvent {
     pub metadata: Value,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct WhisplyExamExtraUsageEvent {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct SafetyBufferingEvent {

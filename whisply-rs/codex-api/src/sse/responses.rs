@@ -32,7 +32,15 @@ const X_WHISPLY_TURN_STATE_HEADER: &str = "x-whisply-turn-state";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const WHISPLY_REQUEST_ID_HEADER: &str = "x-whisply-request-id";
+const WHISPLY_EXAM_EXTRA_USAGE_HEADER: &str = "x-whisply-exam-extra-usage";
 const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION: &str = "trusted_access_for_cyber";
+
+pub(crate) fn exam_extra_usage_from_headers(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(WHISPLY_EXAM_EXTRA_USAGE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == "1")
+}
 
 pub fn spawn_response_stream(
     stream_response: StreamResponse,
@@ -62,6 +70,7 @@ pub fn spawn_response_stream(
         .or_else(|| stream_response.headers.get(REQUEST_ID_HEADER))
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let exam_extra_usage = exam_extra_usage_from_headers(&stream_response.headers);
     let safety_buffering_treatment =
         treatment_from_headers(&stream_response.headers).unwrap_or_default();
     let turn_state_header = if heartbeat_comments_reset_idle {
@@ -91,6 +100,11 @@ pub fn spawn_response_stream(
         if reasoning_included {
             let _ = tx_event
                 .send(Ok(ResponseEvent::ServerReasoningIncluded(true)))
+                .await;
+        }
+        if exam_extra_usage {
+            let _ = tx_event
+                .send(Ok(ResponseEvent::WhisplyExamExtraUsage))
                 .await;
         }
         process_sse_with_treatment(
@@ -415,9 +429,7 @@ pub fn process_responses_event(
                     } else if is_usage_not_included(&error) {
                         response_error = ApiError::UsageNotIncluded;
                     } else if is_whisply_nonretryable_terminal_error(&error) {
-                        let message = error.message.unwrap_or_else(|| {
-                            "Whisply could not complete this request.".to_string()
-                        });
+                        let message = typed_whisply_terminal_message(&error);
                         response_error = ApiError::InvalidRequest { message };
                     } else if is_cyber_policy_error(&error) {
                         let message = cyber_policy_message(error.message);
@@ -757,8 +769,30 @@ fn is_whisply_nonretryable_terminal_error(error: &Error) -> bool {
                 | "whisply_provider_unavailable"
                 | "whisply_funding_unavailable"
                 | "whisply_malformed_stream"
+                | "whisply_request_not_started"
         )
     )
+}
+
+fn typed_whisply_terminal_message(error: &Error) -> String {
+    let code = error
+        .code
+        .as_deref()
+        .filter(|code| !code.trim().is_empty())
+        .unwrap_or("whisply_request_not_started");
+    let message = error
+        .message
+        .as_deref()
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("The last model never started. Wait, then Assist again. This is not a mute.");
+    serde_json::json!({
+        "error": {
+            "type": "whisply_error",
+            "code": code,
+            "message": message
+        }
+    })
+    .to_string()
 }
 
 fn is_cyber_policy_error(error: &Error) -> bool {
@@ -1244,10 +1278,18 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Err(ApiError::InvalidRequest { message }) => assert_eq!(
-                message,
-                "The model response ended without a complete terminal result."
-            ),
+            Err(ApiError::InvalidRequest { message }) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(message).expect("typed whisply envelope");
+                assert_eq!(
+                    parsed["error"]["code"],
+                    "whisply_malformed_stream"
+                );
+                assert_eq!(
+                    parsed["error"]["message"],
+                    "The model response ended without a complete terminal result."
+                );
+            }
             other => panic!("unexpected managed gateway error: {other:?}"),
         }
     }
@@ -1319,11 +1361,15 @@ mod tests {
             let events = collect_events(&[sse.as_bytes()]).await;
 
             assert_eq!(events.len(), 1, "{code}");
-            assert_matches!(
-                &events[0],
-                Err(ApiError::InvalidRequest { message: actual }) if actual == message,
-                "{code} should not be retryable"
-            );
+            match &events[0] {
+                Err(ApiError::InvalidRequest { message: actual }) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(actual).expect("typed whisply envelope");
+                    assert_eq!(parsed["error"]["code"], code, "{code}");
+                    assert_eq!(parsed["error"]["message"], message, "{code}");
+                }
+                other => panic!("{code} should not be retryable: {other:?}"),
+            }
         }
     }
 
@@ -1558,6 +1604,69 @@ mod tests {
             }
             other => panic!("expected server model event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn exam_extra_usage_header_is_only_the_worker_proof() {
+        let mut proven = HeaderMap::new();
+        proven.insert(
+            WHISPLY_EXAM_EXTRA_USAGE_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        assert!(exam_extra_usage_from_headers(&proven));
+
+        let mut padded = HeaderMap::new();
+        padded.insert(
+            WHISPLY_EXAM_EXTRA_USAGE_HEADER,
+            HeaderValue::from_static(" 1 "),
+        );
+        assert!(exam_extra_usage_from_headers(&padded));
+
+        let mut true_value = HeaderMap::new();
+        true_value.insert(
+            WHISPLY_EXAM_EXTRA_USAGE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        assert!(!exam_extra_usage_from_headers(&true_value));
+        assert!(!exam_extra_usage_from_headers(&HeaderMap::new()));
+    }
+
+    #[tokio::test]
+    async fn spawn_response_stream_emits_exam_extra_usage_only_from_worker_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WHISPLY_EXAM_EXTRA_USAGE_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        let completed = json!({
+            "type": "response.completed",
+            "response": { "id": "resp-exam-extra" }
+        });
+        let sse = format!("event: response.completed\ndata: {completed}\n\n");
+        let bytes = stream::iter(vec![Ok(Bytes::from(sse))]);
+        let stream_response = StreamResponse {
+            status: StatusCode::OK,
+            headers,
+            bytes: Box::pin(bytes),
+        };
+
+        let mut stream = spawn_response_stream(
+            stream_response,
+            idle_timeout(),
+            /*telemetry*/ None,
+            /*turn_state*/ None,
+            /*heartbeat_comments_reset_idle*/ false,
+        );
+        let mut events = Vec::new();
+        while let Some(event) = stream.rx_event.recv().await {
+            events.push(event.expect("expected ok event"));
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ResponseEvent::WhisplyExamExtraUsage))
+        );
     }
 
     #[tokio::test]

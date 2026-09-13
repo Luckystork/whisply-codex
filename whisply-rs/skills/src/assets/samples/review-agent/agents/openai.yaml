@@ -1,5 +1,5 @@
 interface:
-  display_name: "Review Agent"
+  display_name: "Whisply Review"
   short_description: "Find actionable bugs in code changes"
   default_prompt: "Use $review-agent to review the requested code changes and return actionable findings."
 policy:

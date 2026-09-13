@@ -386,6 +386,7 @@ use whisply_protocol::protocol::TokenCountEvent;
 use whisply_protocol::protocol::TokenUsage;
 use whisply_protocol::protocol::TokenUsageInfo;
 use whisply_protocol::protocol::TurnModerationMetadataEvent;
+use whisply_protocol::protocol::WhisplyExamExtraUsageEvent;
 use whisply_protocol::protocol::WarningEvent;
 use whisply_protocol::user_input::UserInput;
 use whisply_tools::UnifiedExecShellMode;
@@ -3380,6 +3381,17 @@ impl Session {
     ) {
         self.send_event(turn_context, EventMsg::TurnModerationMetadata(metadata))
             .await;
+    }
+
+    pub(crate) async fn emit_whisply_exam_extra_usage(
+        self: &Arc<Self>,
+        turn_context: &Arc<TurnContext>,
+    ) {
+        self.send_event(
+            turn_context,
+            EventMsg::WhisplyExamExtraUsage(WhisplyExamExtraUsageEvent {}),
+        )
+        .await;
     }
 
     #[cfg(test)]

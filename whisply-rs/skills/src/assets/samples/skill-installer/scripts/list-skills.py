@@ -11,8 +11,6 @@ import urllib.error
 
 from github_utils import github_api_contents_url, github_request
 
-DEFAULT_REPO = "openai/skills"
-DEFAULT_PATH = "skills/.curated"
 DEFAULT_REF = "main"
 
 
@@ -28,15 +26,18 @@ class Args(argparse.Namespace):
 
 
 def _request(url: str) -> bytes:
-    return github_request(url, "codex-skill-list")
+    return github_request(url, "whisply-skill-list")
 
 
-def _codex_home() -> str:
-    return os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+def _whisply_home() -> str:
+    value = os.environ.get("WHISPLY_HOME", "").strip()
+    if not value:
+        raise ListError("WHISPLY_HOME is not set. Whisply sets this for the signed-in account.")
+    return value
 
 
 def _installed_skills() -> set[str]:
-    root = os.path.join(_codex_home(), "skills")
+    root = os.path.join(_whisply_home(), "skills")
     if not os.path.isdir(root):
         return set()
     entries = set()
@@ -67,11 +68,11 @@ def _list_skills(repo: str, path: str, ref: str) -> list[str]:
 
 def _parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description="List skills.")
-    parser.add_argument("--repo", default=DEFAULT_REPO)
+    parser.add_argument("--repo", required=True, help="owner/repo to list")
     parser.add_argument(
         "--path",
-        default=DEFAULT_PATH,
-        help="Repo path to list (default: skills/.curated)",
+        required=True,
+        help="Repo path to list",
     )
     parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument(

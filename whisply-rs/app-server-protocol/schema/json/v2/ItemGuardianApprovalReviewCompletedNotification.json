@@ -500,6 +500,30 @@
           ],
           "title": "RequestPermissionsGuardianApprovalReviewAction",
           "type": "object"
+        },
+        {
+          "properties": {
+            "cwd": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "toolId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "firstPartyTool"
+              ],
+              "title": "FirstPartyToolGuardianApprovalReviewActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "cwd",
+            "toolId",
+            "type"
+          ],
+          "title": "FirstPartyToolGuardianApprovalReviewAction",
+          "type": "object"
         }
       ]
     },

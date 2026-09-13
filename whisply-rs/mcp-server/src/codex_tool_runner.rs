@@ -255,7 +255,8 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::GuardianWarning(_)
                     | EventMsg::ModelVerification(_)
                     | EventMsg::SafetyBuffering(_)
-                    | EventMsg::TurnModerationMetadata(_) => {
+                    | EventMsg::TurnModerationMetadata(_)
+                    | EventMsg::WhisplyExamExtraUsage(_) => {
                         continue;
                     }
                     EventMsg::GuardianAssessment(_) => {

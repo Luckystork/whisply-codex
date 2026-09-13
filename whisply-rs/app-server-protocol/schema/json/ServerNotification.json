@@ -1994,6 +1994,30 @@
           ],
           "title": "RequestPermissionsGuardianApprovalReviewAction",
           "type": "object"
+        },
+        {
+          "properties": {
+            "cwd": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "toolId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "firstPartyTool"
+              ],
+              "title": "FirstPartyToolGuardianApprovalReviewActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "cwd",
+            "toolId",
+            "type"
+          ],
+          "title": "FirstPartyToolGuardianApprovalReviewAction",
+          "type": "object"
         }
       ]
     },
@@ -5893,6 +5917,23 @@
         }
       ]
     },
+    "WhisplyExamExtraUsageNotification": {
+      "additionalProperties": false,
+      "description": "Worker header proved this turn is using extra Exam Usage reserved for the session. The thread and turn are required so the notice cannot be drawn into another conversation.",
+      "properties": {
+        "threadID": {
+          "type": "string"
+        },
+        "turnID": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadID",
+        "turnID"
+      ],
+      "type": "object"
+    },
     "WhisplyToolProgress": {
       "additionalProperties": false,
       "description": "Progress delivered through the normal typed item/event path.\n\nThe thread and turn are part of the notification because user-visible activity has to be attributable: an execution id alone cannot say which conversation a line belongs in, and treating it as routing authority would let one thread's progress be drawn into another.",
@@ -6800,6 +6841,27 @@
         "params"
       ],
       "title": "Whisply/tool/resultNotification",
+      "type": "object"
+    },
+    {
+      "description": "Worker header proved this turn is using extra Exam Usage reserved for the session. Armed Exam and a prepared lease are not this proof.",
+      "properties": {
+        "method": {
+          "enum": [
+            "whisply/exam-extra-usage"
+          ],
+          "title": "Whisply/examExtraUsageNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/WhisplyExamExtraUsageNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Whisply/examExtraUsageNotification",
       "type": "object"
     },
     {

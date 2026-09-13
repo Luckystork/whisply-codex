@@ -1817,6 +1817,9 @@ server_notification_definitions! {
     /// is distinct from generic dynamic tools so setup/confirmation suspension
     /// cannot be projected as an automatic success.
     WhisplyToolResult => "whisply/tool/result" (v2::WhisplyToolResult),
+    /// Worker header proved this turn is using extra Exam Usage reserved for
+    /// the session. Armed Exam and a prepared lease are not this proof.
+    WhisplyExamExtraUsage => "whisply/exam-extra-usage" (v2::WhisplyExamExtraUsageNotification),
     McpServerOauthLoginCompleted => "mcpServer/oauthLogin/completed" (v2::McpServerOauthLoginCompletedNotification),
     McpServerStatusUpdated => "mcpServer/startupStatus/updated" (v2::McpServerStatusUpdatedNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
