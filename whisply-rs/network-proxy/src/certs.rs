@@ -184,9 +184,21 @@ pub(crate) struct ManagedMitmCaTrustBundle {
 }
 
 fn managed_ca_dir() -> Result<PathBuf> {
-    let codex_home =
-        find_codex_home().context("failed to resolve WHISPLY_HOME for managed MITM CA")?;
-    Ok(codex_home.join(MANAGED_MITM_CA_DIR).to_path_buf())
+    match find_codex_home() {
+        Ok(codex_home) => Ok(codex_home.join(MANAGED_MITM_CA_DIR).to_path_buf()),
+        Err(err) => {
+            // Isolated tests and leftover ordinary-Usage sessions can start
+            // without a writable WHISPLY_HOME. Keep the proxy local to this
+            // process instead of failing the turn.
+            warn!("WHISPLY_HOME unavailable for managed MITM CA ({err}); using a process-local directory");
+            let dir = std::env::temp_dir()
+                .join("whisply-mitm-ca")
+                .join(std::process::id().to_string());
+            std::fs::create_dir_all(&dir)
+                .context("failed to create process-local managed MITM CA directory")?;
+            Ok(dir)
+        }
+    }
 }
 
 pub(crate) fn managed_ca_trust_bundle(

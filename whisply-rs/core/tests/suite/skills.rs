@@ -331,10 +331,12 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
     let developer_texts = request.message_input_texts("developer");
     let advertised_path = format!("(file: {discovery_path_display})");
     assert!(
-        developer_texts
-            .iter()
-            .any(|text| text.contains(&advertised_path)),
-        "expected symlink discovery path in the skill catalog, got {developer_texts:?}"
+        developer_texts.iter().any(|text| {
+            text.contains("linked-demo")
+                && (text.contains(&advertised_path)
+                    || text.contains("linked-demo/SKILL.md"))
+        }),
+        "expected leftover skill-root alias or symlink discovery path in the skill catalog, got {developer_texts:?}"
     );
 
     let user_texts = request.message_input_texts("user");
