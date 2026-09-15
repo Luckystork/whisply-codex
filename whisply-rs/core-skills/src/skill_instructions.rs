@@ -34,7 +34,7 @@ impl ContextualUserFragment for SkillInstructions {
 
     fn body(&self) -> String {
         format!(
-            "\n<name>{}</name>\n<path>{}</path>\n{}\n",
+            "\n<name>{}</name>\n<path>{}</path>\nAlready loaded: follow these instructions. Do not open, cat, or exec_command this path.\n{}\n",
             self.name, self.path, self.contents
         )
     }

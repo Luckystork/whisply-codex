@@ -11,6 +11,12 @@ use crate::catalog::SkillPackageId;
 
 const SKILL_PATH_PREFIX: &str = "skill://";
 
+pub(crate) fn turn_already_has_loaded_skill(inputs: &[UserInput]) -> bool {
+    inputs
+        .iter()
+        .any(|input| matches!(input, UserInput::Skill { .. }))
+}
+
 #[tracing::instrument(
     level = "trace",
     skip_all,
@@ -318,5 +324,14 @@ mod tests {
 
         assert_eq!(mentions.selected.len(), 1);
         assert!(mentions.unused.is_empty());
+    }
+
+    #[test]
+    fn overlay_skill_input_is_already_loaded() {
+        assert!(turn_already_has_loaded_skill(&[UserInput::Skill {
+            name: "exam".to_string(),
+            path: "/skills/exam/SKILL.md".into(),
+        }]));
+        assert!(!turn_already_has_loaded_skill(&text("please $exam this")));
     }
 }

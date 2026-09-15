@@ -403,7 +403,7 @@ pub fn first_party_tool_registry() -> ToolRegistry {
                         "action": {
                             "type": "string",
                             "enum": COMPUTER_USE_ACTIONS,
-                            "description": "list_apps and the first targetless get_app_state may omit targetID. Every state-changing action names its current signed target; a later action may name another app to continue the same workflow there. perform_actions executes 2-12 ordered click steps from one current observation and returns one fresh final state."
+                            "description": "list_apps lists currently open eligible apps and may omit targetID. When the person did not name an app, call list_apps then get_app_state on the matching open app. Never target Whisply. Every state-changing action names its current signed target; a later action may name another app to continue the same workflow there. perform_actions executes 2-12 ordered click steps from one current observation and returns one fresh final state."
                         },
                         "targetID": {
                             "type": "string",

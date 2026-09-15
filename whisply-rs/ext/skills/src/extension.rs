@@ -58,6 +58,7 @@ use crate::render::truncate_utf8_to_bytes;
 use crate::render_observability::CatalogSurface;
 use crate::render_observability::record_catalog_render;
 use crate::selection::collect_explicit_skill_mentions;
+use crate::selection::turn_already_has_loaded_skill;
 use crate::shadow_selection_experiment::ShadowSelectionExperiment;
 use crate::sources::SkillProviders;
 use crate::state::ExecutorSkillsStepState;
@@ -415,7 +416,10 @@ where
             thread_state
                 .replace_shadow_selection_turn(input.turn_id.clone(), shadow_selection_turn);
             let mut fragments: Vec<Box<dyn ContextualUserFragment + Send>> = Vec::new();
-            if config.include_instructions && !host_catalog_in_world_state {
+            if config.include_instructions
+                && !host_catalog_in_world_state
+                && !turn_already_has_loaded_skill(&input.user_input)
+            {
                 let mut turn_catalog = catalog.clone();
                 turn_catalog.entries.retain(|entry| {
                     entry.authority.kind != SkillSourceKind::Executor

@@ -711,6 +711,8 @@ impl WhisplyModelProvider {
 const WHISPLY_REQUEST_NOT_STARTED: &str = "whisply_request_not_started";
 const WHISPLY_REQUEST_NOT_STARTED_MESSAGE: &str =
     "The last model never started. Wait, then Assist again. This is not a mute.";
+const PROVIDER_BUSY_RETRY_DELAY: Duration = Duration::from_secs(1);
+const PROVIDER_BUSY_RETRY_DELAY_MAX: Duration = Duration::from_secs(5);
 
 fn is_managed_gateway_terminal_code(code: &str) -> bool {
     matches!(
@@ -778,6 +780,29 @@ fn leftover_http_error_code(body: Option<&str>) -> Option<String> {
         .map(|code| code.to_ascii_lowercase())
 }
 
+fn is_whisply_provider_busy(code: &str, status: u16, provider_code: Option<&str>) -> bool {
+    code == "whisply_provider_unavailable"
+        && status == 429
+        && matches!(provider_code, None | Some("provider_busy"))
+}
+
+fn provider_busy_retry_delay(error: &serde_json::Map<String, serde_json::Value>) -> Duration {
+    let from_ms = error
+        .get("retry_after_ms")
+        .and_then(serde_json::Value::as_u64)
+        .map(Duration::from_millis);
+    let from_secs = error.get("retry_after").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            .map(Duration::from_secs)
+    });
+    from_ms
+        .or(from_secs)
+        .unwrap_or(PROVIDER_BUSY_RETRY_DELAY)
+        .clamp(Duration::from_millis(250), PROVIDER_BUSY_RETRY_DELAY_MAX)
+}
+
 fn leftover_400_must_not_become_provider_unavailable(code: &str, status: u16) -> bool {
     status == 400
         && matches!(
@@ -821,6 +846,9 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
         return None;
     }
     let status = status.as_u16();
+    let provider_code = error
+        .get("provider_code")
+        .and_then(serde_json::Value::as_str);
     let (code, message) = if leftover_400_must_not_become_provider_unavailable(code, status) {
         (WHISPLY_REQUEST_NOT_STARTED, WHISPLY_REQUEST_NOT_STARTED_MESSAGE)
     } else {
@@ -833,15 +861,19 @@ fn map_managed_gateway_terminal_error(error: &ApiError) -> Option<CodexErr> {
                 .unwrap_or(WHISPLY_REQUEST_NOT_STARTED_MESSAGE),
         )
     };
-    Some(CodexErr::InvalidRequest(public_whisply_error_json(
+    let public = public_whisply_error_json(
         code,
         message,
         error.get("request_id"),
         Some(status),
-        error
-            .get("provider_code")
-            .and_then(serde_json::Value::as_str),
-    )))
+        provider_code,
+    );
+    if is_whisply_provider_busy(code, status, provider_code) {
+        return Some(
+            CodexErr::Stream(public).with_retry_delay(provider_busy_retry_delay(error)),
+        );
+    }
+    Some(CodexErr::InvalidRequest(public))
 }
 
 /// Pre-reserve transport and leftover 400s never reached Usage. Keep a typed
@@ -1113,6 +1145,57 @@ mod tests {
                 "{code}: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn provider_busy_429_is_retryable_before_model_output() {
+        let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
+        let mapped = provider.map_api_error(ApiError::Transport(TransportError::Http {
+            status: http::StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://gateway.invalid/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": {
+                        "code": "whisply_provider_unavailable",
+                        "message": "The selected model provider could not start this response. Try again.",
+                        "provider_status": 429,
+                        "provider_code": "provider_busy",
+                        "retry_after_ms": 1_000,
+                    },
+                })
+                .to_string(),
+            ),
+        }));
+        let rendered = mapped.to_string();
+        assert!(mapped.is_retryable(), "{rendered}");
+        assert_eq!(mapped.retry_delay(), Some(Duration::from_secs(1)));
+        assert!(rendered.contains("whisply_provider_unavailable"), "{rendered}");
+        assert!(rendered.contains("provider_busy"), "{rendered}");
+    }
+
+    #[test]
+    fn provider_daily_limit_429_stays_terminal() {
+        let provider = WhisplyModelProvider::without_gateway(whisply_provider_info());
+        let mapped = provider.map_api_error(ApiError::Transport(TransportError::Http {
+            status: http::StatusCode::TOO_MANY_REQUESTS,
+            url: Some("https://gateway.invalid/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                serde_json::json!({
+                    "error": {
+                        "code": "whisply_provider_unavailable",
+                        "message": "The selected model provider could not start this response. Try again.",
+                        "provider_status": 429,
+                        "provider_code": "provider_daily_limit_reached",
+                    },
+                })
+                .to_string(),
+            ),
+        }));
+        let rendered = mapped.to_string();
+        assert!(!mapped.is_retryable(), "{rendered}");
+        assert!(rendered.contains("whisply_provider_unavailable"), "{rendered}");
     }
 
     #[test]

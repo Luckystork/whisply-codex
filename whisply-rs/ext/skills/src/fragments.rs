@@ -97,6 +97,8 @@ impl ContextualUserFragment for SkillInstructions {
                 format!("\n<resource_access>{metadata}</resource_access>")
             })
             .unwrap_or_default();
-        format!("\n<name>{name}</name>\n<path>{path}</path>{resource_access}\n{contents}\n")
+        format!(
+            "\n<name>{name}</name>\n<path>{path}</path>{resource_access}\nAlready loaded: follow these instructions. Do not open, cat, or exec_command this path.\n{contents}\n"
+        )
     }
 }

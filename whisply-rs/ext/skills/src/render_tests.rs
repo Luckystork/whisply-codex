@@ -415,6 +415,8 @@ fn mixed_catalogs_keep_absolute_authority_aware_rendering_under_budget_pressure(
     assert!(!body.contains("### Skill roots"));
     assert!(body.contains(&format!("(file: {root}/skill-0/SKILL.md)")));
     assert!(body.contains("(environment resource: skill://executor/demo/SKILL.md)"));
+    assert!(body.contains("If this turn already includes a `<skill>` block"));
+    assert!(body.contains("Do not open, cat, exec_command"));
     assert!(body.contains("For a `file` entry, open the listed path."));
     assert!(!body.contains("additional skills omitted"));
 }
