@@ -200,7 +200,7 @@ async fn installed_extension_uses_host_service_snapshot() -> TestResult {
         "{SKILLS_INSTRUCTIONS_OPEN_TAG}\n## Skills\n{SKILLS_INTRO_WITH_ABSOLUTE_PATHS}\n### Available skills\n- demo: Demo skill. (file: {skill_prompt_path})\n{SKILLS_INSTRUCTIONS_CLOSE_TAG}"
     );
     let expected_skill = format!(
-        "<skill>\n<name>demo</name>\n<path>{skill_prompt_path}</path>\n{DEMO_SKILL_CONTENTS}\n</skill>"
+        "<skill>\n<name>demo</name>\n<path>{skill_prompt_path}</path>\nAlready loaded: follow these instructions. Do not open, cat, or exec_command this path.\n{DEMO_SKILL_CONTENTS}\n</skill>"
     );
     assert_eq!(
         vec![("developer", expected_catalog), ("user", expected_skill),],
